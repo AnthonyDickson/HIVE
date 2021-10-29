@@ -1,0 +1,7 @@
+scipy==1.7.1
+numpy==1.21.3
+openmesh==1.1.6
+Pillow==8.3.2
+psutil==5.8.0
+trimesh==3.9.34
+opencv-python==4.5.4.58
