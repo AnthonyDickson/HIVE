@@ -3,7 +3,6 @@ import os
 import shutil
 import struct
 import time
-from dataclasses import dataclass
 from multiprocessing.pool import ThreadPool
 from typing import Optional
 
@@ -14,16 +13,16 @@ import psutil
 import torch
 import trimesh
 from PIL import Image
-from scipy.spatial import Delaunay
-from torch.utils.data import Dataset, DataLoader
-
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
 from detectron2.utils.logger import setup_logger
+from scipy.spatial import Delaunay
+from torch.utils.data import Dataset, DataLoader
 
 setup_logger()
+
 
 # Load image from binary file in the same way as read in C++ with
 # #include "compphotolib/core/CvUtil.h"
@@ -90,13 +89,12 @@ def save_raw_float32_image(file_name, image):
         buffersize = max(16 * 1024 ** 2 // image.itemsize, 1)
 
         for chunk in np.nditer(
-            float32_image,
-            flags=["external_loop", "buffered", "zerosize_ok"],
-            buffersize=buffersize,
-            order="F",
+                float32_image,
+                flags=["external_loop", "buffered", "zerosize_ok"],
+                buffersize=buffersize,
+                order="F",
         ):
             f.write(chunk.tobytes("C"))
-
 
 
 class ImageFolderDataset(Dataset):
@@ -181,8 +179,15 @@ class Timer:
         self.stop()
 
 
-@dataclass
-class StorageOptions:
+class ReprMixin:
+    def __repr__(self):
+        return f"{self.__class__.__name__}({', '.join(list(map(lambda k: f'{k}={self.__getattribute__(k)}', self.__dict__)))})"
+
+    def __str__(self):
+        return repr(self)
+
+
+class StorageOptions(ReprMixin):
     """Options regarding storage of inputs and outputs."""
 
     def __init__(self, base_folder, colour_folder='colour', depth_folder='depth', mask_folder='mask',
@@ -237,8 +242,7 @@ class StorageOptions:
         )
 
 
-@dataclass
-class MeshDecimationOptions:
+class MeshDecimationOptions(ReprMixin):
     """Options for mesh decimation."""
 
     def __init__(self, num_vertices_background=2 ** 14, num_vertices_object=2 ** 10, max_error=0.001):
@@ -271,8 +275,7 @@ class MeshDecimationOptions:
         )
 
 
-@dataclass
-class MaskDilationOptions:
+class MaskDilationOptions(ReprMixin):
     """Options for the function `dilate_mask`."""
 
     def __init__(self, num_iterations=3, dilation_filter=cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))):
@@ -298,8 +301,7 @@ class MaskDilationOptions:
         return MaskDilationOptions(num_iterations=args.dilate_mask_iter)
 
 
-@dataclass
-class MeshFilteringOptions:
+class MeshFilteringOptions(ReprMixin):
     """Options for filtering mesh faces."""
 
     def __init__(self, max_pixel_distance=2, max_depth_distance=0.02, min_num_components=5):
@@ -511,7 +513,7 @@ class Video2Mesh:
     def validate_folder_structure(self):
         storage = self.storage_options
         error_message = "Could not access folder {}. Either: it does not exist; " \
-            "there was a typo in the path; or Python does not have sufficient privileges.".format
+                        "there was a typo in the path; or Python does not have sufficient privileges.".format
 
         assert os.path.isdir(storage.base_folder), error_message(storage.base_folder)
         assert os.path.isdir(storage.colour_folder), error_message(storage.colour_folder)
@@ -577,6 +579,7 @@ class Video2Mesh:
         :param mask_folder: The path to save the masks to.
         :param overwrite_ok: Whether it is okay to write over any mask files in `mask_folder` if it already exists.
         """
+
         class BatchPredictor(DefaultPredictor):
             """Run d2 on a list of images."""
 
