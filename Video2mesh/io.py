@@ -2,6 +2,7 @@ import os
 import struct
 from multiprocessing.pool import ThreadPool
 
+import cv2
 import numpy as np
 import psutil
 import torch
@@ -148,23 +149,20 @@ def load_input_data(storage_options, batch_size=-1, should_create_masks=False, t
 
     pool = ThreadPool(psutil.cpu_count(logical=False))
 
-    rgb_frames = pool.map(Image.open, ImageFolderDataset(storage.colour_folder).image_paths)
-    depth_maps = pool.map(Image.open, ImageFolderDataset(storage.depth_folder).image_paths)
-    masks = pool.map(Image.open, ImageFolderDataset(storage.mask_folder).image_paths)
+    rgb_frames = pool.map(cv2.imread, ImageFolderDataset(storage.colour_folder).image_paths)
+    depth_maps = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE),
+                          ImageFolderDataset(storage.depth_folder).image_paths)
+    masks = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE),
+                     ImageFolderDataset(storage.mask_folder).image_paths)
     timer.split('load frame data to RAM')
-
-    rgb_frames = pool.map(lambda image: image.convert("RGB"), rgb_frames)
-    timer.split('convert colour frames to RGB format')
-
-    rgb_frames = pool.map(np.asarray, rgb_frames)
-    depth_maps = pool.map(np.asarray, depth_maps)
-    masks = pool.map(np.asarray, masks)
-    timer.split('map PILLOW images to NumPy')
 
     rgb_frames = np.asarray(rgb_frames)
     depth_maps = np.asarray(depth_maps)
     masks = np.asarray(masks)
     timer.split('concatenate frame data into NumPy array')
+
+    rgb_frames = rgb_frames[:, :, :, ::-1]
+    timer.split('convert frames from BGR to RGB')
 
     rgb_frames = np.flip(rgb_frames, axis=1)
     depth_maps = np.flip(depth_maps, axis=1)
@@ -315,7 +313,6 @@ def numpy_to_ply(vertex, color=None, normals=None):
 
 def write_ply(full_name, vertex_data, face_data=None, meshcolor=0, face_uv=None, face_colors=None,
               texture_name='Parameterization.jpg'):
-
     write_normals = False
     if 'nx' in list(vertex_data[0].keys()):
         write_normals = True

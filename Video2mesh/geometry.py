@@ -37,7 +37,7 @@ def get_pose_components(pose):
     return R, t
 
 
-def point_cloud_from_depth(depth, mask, K, R, t, scale_factor=1.0):
+def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
     points2d = np.array([U, V]).T
