@@ -1,245 +1,21 @@
 import argparse
 import os
 import shutil
-import struct
-import time
-from multiprocessing.pool import ThreadPool
-from typing import Optional
 
 import cv2
 import numpy as np
 import openmesh as om
-import psutil
-import torch
 import trimesh
 from PIL import Image
-from detectron2 import model_zoo
-from detectron2.config import get_cfg
-from detectron2.data import MetadataCatalog
-from detectron2.engine import DefaultPredictor
 from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
-from torch.utils.data import Dataset, DataLoader
+
+from Video2mesh.io import load_input_data, load_camera_parameters
+from Video2mesh.options import StorageOptions, ReprMixin
+from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
+from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
 
 setup_logger()
-
-
-# Load image from binary file in the same way as read in C++ with
-# #include "compphotolib/core/CvUtil.h"
-# freadimg(fileName, image);
-def load_raw_float32_image(file_name):
-    with open(file_name, "rb") as f:
-        CV_CN_MAX = 512
-        CV_CN_SHIFT = 3
-        CV_32F = 5
-        I_BYTES = 4
-        Q_BYTES = 8
-
-        h = struct.unpack("i", f.read(I_BYTES))[0]
-        w = struct.unpack("i", f.read(I_BYTES))[0]
-
-        cv_type = struct.unpack("i", f.read(I_BYTES))[0]
-        pixel_size = struct.unpack("Q", f.read(Q_BYTES))[0]
-        d = ((cv_type - CV_32F) >> CV_CN_SHIFT) + 1
-        assert d >= 1
-        d_from_pixel_size = pixel_size // 4
-        if d != d_from_pixel_size:
-            raise Exception(
-                "Incompatible pixel_size(%d) and cv_type(%d)" % (pixel_size, cv_type)
-            )
-        if d > CV_CN_MAX:
-            raise Exception("Cannot save image with more than 512 channels")
-
-        data = np.frombuffer(f.read(), dtype=np.float32)
-        result = data.reshape(h, w) if d == 1 else data.reshape(h, w, d)
-        return result
-
-
-# Save image to binary file, so that it can be read in C++ with
-# #include "compphotolib/core/CvUtil.h"
-# freadimg(fileName, image);
-def save_raw_float32_image(file_name, image):
-    with open(file_name, "wb") as f:
-        CV_CN_MAX = 512
-        CV_CN_SHIFT = 3
-        CV_32F = 5
-
-        dims = image.shape
-
-        d = 1
-        if len(dims) == 2:
-            h, w = image.shape
-            float32_image = np.transpose(image).astype(np.float32)
-        else:
-            h, w, d = image.shape
-            float32_image = np.transpose(image, [2, 1, 0]).astype("float32")
-
-        cv_type = CV_32F + ((d - 1) << CV_CN_SHIFT)
-
-        pixel_size = d * 4
-
-        if d > CV_CN_MAX:
-            raise Exception("Cannot save image with more than 512 channels")
-        f.write(struct.pack("i", h))
-        f.write(struct.pack("i", w))
-        f.write(struct.pack("i", cv_type))
-        f.write(struct.pack("Q", pixel_size))  # Write size_t ~ uint64_t
-
-        # Set buffer size to 16 MiB to hide the Python loop overhead.
-        buffersize = max(16 * 1024 ** 2 // image.itemsize, 1)
-
-        for chunk in np.nditer(
-                float32_image,
-                flags=["external_loop", "buffered", "zerosize_ok"],
-                buffersize=buffersize,
-                order="F",
-        ):
-            f.write(chunk.tobytes("C"))
-
-
-class ImageFolderDataset(Dataset):
-    def __init__(self, base_dir, transform=None):
-        assert os.path.isdir(base_dir), f"Could not find the folder: {base_dir}"
-
-        self.base_dir = base_dir
-        self.transform = transform
-
-        filenames = list(sorted(os.listdir(base_dir)))
-        assert len(filenames) > 0, f"No files found in the folder: {base_dir}"
-
-        self.image_paths = [os.path.join(base_dir, filename) for filename in filenames]
-
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-
-        if image_path.endswith('.raw'):
-            image = load_raw_float32_image(image_path)
-        else:
-            image = Image.open(image_path)
-
-            if image.mode != 'L':
-                image = image.convert('RGB')
-
-            image = np.asarray(image)
-
-        if self.transform:
-            image = self.transform(image)
-
-        return image
-
-    def __len__(self):
-        return len(self.image_paths)
-
-
-class Timer:
-    def __init__(self):
-        self.start_time = time.time()
-        self.stop_time = time.time()
-
-        self.splits = [0.0]
-        self.split_names = ['start']
-
-    def start(self):
-        self.start_time = time.time()
-
-    def split(self, split_name: Optional[str] = None, verbose=True):
-        elapsed = time.time() - self.start_time
-        self.splits.append(elapsed)
-        self.split_names.append(split_name or '')
-
-        if verbose:
-            print(self.split_to_string(i=-1))
-
-        return elapsed
-
-    def split_to_string(self, i=-1):
-        elapsed = self.splits[i]
-        split_name = self.split_names[i]
-
-        elapsed_precision = 2 if elapsed > 1.0 else 3
-        split_string = f"{split_name.capitalize()}: {elapsed:,.{elapsed_precision}f}"
-
-        if len(self.splits) > 1 and i != 0:
-            prev_time = self.splits[i - 1]
-
-            delta = elapsed - prev_time
-            delta_precision = 2 if delta > 1.0 else 3
-
-            split_string = f"{split_string} (+{delta:,.{delta_precision}f})"
-
-        return split_string
-
-    def stop(self):
-        self.stop_time = self.start_time + self.split('stop')
-
-    def __enter__(self):
-        self.start()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
-
-
-class ReprMixin:
-    def __repr__(self):
-        return f"{self.__class__.__name__}({', '.join(list(map(lambda k: f'{k}={self.__getattribute__(k)}', self.__dict__)))})"
-
-    def __str__(self):
-        return repr(self)
-
-
-class StorageOptions(ReprMixin):
-    """Options regarding storage of inputs and outputs."""
-
-    def __init__(self, base_folder, colour_folder='colour', depth_folder='depth', mask_folder='mask',
-                 output_folder='scene3d', overwrite_ok=False):
-        """
-        :param base_folder: Path to the folder containing the RGB and depth image folders.'
-        :param colour_folder: Name of the folder that contains the RGB images inside the folder `base_folder`.'
-        :param depth_folder: Name of the folder that contains the depth maps inside the folder `base_folder`.'
-        :param mask_folder: Name of the folder that contains the dynamic object masks inside the folder `base_folder`.'
-        :param output_folder: Name of the folder to save the results to (will be inside the folder `base_folder`).
-        :param overwrite_ok: Whether it is okay to replace old results.
-        """
-        self.base_folder = base_folder
-        self.colour_folder = os.path.join(base_folder, colour_folder)
-        self.depth_folder = os.path.join(base_folder, depth_folder)
-        self.mask_folder = os.path.join(base_folder, mask_folder)
-        self.output_folder = output_folder
-        self.overwrite_ok = overwrite_ok
-
-    @staticmethod
-    def add_args(parser: argparse.ArgumentParser):
-        group = parser.add_argument_group('Storage Options')
-
-        group.add_argument('--base_dir', type=str,
-                           help='Path to the folder containing the RGB and depth image folders.',
-                           required=True)
-        group.add_argument('--colour_dir', type=str,
-                           help='Name of the folder that contains the RGB images inside the folder `base_folder`.',
-                           default='colour')
-        group.add_argument('--depth_dir', type=str,
-                           help='Name of the folder that contains the depth maps inside the folder `base_folder`.',
-                           default='depth')
-        group.add_argument('--mask_dir', type=str,
-                           help='Name of the folder that contains the dynamic object masks inside the folder `base_folder`.',
-                           default='mask')
-        group.add_argument('--output_dir', type=str,
-                           help='Name of the folder to save the results to (will be inside the folder `base_folder`).',
-                           default='scene3d')
-
-        group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
-                           action='store_true')
-
-    @staticmethod
-    def from_args(args):
-        return StorageOptions(
-            base_folder=args.base_dir,
-            colour_folder=args.colour_dir,
-            depth_folder=args.depth_dir,
-            mask_folder=args.mask_dir,
-            output_folder=args.output_dir,
-            overwrite_ok=args.overwrite_ok
-        )
 
 
 class MeshDecimationOptions(ReprMixin):
@@ -362,10 +138,11 @@ class Video2Mesh:
 
         self.validate_folder_structure()
 
-        K, camera_trajectory = self.load_camera_parameters()
+        K, camera_trajectory = load_camera_parameters(self.storage_options)
         timer.split("load camera parameters")
 
-        rgb_frames, depth_maps, masks = self.load_input_data(timer)
+        rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.batch_size,
+                                                        self.should_create_masks, timer)
 
         print(f"Checking maximum number of masks...")
         max_num_masks = masks.max()
@@ -439,7 +216,7 @@ class Video2Mesh:
             # Construct 3D Point Cloud
             rgb = np.ascontiguousarray(rgb[:, :, :3])
             depth = depth / 255. * self.max_depth
-            transform = self.pose_vec2mat(pose)
+            transform = pose_vec2mat(pose)
             R = transform[:3, :3]
             t = transform[:3, 3:]
 
@@ -457,10 +234,10 @@ class Video2Mesh:
                     mask = self.dilate_mask(mask, self.dilation_options)
                     timer.split(f"\t\terode mask")
 
-                vertices = self.point_cloud_from_depth(depth, mask, K, R, t, self.scale_factor)
+                vertices = point_cloud_from_depth(depth, mask, K, R, t, self.scale_factor)
                 timer.split("\t\tcreate point cloud")
 
-                points2d, depth_proj = self.world2image(vertices, K, R, t, self.scale_factor)
+                points2d, depth_proj = world2image(vertices, K, R, t, self.scale_factor)
                 timer.split("\t\tproject 3D points to pixel coordinates")
 
                 faces = self.triangulate_faces(points2d)
@@ -523,131 +300,6 @@ class Video2Mesh:
             f"there was a typo in the path; Python does not have sufficient privileges; or the path does not exist " \
             f"AND the flag `--create_masks` was not enabled in the CLI."
 
-    def load_camera_parameters(self, timer=Timer()):
-        camera_params = np.loadtxt(os.path.join(self.storage_options.base_folder, "camera.txt"))
-        camera_trajectory = np.loadtxt(os.path.join(self.storage_options.base_folder, "trajectory.txt"))
-
-        timer.split("load camera parameters")
-        return camera_params, camera_trajectory
-
-    def load_input_data(self, timer=Timer()):
-        storage = self.storage_options
-
-        if os.path.isdir(storage.mask_folder) and \
-                len(os.listdir(storage.mask_folder)) == len(os.listdir(storage.colour_folder)):
-            print(f"Found cached masks in {storage.mask_folder}")
-        elif self.should_create_masks:
-            rgb_loader = DataLoader(ImageFolderDataset(storage.colour_folder),
-                                    batch_size=self.batch_size, shuffle=False)
-            self.create_masks(rgb_loader, storage.mask_folder, overwrite_ok=storage.overwrite_ok)
-        else:
-            raise RuntimeError(f"Masks not found in path {storage.mask_folder} or number of masks do not match the "
-                               f"number of rgb frames in {storage.colour_folder}.")
-
-        timer.split('load/create masks')
-
-        pool = ThreadPool(psutil.cpu_count(logical=False))
-
-        rgb_frames = pool.map(Image.open, ImageFolderDataset(storage.colour_folder).image_paths)
-        depth_maps = pool.map(Image.open, ImageFolderDataset(storage.depth_folder).image_paths)
-        masks = pool.map(Image.open, ImageFolderDataset(storage.mask_folder).image_paths)
-        timer.split('load frame data to RAM')
-
-        rgb_frames = pool.map(np.asarray, rgb_frames)
-        depth_maps = pool.map(np.asarray, depth_maps)
-        masks = pool.map(np.asarray, masks)
-        timer.split('map PILLOW images to NumPy')
-
-        rgb_frames = np.asarray(rgb_frames)
-        depth_maps = np.asarray(depth_maps)
-        masks = np.asarray(masks)
-        timer.split('concatenate frame data into NumPy array')
-
-        rgb_frames = np.flip(rgb_frames, axis=1)
-        depth_maps = np.flip(depth_maps, axis=1)
-        masks = np.flip(masks, axis=1)
-        timer.split('put frame data the right way up')
-
-        return rgb_frames, depth_maps, masks
-
-    @staticmethod
-    def create_masks(rgb_loader, mask_folder, overwrite_ok=False):
-        """
-        Create instance segmentation masks for the given RGB video sequence and save the masks to disk..
-
-        :param rgb_loader: The PyTorch DataLoader that loads the RGB frames (no data augmentations applied).
-        :param mask_folder: The path to save the masks to.
-        :param overwrite_ok: Whether it is okay to write over any mask files in `mask_folder` if it already exists.
-        """
-
-        class BatchPredictor(DefaultPredictor):
-            """Run d2 on a list of images."""
-
-            def __call__(self, images):
-                """Run d2 on a list of images.
-
-                Args:
-                    images (list): BGR images of the expected shape: 720x1280
-                """
-                with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
-                    inputs = []
-
-                    for image in images:
-                        # Apply pre-processing to image.
-                        if self.input_format == "RGB":
-                            # whether the model expects BGR inputs or RGB
-                            image = image[:, :, ::-1]
-                        height, width = image.shape[:2]
-                        image = self.aug.get_transform(image).apply_image(image)
-                        image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
-
-                        inputs.append({"image": image, "height": height, "width": width})
-
-                    predictions = self.model(inputs)
-
-                    return predictions
-
-        print(f"Creating masks...")
-
-        cfg = get_cfg()
-
-        if not torch.cuda.is_available():
-            cfg.MODEL.DEVICE = 'cpu'
-
-        # add project-specific config (e.g., TensorMask) here if you're not running a model in detectron2's core library
-        cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
-        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5  # set threshold for this model
-        # Find a model from detectron2's model zoo. You can use the https://dl.fbaipublicfiles... url as well
-        cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
-        dataset_metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
-        class_names = dataset_metadata.thing_classes
-        print(class_names)
-
-        person_label = class_names.index('person')
-        predictor = BatchPredictor(cfg)
-
-        os.makedirs(mask_folder, exist_ok=overwrite_ok)
-        i = 0
-        max_num_masks = 0
-
-        for image_batch in rgb_loader:
-            outputs = predictor(image_batch.numpy())
-
-            for output in outputs:
-                matching_masks = output['instances'].get('pred_classes') == person_label
-                people_masks = output['instances'].get('pred_masks')[matching_masks]
-                combined_masks = np.zeros_like(image_batch[0].numpy(), dtype=np.uint8)
-                combined_masks = combined_masks[:, :, 0]
-
-                for j, mask in enumerate(people_masks.cpu().numpy()):
-                    combined_masks[mask] = j + 1
-
-                i += 1
-                max_num_masks = max(max_num_masks, combined_masks.max())
-                Image.fromarray(combined_masks).convert('L').save(os.path.join(mask_folder, f"{i:03d}.png"))
-
-            print(f"{i:03,d}/{len(rgb_loader.dataset):03,d}")
-
     @staticmethod
     def extract_camera_params(camera_intrinsics):
         cx = camera_intrinsics[0, 2]
@@ -660,69 +312,6 @@ class Video2Mesh:
         return fx, fy, height, width
 
     @staticmethod
-    def num2str(num: Optional[int]):
-        """
-        Convert an optional number (i.e. nullable) to a string.
-
-        :param num: the number to convert.
-
-        :return: the number as a string, '?' if the the argument is None.
-        """
-        return '?' if num is None else str(num)
-
-    @staticmethod
-    def validate_shape(x: np.ndarray, x_name: str, expected_shape: tuple):
-        """
-        Validate (assert) that the shape of a array matches the expected shape, otherwise raise a descriptive AssertionError.
-
-        :param x: The array to validate.
-        :param x_name: The name of the array (e.g. the parameter name).
-        :param expected_shape: The expected shape as a tuple. Dimensions with a variable size can indicated with a
-        value of None, e.g. (None, 3) accepts any 2D array as long as the second dimension has a size of 3.
-        """
-        assert type(expected_shape) is tuple, "`expected_shape` must be a tuple."
-
-        expected_dims = len(expected_shape)
-        observed_dims = len(x.shape)
-
-        assert observed_dims == expected_dims, \
-            f"Incorrect number of dimensions for {x_name}; expected {expected_dims} but got {observed_dims}"
-
-        dim_matches = []
-
-        for dim in range(expected_dims):
-            dim_matches.append(expected_shape[dim] is None or x.shape[dim] == expected_shape[dim])
-
-        expected_shape_str = f"({', '.join(map(Video2Mesh.num2str, expected_shape))})"
-
-        assert np.alltrue(dim_matches), \
-            f"Incorrect shape for {x_name}: expected {expected_shape_str} but got {x.shape}"
-
-    @staticmethod
-    def validate_camera_parameter_shapes(K, R, t):
-        Video2Mesh.validate_shape(K, 'K', expected_shape=(3, 3))
-        Video2Mesh.validate_shape(R, 'R', expected_shape=(3, 3))
-        Video2Mesh.validate_shape(t, 't', expected_shape=(3, 1))
-
-    @staticmethod
-    def pose_vec2mat(pose):
-        """
-        Convert a transformation 6-vector [r, t] to a (4, 4) homogenous transformation matrix.
-
-        :param pose: The 6-vector to convert.
-        :return: The (4, 4) homogeneous transformation matrix.
-        """
-        Video2Mesh.validate_shape(pose, 'pose', expected_shape=(6,))
-        R = cv2.Rodrigues(pose[:3])[0]
-        t = pose[3:].reshape((-1, 1))
-
-        M = np.hstack((R, t))
-        M = np.vstack((M, np.zeros(4)))
-        M[-1, -1] = 1
-
-        return M
-
-    @staticmethod
     def dilate_mask(mask, dilation_options: MaskDilationOptions):
         """
         Dilate an instance segmentation mask so that it covers a larger area.
@@ -731,7 +320,7 @@ class Video2Mesh:
 
         :return: The dilated mask.
         """
-        Video2Mesh.validate_shape(mask, 'mask', expected_shape=(None, None))
+        validate_shape(mask, 'mask', expected_shape=(None, None))
 
         mask = mask.astype(np.float32)
         mask = cv2.dilate(mask.astype(float), dilation_options.filter, iterations=dilation_options.num_iterations)
@@ -739,72 +328,9 @@ class Video2Mesh:
 
         return mask
 
-    def point_cloud_from_depth(self, depth, mask, K, R, t, scale_factor=1.0):
-        valid_pixels = mask & (depth > 0.0)
-        V, U = valid_pixels.nonzero()
-        points2d = np.array([U, V]).T
-
-        points = self.image2world(points2d, depth[valid_pixels], K, R, t, scale_factor)
-
-        return points
-
-    @staticmethod
-    def image2world(points, depth, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
-        """
-        Convert 2D image coordinates to 3D world coordinates.
-
-        :param points: The (?, 2) array of image coordinates.
-        :param depth: The (?,) array of depth values at the given 2D points.
-        :param K: The (3, 3) camera intrinsics matrix.
-        :param R: The (3, 3) camera rotation matrix.
-        :param t: The (3, 1) camera translation column vector.
-        :param scale_factor: An optional value that scales the 2D points.
-
-        :return: the (?, 3) 3D points in world space.
-        """
-        Video2Mesh.validate_shape(points, 'points', expected_shape=(None, 2))
-        Video2Mesh.validate_shape(depth, 'depth', expected_shape=(points.shape[0],))
-        Video2Mesh.validate_camera_parameter_shapes(K, R, t)
-
-        num_points = points.shape[0]
-
-        points2d = np.vstack((points.T * scale_factor, np.ones(num_points)))
-        pixel_i = np.linalg.inv(K) @ points2d
-        pixel_world = R.T @ (depth * pixel_i - t)
-
-        return pixel_world.T
-
-    @staticmethod
-    def world2image(points, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0, dtype=np.int32):
-        """
-        Convert 3D world coordinates to 2D image coordinates.
-
-        :param points: The (?, 3) array of world coordinates.
-        :param K: The (3, 3) camera intrinsics matrix.
-        :param R: The (3, 3) camera rotation matrix.
-        :param t: The (3, 1) camera translation column vector.
-        :param scale_factor: An optional value that scales the 2D points.
-        :param dtype: The data type of the returned points.
-
-        :return: a 2-tuple containing: the (?, 2) 2D points in image space; the recovered depth of the 2D points.
-        """
-        Video2Mesh.validate_shape(points, 'points', expected_shape=(None, 3))
-        Video2Mesh.validate_camera_parameter_shapes(K, R, t)
-
-        camera_space_coords = K @ (R @ points.T + t)
-        depth = camera_space_coords[2, :]
-        pixel_coords = camera_space_coords[0:2, :] / depth / scale_factor
-
-        if issubclass(dtype, np.integer):
-            pixel_coords = np.round(pixel_coords)
-
-        pixel_coords = np.array(pixel_coords.T, dtype=dtype)
-
-        return pixel_coords, depth
-
     @staticmethod
     def triangulate_faces(points):
-        Video2Mesh.validate_shape(points, 'points', expected_shape=(None, 2))
+        validate_shape(points, 'points', expected_shape=(None, 2))
 
         tri = Delaunay(points)
         faces = tri.simplices
@@ -826,9 +352,9 @@ class Video2Mesh:
 
         :return: A filtered view of the faces that satisfy the image space and depth constraints.
         """
-        Video2Mesh.validate_shape(points2d, 'points2d', expected_shape=(None, 2))
-        Video2Mesh.validate_shape(depth, 'depth', expected_shape=(points2d.shape[0],))
-        Video2Mesh.validate_shape(faces, 'faces', expected_shape=(None, 3))
+        validate_shape(points2d, 'points2d', expected_shape=(None, 2))
+        validate_shape(depth, 'depth', expected_shape=(points2d.shape[0],))
+        validate_shape(faces, 'faces', expected_shape=(None, 3))
 
         pixel_distances = np.linalg.norm(points2d[faces[:, [0, 2, 0]]] - points2d[faces[:, [1, 1, 2]]], axis=-1)
 
@@ -853,8 +379,8 @@ class Video2Mesh:
 
         :return: A reduced set of vertices and faces.
         """
-        Video2Mesh.validate_shape(vertices, 'vertices', expected_shape=(None, 3))
-        Video2Mesh.validate_shape(faces, 'faces', expected_shape=(None, 3))
+        validate_shape(vertices, 'vertices', expected_shape=(None, 3))
+        validate_shape(faces, 'faces', expected_shape=(None, 3))
 
         # Construct temporary mesh.
         mesh = om.PolyMesh()
@@ -898,8 +424,8 @@ class Video2Mesh:
 
         :return: The filtered mesh.
         """
-        Video2Mesh.validate_shape(vertices, 'vertices', expected_shape=(None, 3))
-        Video2Mesh.validate_shape(faces, 'faces', expected_shape=(None, 3))
+        validate_shape(vertices, 'vertices', expected_shape=(None, 3))
+        validate_shape(faces, 'faces', expected_shape=(None, 3))
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
@@ -934,11 +460,11 @@ class Video2Mesh:
 
         :return: The cropped texture and UV coordinates.
         """
-        Video2Mesh.validate_shape(vertices, 'vertices', expected_shape=(None, 3))
-        Video2Mesh.validate_shape(image, 'image', expected_shape=(None, None, 3))
-        Video2Mesh.validate_camera_parameter_shapes(K, R, t)
+        validate_shape(vertices, 'vertices', expected_shape=(None, 3))
+        validate_shape(image, 'image', expected_shape=(None, None, 3))
+        validate_camera_parameter_shapes(K, R, t)
 
-        uv, _ = Video2Mesh.world2image(vertices, K, R, t, scale_factor)
+        uv, _ = world2image(vertices, K, R, t, scale_factor)
 
         min_u, min_v = np.min(np.round(uv), axis=0).astype(int)
         max_u, max_v = np.max(np.round(uv), axis=0).astype(int) + 1
@@ -1042,7 +568,7 @@ class Video2Mesh:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser("Create 3D meshes from a RGB-D sequence with camera trajectory annotations.")
 
     parser.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
                         action='store_true')
