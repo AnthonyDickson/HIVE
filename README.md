@@ -36,17 +36,26 @@ Start by choosing on of the following methods for setting up the Python environm
      2. Build the Docker Image:
     
         ```shell
-        docker build -t video2mesh:cpu .
+        docker build -t eight0153/video2mesh:cpu .
         ```
         **Note:** For M1 Macs you should specify an amd64 image:
         ```shell
-        docker buildx build --platform linux/amd64 -t video2mesh:cpu .
+        docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cpu .
         ```
         It is important to do this as not all the required packages have arm64 pre-built binaries available.
 
 6. Docker - CUDA (11.3)
-   
-    Coming soon...
+
+   Either:
+     1. Pull (download) a pre-built image (~7.2 GB): 
+        ```shell
+        docker pull eight0153/video2mesh:cu113
+        ```
+     2. Build the Docker Image:
+    
+        ```shell
+        docker build -f Dockerfile-cu113 -t eight0153/video2mesh:cu113 .
+        ```
 
 ## Running the Program
 ### Sample Dataset
@@ -77,12 +86,12 @@ The Docker containers will, by default, bring up the python interpreter.
 All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
-docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t video2mesh:<cpu|gpu> 
+docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:<cpu|cu113> 
 ```
-making sure to choose the right tag for the image (`cpu` or `gpu`).
+making sure to choose the right tag for the image (`cpu` or `cu113`).
 For example: 
 ```shell
-docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t video2mesh:cpu -c "print('Hello, world!')"
+docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cpu -c "print('Hello, world!')"
 ```
 
 ### Viewing the 3D Video

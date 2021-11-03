@@ -1,8 +1,8 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Run in Docker" type="docker-deploy" factoryName="docker-image" server-name="Docker">
+  <configuration default="false" name="Run in Docker (CUDA)" type="docker-deploy" factoryName="docker-image" server-name="Docker">
     <deployment type="docker-image">
       <settings>
-        <option name="imageTag" value="video2mesh:cpu" />
+        <option name="imageTag" value="eight0153/video2mesh:cu113" />
         <option name="command" value="Video2mesh/video2mesh.py --base_dir data/dance --num_frames 10 --max_depth_dist 0.1 --include_background --static_background --overwrite_ok " />
         <option name="containerName" value="" />
         <option name="showCommandPreview" value="true" />
