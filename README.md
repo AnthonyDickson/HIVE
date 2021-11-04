@@ -89,9 +89,9 @@ minus the call to python, to the following:
 docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:<cpu|cu113> 
 ```
 making sure to choose the right tag for the image (`cpu` or `cu113`).
-For example: 
+For example, if you wanted to run the CUDA enabled container: 
 ```shell
-docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cpu -c "print('Hello, world!')"
+docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu113 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ### Viewing the 3D Video

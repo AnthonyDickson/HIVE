@@ -4,7 +4,9 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/data" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.8 (video2mesh)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Remote Python 3.7.11 Docker (eight0153/video2mesh:cu113)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
+    <orderEntry type="module" module-name="UnrealDataset" />
+    <orderEntry type="module" module-name="video-3d-viewer" />
   </component>
 </module>
