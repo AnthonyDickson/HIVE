@@ -121,11 +121,12 @@ def load_camera_parameters(storage_options, timer=Timer()):
     return camera_params, camera_trajectory
 
 
-def load_input_data(storage_options, batch_size=-1, should_create_masks=False, timer=Timer()):
+def load_input_data(storage_options, depth_options, batch_size=-1, should_create_masks=False, timer=Timer()):
     """
     Load RGB-D frames and instance segmentation masks from disk.
 
-    :param storage_options: The options file that contains the path to the dataset.
+    :param storage_options: The data about where to save outputs to.
+    :param depth_options: The data about how depth maps should be loaded.
     :param batch_size: How many files to load at once when creating masks. Has little impact on performance.
     :param should_create_masks: Whether instance segmentation masks should be created if they do not already exist.
     :param timer: Timer object for simple benchmarking of code segments.
@@ -150,10 +151,13 @@ def load_input_data(storage_options, batch_size=-1, should_create_masks=False, t
     pool = ThreadPool(psutil.cpu_count(logical=False))
 
     rgb_frames = pool.map(cv2.imread, ImageFolderDataset(storage.colour_folder).image_paths)
-    depth_maps = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE),
+
+    depth_maps = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_ANYDEPTH),
                           ImageFolderDataset(storage.depth_folder).image_paths)
+
     masks = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE),
                      ImageFolderDataset(storage.mask_folder).image_paths)
+
     timer.split('load frame data to RAM')
 
     rgb_frames = np.asarray(rgb_frames)
@@ -168,6 +172,13 @@ def load_input_data(storage_options, batch_size=-1, should_create_masks=False, t
     depth_maps = np.flip(depth_maps, axis=1)
     masks = np.flip(masks, axis=1)
     timer.split('put frame data the right way up')
+
+    assert depth_maps.dtype == depth_options.depth_dtype, \
+        f"Expected depth maps to be {depth_options.depth_dtype}, but got {depth_maps.dtype} instead."
+
+    depth_maps = depth_maps / np.iinfo(depth_options.depth_dtype).max
+    depth_maps *= depth_options.max_depth
+    timer.split('scale depth')
 
     if rgb_frames.shape[:3] != depth_maps.shape != masks.shape:
         raise RuntimeError(f"RGB frames, depth maps and masks should have the same shape, "

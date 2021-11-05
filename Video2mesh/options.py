@@ -1,9 +1,13 @@
 import argparse
+import enum
 import os
+
+import numpy as np
 
 
 class ReprMixin:
     """Mixin that provides a basic string representation for objects."""
+
     def __repr__(self):
         return f"{self.__class__.__name__}({', '.join(list(map(lambda k: f'{k}={self.__getattribute__(k)}', self.__dict__)))})"
 
@@ -64,3 +68,57 @@ class StorageOptions(ReprMixin):
             output_folder=args.output_dir,
             overwrite_ok=args.overwrite_ok
         )
+
+
+class DepthFormat(enum.Enum):
+    DEPTH_TO_POINT = enum.auto()
+    DEPTH_TO_PLANE = enum.auto()
+
+
+class DepthOptions(ReprMixin):
+    """Options for depth maps."""
+
+    def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE):
+        """
+        :param max_depth: The maximum depth value in the depth maps.
+        :param dtype: The type of the depth values.
+        :param depth_format: How depth values are measured in the depth maps.
+        """
+        assert dtype is np.uint8 or dtype is np.uint16, 'Only 8-bit and 16-bit depth maps are supported.'
+
+        self.max_depth = max_depth
+        self.depth_dtype = dtype
+        self.depth_format = depth_format
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('Depth Options')
+        group.add_argument('--max_depth', type=float, help='The maximum depth value in the provided depth maps.',
+                           default=10.0)
+        group.add_argument('--depth_format', type=str, help='How depth values are measure in the depth maps.',
+                           choices=['depth_to_point', 'depth_to_plane'], default='depth_to_plane')
+        group.add_argument('--depth_dtype', type=str, help='The type of the depth values.', default='uint16',
+                           choices=['uint8', 'uint16'])
+
+    @staticmethod
+    def from_args(args):
+        max_depth = args.max_depth
+        dtype = args.depth_dtype
+        depth_format = args.depth_format
+
+        if dtype == 'uint8':
+            dtype = np.uint8
+        elif dtype == 'uint16':
+            dtype = np.uint16
+        else:
+            raise RuntimeError(f"Unsupported data type {dtype}, expected 'uint8' or 'uint16")
+
+        if depth_format == 'depth_to_point':
+            depth_format = DepthFormat.DEPTH_TO_POINT
+        elif depth_format == 'depth_to_plane':
+            depth_format = DepthFormat.DEPTH_TO_PLANE
+        else:
+            raise RuntimeError(f"Unsupported depth format {depth_format}, "
+                               f"expected 'depth_to_point' or 'depth_to_plane'")
+
+        return DepthOptions(max_depth, dtype, depth_format)

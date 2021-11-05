@@ -11,7 +11,7 @@ from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
 
 from Video2mesh.io import load_input_data, load_camera_parameters
-from Video2mesh.options import StorageOptions, ReprMixin
+from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
 
@@ -116,12 +116,13 @@ class MeshFilteringOptions(ReprMixin):
 class Video2Mesh:
     def __init__(self, storage_options, decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 should_create_masks=False, batch_size=8, num_frames=-1, fps=60, max_depth=10.0, scale_factor=1.0,
+                 depth_options=DepthOptions(),
+                 should_create_masks=False, batch_size=8, num_frames=-1, fps=60, scale_factor=1.0,
                  include_background=False, static_background=False):
         self.storage_options = storage_options
         self.mask_folder = storage_options
+        self.depth_options = depth_options
         self.should_create_masks = should_create_masks
-        self.max_depth = max_depth
         self.fps = fps
         self.batch_size = batch_size
         self.scale_factor = scale_factor
@@ -141,7 +142,7 @@ class Video2Mesh:
         K, camera_trajectory = load_camera_parameters(self.storage_options)
         timer.split("load camera parameters")
 
-        rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.batch_size,
+        rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
                                                         self.should_create_masks, timer)
 
         print(f"Checking maximum number of masks...")
@@ -583,6 +584,7 @@ if __name__ == '__main__':
                                                        'Set to -1 (default) to process all frames.', default=-1)
 
     StorageOptions.add_args(parser)
+    DepthOptions.add_args(parser)
     MaskDilationOptions.add_args(parser)
     MeshFilteringOptions.add_args(parser)
     MeshDecimationOptions.add_args(parser)
@@ -591,13 +593,15 @@ if __name__ == '__main__':
     print(args)
 
     storage_options = StorageOptions.from_args(args)
+    depth_options = DepthOptions.from_args(args)
     filtering_options = MeshFilteringOptions.from_args(args)
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
 
     program = Video2Mesh(storage_options, decimation_options=decimation_options, dilation_options=dilation_options,
-                         filtering_options=filtering_options, num_frames=args.num_frames, fps=args.fps,
-                         max_depth=args.max_depth, include_background=args.include_background,
+                         filtering_options=filtering_options,depth_options=depth_options,
+                         num_frames=args.num_frames, fps=args.fps,
+                         include_background=args.include_background,
                          should_create_masks=args.create_masks,
                          static_background=args.static_background)
     program.run()
