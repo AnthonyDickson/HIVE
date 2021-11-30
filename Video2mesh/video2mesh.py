@@ -216,7 +216,6 @@ class Video2Mesh:
 
             # Construct 3D Point Cloud
             rgb = np.ascontiguousarray(rgb[:, :, :3])
-            depth = depth / 255. * self.max_depth
             transform = pose_vec2mat(pose)
             R = transform[:3, :3]
             t = transform[:3, 3:]
@@ -573,8 +572,6 @@ if __name__ == '__main__':
 
     parser.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
                         action='store_true')
-    parser.add_argument('--max_depth', type=float, help='The maximum depth value in the provided depth maps.',
-                        default=10.0)
     parser.add_argument('--fps', type=int, help='The frame rate of the input sequence.', default=60)
     parser.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
                         action='store_true')
@@ -583,6 +580,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
                                                        'Set to -1 (default) to process all frames.', default=-1)
 
+    # TODO: Use the class `UnrealDatasetInfo' to load the dataset info from disk, rather than using CLI args.
     StorageOptions.add_args(parser)
     DepthOptions.add_args(parser)
     MaskDilationOptions.add_args(parser)
