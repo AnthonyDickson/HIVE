@@ -106,6 +106,7 @@ def load_camera_parameters(storage_options, timer=Timer()):
     :param timer:
     :return:
     """
+    # TODO: Complete docstring for this method.
     camera_params = np.loadtxt(os.path.join(storage_options.base_folder, "camera.txt"))
     camera_trajectory = np.loadtxt(os.path.join(storage_options.base_folder, "trajectory.txt"))
 
@@ -133,6 +134,7 @@ def load_input_data(storage_options, depth_options, batch_size=-1, should_create
 
     :return: A 3-tuple of the RGB frames (N, H, W, C), depth maps (N, H, W) and masks (N, H, W).
     """
+    # TODO: Set sensible default for batch size if arg value is -1.
     storage = storage_options
 
     if os.path.isdir(storage.mask_folder) and \

@@ -8,5 +8,6 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="UnrealDataset" />
     <orderEntry type="module" module-name="video-3d-viewer" />
+    <orderEntry type="module" module-name="consistent_depth" />
   </component>
 </module>

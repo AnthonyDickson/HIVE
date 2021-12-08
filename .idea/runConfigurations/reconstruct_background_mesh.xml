@@ -42,7 +42,7 @@
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Video2mesh/reconstruct_background_mesh.py" />
-    <option name="PARAMETERS" value="--base_dir data/dance_room --depth_dtype uint16 --depth_format depth_to_point" />
+    <option name="PARAMETERS" value="--base_dir data/z_increasing --depth_dtype uint16 --depth_format depth_to_plane" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />
