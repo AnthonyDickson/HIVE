@@ -1,0 +1,3 @@
+[submodule "thirdparty/AdaBins"]
+	path = thirdparty/AdaBins
+	url = https://github.com/eight0153/AdaBins.git

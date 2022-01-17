@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM pytorch/pytorch:1.10.0-cuda11.3-cudnn8-runtime
 
 RUN apt update && \
     DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends \
@@ -7,15 +7,17 @@ RUN apt update && \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir torch==1.10.0+cpu torchvision==0.11.1+cpu torchaudio==0.10.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
 RUN pip install --no-cache-dir detectron2 -f \
-  https://dl.fbaipublicfiles.com/detectron2/wheels/cpu/torch1.10/index.html
-
-# TODO: Load Detectron2 weights
+  https://dl.fbaipublicfiles.com/detectron2/wheels/cu113/torch1.10/index.html
 
 WORKDIR /app
 
-VOLUME /app/data
-VOLUME /app/Video2mesh
+# Download instance segmentation weights and weights for depth estimation model (NYU only) so
+# they do not need to be downloaded each time you run the container.
+ADD scripts scripts
+ARG WEIGHTS_PATH=/root/.cache/pretrained
+RUN python3 scripts/download_detectron2_weights.py && \
+    python3 scripts/download_adabins_basemodel.py && \
+    gdown --id 1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF && mkdir -p ${WEIGHTS_PATH} && mv AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt
 
 ENTRYPOINT ["python3"]

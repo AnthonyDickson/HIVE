@@ -3,6 +3,7 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../UnrealDataset" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../UnrealDataset/thirdparty/consistent_depth" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/thirdparty/AdaBins" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/thirdparty/MiDaS" vcs="Git" />
   </component>
 </project>

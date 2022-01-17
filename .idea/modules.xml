@@ -2,6 +2,8 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/thirdparty/AdaBins/.idea/AdaBins.iml" filepath="$PROJECT_DIR$/thirdparty/AdaBins/.idea/AdaBins.iml" />
+      <module fileurl="file://$PROJECT_DIR$/thirdparty/MiDaS/.idea/MiDaS.iml" filepath="$PROJECT_DIR$/thirdparty/MiDaS/.idea/MiDaS.iml" />
       <module fileurl="file://$PROJECT_DIR$/../UnrealDataset/.idea/UnrealDataset.iml" filepath="$PROJECT_DIR$/../UnrealDataset/.idea/UnrealDataset.iml" />
       <module fileurl="file://$PROJECT_DIR$/../consistent_depth/.idea/consistent_depth.iml" filepath="$PROJECT_DIR$/../consistent_depth/.idea/consistent_depth.iml" />
       <module fileurl="file://$PROJECT_DIR$/../webxr3dvideo/.idea/video-3d-viewer.iml" filepath="$PROJECT_DIR$/../webxr3dvideo/.idea/video-3d-viewer.iml" />

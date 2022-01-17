@@ -6,7 +6,7 @@
         <option name="buildOnly" value="true" />
         <option name="containerName" value="" />
         <option name="showCommandPreview" value="true" />
-        <option name="sourceFilePath" value="Dockerfile-cu113" />
+        <option name="sourceFilePath" value="Dockerfile" />
       </settings>
     </deployment>
     <method v="2" />

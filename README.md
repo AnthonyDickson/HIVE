@@ -2,6 +2,15 @@
 This project looks at creating a 3D video from a RGBD video.
 ![demo of 3D video](video_3d_demo.gif)
 # Getting Started
+## Cloning the project
+Clone the repo:
+```shell
+git clone --recurse-submodules https://github.com/eight0153/video2mesh.git 
+```
+If forget to or cannot clone with `--recurse-submodules` then clone the git dependencies with the following:
+```shell
+git submodule update --init --recursive
+```
 ## Setting Up Python
 Start by choosing on of the following methods for setting up the Python environment:
 1. Conda
@@ -25,37 +34,25 @@ Start by choosing on of the following methods for setting up the Python environm
     pip install torch==1.10.0+cu113 torchvision==0.11.1+cu113 -f https://download.pytorch.org/whl/cpu/torch_stable.html
     pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cuda113/torch1.10/index.html
     ```
-   
-4. Docker - CPU Only
-   
-   Either:
-     1. Pull (download) a pre-built image (~600 MB): 
-        ```shell
-        docker pull eight0153/video2mesh:cpu
-        ```
-     2. Build the Docker Image:
-    
-        ```shell
-        docker build -t eight0153/video2mesh:cpu .
-        ```
-        **Note:** For M1 Macs you should specify an amd64 image:
-        ```shell
-        docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cpu .
-        ```
-        It is important to do this as not all the required packages have arm64 pre-built binaries available.
 
-6. Docker - CUDA (11.3)
+4.  Docker - CUDA (11.3)
 
    Either:
-     1. Pull (download) a pre-built image (~7.2 GB): 
+     1. Pull (download) a pre-built image (~8.3 GB): 
         ```shell
         docker pull eight0153/video2mesh:cu113
         ```
      2. Build the Docker Image:
     
         ```shell
-        docker build -f Dockerfile-cu113 -t eight0153/video2mesh:cu113 .
+        docker build -t eight0153/video2mesh:cu113 .
         ```
+        
+        **Note:** For M1 Macs you should specify amd64 as the platform:
+        ```shell
+        docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cu113 .
+        ```
+        It is important to do this as not all the required packages have arm64 pre-built binaries available.
 
 ## Running the Program
 ### Sample Dataset
@@ -63,7 +60,7 @@ You can download a sample dataset from [here](https://www.icloud.com/iclouddrive
 Assuming you have downloaded the dataset archive to the root of this repo, you can extract the archive to the right 
 folder via the following:
 ```shell
-mkdir -p data/
+mkdir data/
 tar -xvzf dance.tar.gz -C data/
 ```
 ### Example Usage
@@ -86,9 +83,8 @@ The Docker containers will, by default, bring up the python interpreter.
 All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
-docker run -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:<cpu|cu113> 
+docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu113 
 ```
-making sure to choose the right tag for the image (`cpu` or `cu113`).
 For example, if you wanted to run the CUDA enabled container: 
 ```shell
 docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu113 -c "import torch; print(torch.cuda.is_available())"
@@ -177,5 +173,5 @@ natural ordering, e.g.:
    CLI flag `--create_masks` when you run the program.
 
 ## Output Format
-The generated meshes are saved into a single glTF formatted file.
+The generated meshes are saved to a glTF formatted file.
 Each mesh in the glTF file represents the mesh for all objects for a given frame.

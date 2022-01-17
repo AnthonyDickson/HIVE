@@ -1,3 +1,7 @@
+import datetime
+
+import sys
+
 import time
 from typing import Optional
 
@@ -95,3 +99,7 @@ def num2str(num: Optional[int]):
     :return: the number as a string, '?' if the the argument is None.
     """
     return '?' if num is None else str(num)
+
+
+def log(message, end='\n', file=sys.stdout):
+    print("[%s] %s" % (datetime.datetime.now(), message), file=file, end=end)

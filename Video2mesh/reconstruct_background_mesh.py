@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from Video2mesh.geometry import pose_vec2mat, get_pose_components, point_cloud_from_depth
-from Video2mesh.io import load_camera_parameters, load_input_data, numpy_to_ply, write_ply
+from Video2mesh.io import load_camera_parameters, load_input_data, numpy_to_ply, write_ply, TUMDataLoader
 from Video2mesh.options import StorageOptions, DepthOptions, DepthFormat
 from Video2mesh.utils import Timer
 
@@ -130,6 +130,8 @@ def convert_to_depth_to_plane(depth_map, f):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("Reconstruct the static background of a RGB-D video sequence.")
 
+    parser.add_argument('--is_tum', action='store_true', help='Whether the dataset follows the TUM dataset format.')
+
     StorageOptions.add_args(parser)
     DepthOptions.add_args(parser)
 
@@ -139,32 +141,43 @@ if __name__ == '__main__':
     storage_options = StorageOptions.from_args(args)
     depth_options = DepthOptions.from_args(args)
 
-    K, trajectory = load_camera_parameters(storage_options)
-    print(K.shape, trajectory.shape)
+    if args.is_tum:
+        dataset = TUMDataLoader(storage_options.base_folder).load(storage_options=storage_options)
 
-    # Convert from Unreal Engine coordinate system
-    trajectory = trajectory[:, [0, 1, 2, 3, 5, 4]]
+        K = dataset.intrinsic_matrix
+        trajectory = dataset.poses
+        rgb_frames = dataset.frames
+        depth_maps = dataset.depth_maps
+        masks = dataset.masks
+    else:
+        K, trajectory = load_camera_parameters(storage_options)
+        print(K.shape, trajectory.shape)
 
-    rgb_frames, depth_maps, masks = load_input_data(storage_options, depth_options)
-    print(rgb_frames.shape, depth_maps.shape, masks.shape)
+        # Convert from Unreal Engine coordinate system
+        # trajectory = trajectory[:, [0, 1, 2, 3, 5, 4]]
+        # # Unreal measurements are in cm, convert them to meters to match the depth maps.
+        # trajectory[:, 3:] /= 100.0
 
-    if depth_options.depth_format == DepthFormat.DEPTH_TO_POINT:
-        assert K[0, 0] == K[1, 1]
-        depth_maps = convert_to_depth_to_plane(depth_maps, K[0, 0])
+        rgb_frames, depth_maps, masks = load_input_data(storage_options, depth_options, should_create_masks=True, batch_size=8)
+        print(rgb_frames.shape, depth_maps.shape, masks.shape)
+
+        if depth_options.depth_format == DepthFormat.DEPTH_TO_POINT:
+            assert K[0, 0] == K[1, 1]
+            depth_maps = convert_to_depth_to_plane(depth_maps, K[0, 0])
 
     i = 1
-    j = i + 1
+    j = i + 80
 
     (points_a, depth_a), (points_b, depth_b), _ = _extract_match_data(rgb_frames[i], rgb_frames[j], depth_maps[i],
                                                                       depth_maps[j])
 
 
-    # pose_i = pose_vec2mat(trajectory[i])
-    pose_i = np.eye(4)
+    pose_i = np.linalg.inv(pose_vec2mat(trajectory[i]))
+    # pose_i = np.eye(4)
     R_1, t_1 = get_pose_components(pose_i)
 
-    pose_j = pose_vec2mat(trajectory[j])
-    pose_j = np.linalg.inv(pose_vec2mat(trajectory[i])) @ pose_j
+    pose_j = np.linalg.inv(pose_vec2mat(trajectory[j]))
+    # pose_j = np.linalg.inv(pose_vec2mat(trajectory[i])) @ pose_j
     R_2, t_2 = get_pose_components(pose_j)
 
     K_inv = np.linalg.inv(K)
@@ -179,6 +192,7 @@ if __name__ == '__main__':
     points_a_world = R_1.T @ (depth_a * (K_inv @ point2d_to_homogenous(points_a)) - t_1)
     points_b_world = R_2.T @ (depth_b * (K_inv @ point2d_to_homogenous(points_b)) - t_2)
     points_a_in_b = camera_to_image_plane(K @ (R_2 @ points_a_world + t_2)).T
+    print(f"Reprojection Error: {np.linalg.norm(points_a_in_b - points_b)}")
 
     # TODO: See if matched points can be projected into the same places with GT pose
     def get_pcd(k):
@@ -186,9 +200,11 @@ if __name__ == '__main__':
         depth_map = depth_maps[k]
 
         mask = masks[k] == 0
+        # pose = np.eye(4)
         pose = pose_vec2mat(trajectory[k])
-        pose_origin = pose_vec2mat(trajectory[0])
-        pose = np.linalg.inv(pose_origin) @ pose
+        # pose_origin = pose_vec2mat(trajectory[i])
+        # pose = np.linalg.inv(pose_origin) @ pose
+        # pose = np.linalg.inv(pose)
         R, t = get_pose_components(pose)
         I, J = (mask & (depth_map > 0)).nonzero()
         point_cloud = point_cloud_from_depth(depth_map, mask, K, R, t)
@@ -209,6 +225,7 @@ if __name__ == '__main__':
     t = Timer()
 
     ply_data = numpy_to_ply(point_cloud, colour3d)
+    # ply_data = numpy_to_ply(pcd1, colour1)
     t.split("create ply data")
 
     write_ply(os.path.join(storage_options.base_folder, "pcd.ply"), ply_data)

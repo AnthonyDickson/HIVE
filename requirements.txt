@@ -5,3 +5,5 @@ openmesh==1.1.6
 trimesh==3.9.34
 Pillow==8.3.2
 psutil==5.8.0
+tqdm==4.62.3
+gdown==4.2.0

@@ -1,3 +1,7 @@
+from hashlib import sha256
+
+from pathlib import Path
+
 import os
 import struct
 from multiprocessing.pool import ThreadPool
@@ -11,9 +15,11 @@ from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
+from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 
-from Video2mesh.utils import Timer
+from Video2mesh.utils import Timer, log
+from thirdparty.AdaBins.infer import InferenceHelper
 
 
 def load_raw_float32_image(file_name):
@@ -382,3 +388,399 @@ def write_ply(full_name, vertex_data, face_data=None, meshcolor=0, face_uv=None,
                     '%d %d %d\n' % (face_colors[i, 0] * 255, face_colors[i, 1] * 255, face_colors[i, 2] * 255))
 
     fid.close()
+
+
+class FrameSampler:
+    """
+    Samples a subset of frames.
+    """
+
+    def __init__(self, start=0, stop=-1, step=1, fps=30.0, stop_is_inclusive=False):
+        """
+        :param start: The index of the first frame to sample.
+        :param stop: The index of the last frame to index. Setting this to `-1` is equivalent to setting it to the index
+            of the last frame.
+        :param step: The gap between each of the selected frame indices.
+        :param fps: The frame rate of the video that is being sampled. Important if you want to sample frames based on
+            time based figures.
+        :param stop_is_inclusive: Whether to sample frames as an open range (`stop` is not included) or a closed range
+            (`stop` is included).
+        """
+        self.start = start
+        self.stop = stop
+        self.step = step
+        self.fps = fps
+
+        self.stop_is_inclusive = stop_is_inclusive
+
+    def __repr__(self):
+        kv_pairs = map(lambda kv: "%s=%s" % kv, self.__dict__.items())
+
+        return "<%s(%s)>" % (self.__class__.__name__, ', '.join(kv_pairs))
+
+    def frame_range(self, start, stop=-1):
+        """
+        Select a range of frames.
+        :param start: The index of the first frame to sample (inclusive).
+        :param stop: The index of the last frame to sample (inclusive only if `stop_is_inclusive` is set to `True`).
+        :return: A new FrameSampler with the new frame range.
+        """
+        options = dict(self.__dict__)
+        options.update(start=start, stop=stop)
+
+        return FrameSampler(**options)
+
+    def frame_interval(self, step):
+        """
+        Choose the frequency at which frames are sampled.
+        :param step: The integer gap between sampled frames.
+        :return: A new FrameSampler with the new sampling frequency.
+        """
+        options = dict(self.__dict__)
+        options.update(step=step)
+
+        return FrameSampler(**options)
+
+    def time_range(self, start, stop=None):
+        """
+        Select a range of frames based on time.
+        :param start: The time of the first frame to sample (in seconds, inclusive).
+        :param stop: The time of the last frame to sample (in seconds, inclusive only if `stop_is_inclusive` is set to
+            `True`).
+        :return: A new FrameSampler with the new frame range.
+        """
+        options = dict(self.__dict__)
+
+        start_frame = int(start * self.fps)
+
+        if stop:
+            stop_frame = int(stop * self.fps)
+        else:
+            stop_frame = -1
+
+        options.update(start=start_frame, stop=stop_frame)
+
+        return FrameSampler(**options)
+
+    def time_interval(self, step):
+        """
+        Choose the frequency at which frames are sampled.
+        :param step: The time (in seconds) between sampled frames.
+        :return: A new FrameSampler with the new sampling frequency.
+        """
+        options = dict(self.__dict__)
+
+        frame_step = int(step * self.fps)
+
+        options.update(step=frame_step)
+
+        return FrameSampler(**options)
+
+    def choose(self, frames):
+        """
+        Choose frames based on the sampling range and frequency defined in this object.
+        :param frames: The frames to sample from.
+        :return: The subset of sampled frames.
+        """
+        num_frames = len(frames[0])
+
+        if self.stop < 0:
+            stop = num_frames
+        else:
+            stop = self.stop
+
+        if self.stop_is_inclusive:
+            stop += self.step
+
+        rgb = frames[0][self.start:stop:self.step]
+        depth = frames[1][self.start:stop:self.step]
+        pose = frames[2][self.start:stop:self.step]
+        return rgb, depth, pose
+
+
+class TUMDataLoader:
+    """
+    Loads image, depth and pose data from a TUM formatted dataset.
+    """
+    # The below values are fixed and common to all subsets of the TUM dataset.
+    fx = 525.0  # focal length x
+    fy = 525.0  # focal length y
+    cx = 319.5  # optical center x
+    cy = 239.5  # optical center y
+    width = 640
+    height = 480
+    intrinsic_matrix = np.array([[fx, 0., cx],
+                                 [0., fy, cy],
+                                 [0., 0., 1.]])
+
+    fps = 30.0
+    frame_time = 1.0 / fps
+
+    def __init__(self, base_dir, is_16_bit=True,
+                 pose_path="groundtruth.txt", rgb_files_path="rgb.txt",
+                 depth_map_files_path="depth.txt"):
+        """
+        :param base_dir: The path to folder containing the dataset.
+        :param is_16_bit: Whether the images are stored with 16-bit values or 32-bit values.
+        :param pose_path: The name/path of the file that contains the camera pose information.
+        :param rgb_files_path: The name/path of the file that contains the mapping of timestamps to image file paths.
+        :param depth_map_files_path: The name/path of the file that contains the mapping of timestamps to depth map paths.
+        """
+        self.base_dir = Path(base_dir)
+        self.pose_path = Path(os.path.join(base_dir, str(Path(pose_path))))
+        self.rgb_files_path = Path(os.path.join(base_dir, str(Path(rgb_files_path))))
+        self.depth_map_files_path = Path(os.path.join(base_dir, str(Path(depth_map_files_path))))
+        self.mask_path = None
+
+        self.is_16_bit = is_16_bit
+        # The depth maps need to be divided by 5000 for the 16-bit PNG files
+        # or 1.0 (i.e. no effect) for the 32-bit float images in the ROS bag files
+        self.depth_scale_factor = 1.0 / 5000.0 if is_16_bit else 1.0
+
+        self.synced_frame_data = None
+        self.frames = None
+        self.depth_maps = None
+        self.poses = None
+        self.masks = None
+
+        self._validate_dataset()
+
+    def _validate_dataset(self):
+        """
+        Check whether the dataset is valid and the expected files are present.
+        :raises RuntimeError if there are any issues with the dataset.
+        """
+        if not self.base_dir.is_dir() or not self.base_dir.exists():
+            raise RuntimeError(
+                "The following path either does not exist, could not be read or is not a folder: %s." % self.base_dir)
+
+        for path in (self.pose_path, self.rgb_files_path, self.depth_map_files_path):
+            if not path.exists() or not path.is_file():
+                raise RuntimeError("The following file either does not exist or could not be read: %s." % path)
+
+    @property
+    def num_frames(self):
+        return len(self.frames) if self.frames is not None else 0
+
+    @property
+    def camera_matrix(self):
+        return TUMDataLoader.intrinsic_matrix.copy()
+
+    def _get_synced_frame_data(self):
+        """
+        Get the set of matching frames.
+        The TUM dataset is created with a Kinect sensor.
+        The colour images and depth maps given by this sensor are not synchronised and as such the timestamps never
+        perfectly match.
+        Therefore, we need to associate the frames with the closest timestamps to get the best set of frame pairs.
+
+        :return: Three lists each containing: paths to the colour frames, paths to the depth maps and the camera poses.
+        # return A list of 2-tuples each containing the paths to a colour image and depth map.
+        """
+
+        def load_timestamps_and_paths(list_path):
+            timestamps = []
+            data = []
+
+            with open(str(list_path), 'r') as f:
+                for line in f:
+                    line = line.strip()
+
+                    if line.startswith('#'):
+                        continue
+
+                    parts = line.split(' ')
+                    timestamp = float(parts[0])
+                    data_parts = parts[1:]
+
+                    timestamps.append(timestamp)
+                    data.append(data_parts)
+
+            timestamps = np.array(timestamps)
+            data = np.array(data)
+
+            return timestamps, data
+
+        image_timestamps, image_paths = load_timestamps_and_paths(self.rgb_files_path)
+        depth_map_timestamps, depth_map_paths = load_timestamps_and_paths(self.depth_map_files_path)
+        trajectory_timestamps, trajectory_data = load_timestamps_and_paths(self.pose_path)
+
+        def get_match_indices(query, target):
+            # This creates a M x N matrix of the difference between each of the image and depth map timestamp pairs
+            # where M is the number of images and N is the number of depth maps.
+            timestamp_deltas = np.abs(query.reshape(-1, 1) - target.reshape(1, -1))
+            # There are more images than depth maps. So what we need is a 1:1 mapping from depth maps to images.
+            # Taking argmin along the columns (axis=0) gives us index of the closest image timestamp for each
+            # depth map timestamp.
+            corresponding_indices = timestamp_deltas.argmin(axis=0)
+
+            return corresponding_indices
+
+        # Select the matching images.
+        image_indices = get_match_indices(image_timestamps, depth_map_timestamps)
+        image_filenames_subset = image_paths[image_indices]
+        # data loaded by `load_timestamps_and_paths(...)` gives data as a 2d array (in this case a column vector),
+        # but we want the paths as a 1d array.
+        image_filenames_subset = image_filenames_subset.flatten()
+        # Convert paths to Path objects to ensure cross compatibility between operating systems.
+        image_filenames_subset = map(Path, image_filenames_subset)
+
+        depth_map_subset = depth_map_paths.flatten()
+        depth_map_subset = map(Path, depth_map_subset)
+
+        # Select the matching trajectory readings.
+        trajectory_indices = get_match_indices(trajectory_timestamps, depth_map_timestamps)
+        trajectory_subset = trajectory_data[trajectory_indices]
+
+        def process_trajectory_datum(datum):
+            tx, ty, tz, qx, qy, qz, qw = map(float, datum)
+            r = Rotation.from_quat((qx, qy, qz, qw)).as_rotvec().reshape((-1, 1))
+            t = np.array([tx, ty, tz]).reshape((-1, 1))
+            pose = np.vstack((r, t))
+
+            return pose
+
+        trajectory_subset = np.array(list(map(process_trajectory_datum, trajectory_subset)))
+
+        # # Rearrange pairs into the shape (N, 3) where N is the number of image and depth map pairs.
+        # synced_frame_data = list(zip(image_filenames_subset, depth_map_subset, trajectory_subset))
+        #
+        # return synced_frame_data
+        image_filenames_subset = list(
+            map(lambda path: os.path.join(*map(str, (self.base_dir, path))), image_filenames_subset))
+        depth_map_subset = list(map(lambda path: os.path.join(*map(str, (self.base_dir, path))), depth_map_subset))
+
+        return image_filenames_subset, depth_map_subset, trajectory_subset
+
+    def load(self, storage_options, frame_sampler=FrameSampler(), should_create_masks=True, use_estimated_depth=False):
+        """
+        Load the data.
+        :param frame_sampler: The frame sampler which chooses which frames to keep or discard.
+        :return: A 4-tuple containing the frames, depth maps, camera parameters and camera poses.
+        """
+        # TODO: Convert log to Timer.split
+        log("Getting synced frame data...")
+        self.synced_frame_data = self._get_synced_frame_data()
+
+        selected_frame_data = frame_sampler.choose(self.synced_frame_data)
+        rgb_paths, depth_paths, poses = selected_frame_data
+        log(f"Selected {len(rgb_paths)} frames.")
+
+        log("Loading dataset...")
+
+        pool = ThreadPool(psutil.cpu_count(logical=False))
+
+        # TODO: Get rgb image path from the metadata
+        rgb_folder = os.path.join(self.base_dir, 'rgb')
+
+        if use_estimated_depth:
+            # TODO: Make the estimated depth folder configurable.
+            estimated_depth_folder = 'estimated_depth'
+            estimated_depth_path = os.path.join(self.base_dir, estimated_depth_folder)
+
+            if os.path.isdir(estimated_depth_path) and len(os.listdir(estimated_depth_path)) > 0:
+                num_estimated_depth_maps = len(os.listdir(estimated_depth_path))
+                num_frames = len(os.listdir(rgb_folder))
+
+                if num_estimated_depth_maps == num_frames:
+                    log(f"Found estimated depth maps in {estimated_depth_path}.")
+                else:
+                    raise RuntimeError(f"Found estimated depth maps in {estimated_depth_path} but found "
+                                       f"{num_estimated_depth_maps} when {num_frames} was expected. "
+                                       f"Potential fix: Delete the folder {estimated_depth_path} and run the program "
+                                       f"again.")
+            else:
+                log("Estimating depth maps...")
+                output_path = estimated_depth_path
+                # TODO: Get the weights path from a config file pointing to the location in the Docker image.
+                adabins_inference = InferenceHelper(weights_path='/root/.cache/pretrained')
+                adabins_inference.predict_dir(rgb_folder, output_path)
+
+            assert os.path.isdir(estimated_depth_path) and len(os.listdir(estimated_depth_path)) == len(os.listdir(estimated_depth_path))
+            # Depth estimation models will use the rgb image names... so the paths will be identical to the rgb paths
+            # except the folder will be 'estimated_depth' instead of 'rgb'.
+            depth_paths = list(pool.map(lambda path: path.replace("rgb/", f"{estimated_depth_folder}/"), rgb_paths))
+            log(f"Convert depth paths to estimated depth paths.")
+
+        rgb_frames = pool.map(lambda path: cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB), rgb_paths)
+        depth_maps = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_ANYDEPTH), depth_paths)
+        log(f"Loaded {len(rgb_frames)} frames.")
+
+        rgb_frames = np.asarray(rgb_frames)
+        depth_maps = np.asarray(depth_maps)
+        log(f"Convert frame data to NumPy arrays.")
+
+        if use_estimated_depth:
+            # Assuming NYU formatted depth.
+            # TODO: Make depth scaling factor configurable for estimated depth.
+            depth_maps = depth_maps.astype(np.float32) / 1000.
+        else:
+            depth_maps = self.depth_scale_factor * depth_maps
+
+        depth_maps = depth_maps.astype(np.float32)
+
+        self.frames = rgb_frames
+        self.depth_maps = depth_maps
+        self.poses = np.vstack(poses).reshape((-1, 6))
+
+        mask_dir_hash = sha256(f"{self.base_dir}{frame_sampler.start:06d}{frame_sampler.stop:06}"
+                               f"{frame_sampler.stop_is_inclusive}".encode('utf-8')).hexdigest()
+        mask_folder = os.path.join(self.base_dir, mask_dir_hash)
+
+        # TODO: Push this logic down to `create_masks(...)` for here and the similar code in `load_input_data(...)`.
+        if os.path.isdir(mask_folder) and \
+                len(os.listdir(mask_folder)) == len(rgb_frames):
+            print(f"Found cached masks in {mask_folder}")
+        elif should_create_masks:
+            class NumpyDataset(Dataset):
+                def __init__(self, rgb_frames):
+                    self.frames = rgb_frames
+
+                def __getitem__(self, index):
+                    return self.frames[index]
+
+                def __len__(self):
+                    return len(self.frames)
+
+            rgb_loader = DataLoader(NumpyDataset(rgb_frames),
+                                    batch_size=8, shuffle=False)
+            create_masks(rgb_loader, mask_folder, overwrite_ok=storage_options.overwrite_ok)
+        else:
+            raise RuntimeError(f"Masks not found in path {mask_folder} or number of masks do not match the "
+                               f"number of rgb frames in the selected set.")
+
+        mask_paths = list(map(lambda filename: os.path.join(mask_folder, filename), sorted(os.listdir(mask_folder))))
+
+        assert len(mask_paths) == len(rgb_frames)
+
+        masks = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE), mask_paths)
+        masks = np.asarray(masks)
+
+        log(f"Loaded {len(masks)} masks from {mask_folder}")
+
+        self.masks = masks
+        self.mask_path = mask_folder
+
+        return self
+
+    def get_info(self):
+        image_resolution = "%dx%d" % (
+            self.frames[0].shape[1], self.frames[0].shape[0]) if self.frames is not None else 'N/A'
+        depth_map_resolution = "%dx%d" % (
+            self.depth_maps[0].shape[1], self.depth_maps[0].shape[0]) if self.frames is not None else 'N/A'
+
+        lines = [
+            f"Dataset Info:",
+            f"\tPath: {self.base_dir}",
+            f"\tTrajectory Data Path: {self.pose_path}",
+            f"\tRGB Frame List Path: {self.rgb_files_path}",
+            f"\tDepth Map List Path: {self.depth_map_files_path}",
+            f"",
+            f"\tTotal Num. Frames: {self.num_frames}",
+            f"\tImage Resolution: {image_resolution}",
+            f"\tDepth Map Resolution: {depth_map_resolution}",
+            f"\tIs 16-bit: {self.is_16_bit}",
+            f"\tDepth Scale: {self.depth_scale_factor:.4f}",
+        ]
+
+        return '\n'.join(lines)

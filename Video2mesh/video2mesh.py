@@ -1,3 +1,5 @@
+import warnings
+
 import argparse
 import os
 import shutil
@@ -10,7 +12,7 @@ from PIL import Image
 from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
 
-from Video2mesh.io import load_input_data, load_camera_parameters
+from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler
 from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
@@ -118,7 +120,8 @@ class Video2Mesh:
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
                  depth_options=DepthOptions(),
                  should_create_masks=False, batch_size=8, num_frames=-1, fps=60, scale_factor=1.0,
-                 include_background=False, static_background=False):
+                 include_background=False, static_background=False,
+                 use_estimated_depth=False):
         self.storage_options = storage_options
         self.mask_folder = storage_options
         self.depth_options = depth_options
@@ -132,18 +135,31 @@ class Video2Mesh:
         self.decimation_options = decimation_options
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
+        self.use_estimated_depth = use_estimated_depth
 
     def run(self):
         timer = Timer()
         timer.start()
 
-        self.validate_folder_structure()
+        # TODO: Check whether dataset is in TUM format.
+        # self.validate_folder_structure()
 
-        K, camera_trajectory = load_camera_parameters(self.storage_options)
-        timer.split("load camera parameters")
+        # K, camera_trajectory = load_camera_parameters(self.storage_options)
+        # timer.split("load camera parameters")
+        #
+        # rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
+        #                                                 self.should_create_masks, timer)
 
-        rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
-                                                        self.should_create_masks, timer)
+        dataset = TUMDataLoader(self.storage_options.base_folder).load(storage_options=self.storage_options,
+                                                                       use_estimated_depth=self.use_estimated_depth,
+                                                                       frame_sampler=FrameSampler())
+
+        K = dataset.intrinsic_matrix
+        camera_trajectory = dataset.poses
+        rgb_frames = dataset.frames
+        depth_maps = dataset.depth_maps
+        masks = dataset.masks
+        timer.split("load dataset")
 
         print(f"Checking maximum number of masks...")
         max_num_masks = masks.max()
@@ -217,6 +233,7 @@ class Video2Mesh:
             # Construct 3D Point Cloud
             rgb = np.ascontiguousarray(rgb[:, :, :3])
             transform = pose_vec2mat(pose)
+            transform = np.linalg.inv(transform)
             R = transform[:3, :3]
             t = transform[:3, 3:]
 
@@ -230,12 +247,23 @@ class Video2Mesh:
 
                 is_object = object_id > 0
 
+                coverage_ratio = mask.mean()
+
+                if coverage_ratio < 0.01:
+                    timer.split(f"\t\tSkipping object #{object_id} due to insufficient coverage.")
+                    continue
+
                 if is_object:
                     mask = self.dilate_mask(mask, self.dilation_options)
                     timer.split(f"\t\terode mask")
 
                 vertices = point_cloud_from_depth(depth, mask, K, R, t, self.scale_factor)
                 timer.split("\t\tcreate point cloud")
+
+                if len(vertices) < 9:
+                    timer.split(
+                        f"\t\tSkipping object #{object_id} due to insufficient number of vertices ({len(vertices)}).")
+                    continue
 
                 points2d, depth_proj = world2image(vertices, K, R, t, self.scale_factor)
                 timer.split("\t\tproject 3D points to pixel coordinates")
@@ -267,20 +295,24 @@ class Video2Mesh:
 
                 timer.split("\t\tadd object mesh to frame mesh")
 
-            packed_textures, packed_uv = self.pack_textures(texture_atlas, uv_atlas, n_rows=1)
+            if len(texture_atlas) == 0:
+                mesh = trimesh.Trimesh()
+                warnings.warn(f"Mesh for frame #{i + 1} is empty!")
+            else:
+                packed_textures, packed_uv = self.pack_textures(texture_atlas, uv_atlas, n_rows=1)
 
-            timer.split("\tpack texture atlas")
+                timer.split("\tpack texture atlas")
 
-            mesh = trimesh.Trimesh(
-                frame_vertices,
-                frame_faces,
-                visual=trimesh.visual.TextureVisuals(
-                    uv=packed_uv,
-                    material=trimesh.visual.material.PBRMaterial(
-                        baseColorTexture=Image.fromarray(packed_textures.astype(np.uint8)),
+                mesh = trimesh.Trimesh(
+                    frame_vertices,
+                    frame_faces,
+                    visual=trimesh.visual.TextureVisuals(
+                        uv=packed_uv,
+                        material=trimesh.visual.material.PBRMaterial(
+                            baseColorTexture=Image.fromarray(packed_textures.astype(np.uint8)),
+                        )
                     )
                 )
-            )
 
             scene.add_geometry(mesh, node_name=f"frame_{i:03d}")
             timer.split("add frame mesh to scene")
@@ -579,6 +611,9 @@ if __name__ == '__main__':
                         action='store_true')
     parser.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
                                                        'Set to -1 (default) to process all frames.', default=-1)
+    parser.add_argument('use_estimated_depth', action='store_true',
+                        help='Flag to indicate that depth maps estimated by a neural network model should be used '
+                             'instead of the ground truth depth maps..')
 
     # TODO: Use the class `UnrealDatasetInfo' to load the dataset info from disk, rather than using CLI args.
     StorageOptions.add_args(parser)
@@ -596,10 +631,13 @@ if __name__ == '__main__':
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
 
+    # TODO: Why is the flag `args.use_estimated_depth` true even if not set via cli?
+
     program = Video2Mesh(storage_options, decimation_options=decimation_options, dilation_options=dilation_options,
-                         filtering_options=filtering_options,depth_options=depth_options,
+                         filtering_options=filtering_options, depth_options=depth_options,
                          num_frames=args.num_frames, fps=args.fps,
                          include_background=args.include_background,
                          should_create_masks=args.create_masks,
-                         static_background=args.static_background)
+                         static_background=args.static_background,
+                         use_estimated_depth=args.use_estimated_depth)
     program.run()
