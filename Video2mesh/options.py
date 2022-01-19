@@ -1,8 +1,7 @@
 import argparse
 import enum
-import os
-
 import numpy as np
+import os
 
 
 class ReprMixin:
@@ -15,44 +14,88 @@ class ReprMixin:
         return repr(self)
 
 
-class StorageOptions(ReprMixin):
+class Options:
+    """
+    Interface for objects that store options that can be initialised either programmatically or
+    via command-line arguments.
+    """
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        """
+        Add arguments to a parser (modifies object in-place).
+        Implementing members should add the new arguments to a group.
+
+        :param parser: The parser object to add the arguments to.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'Options':
+        """
+        Create an Options object from parsed command line arguments.
+
+        :param args: The namespace object from calling `parser.parse_args()`.
+        """
+        raise NotImplementedError
+
+
+class StorageOptions(Options, ReprMixin):
     """Options regarding storage of inputs and outputs."""
 
-    def __init__(self, base_folder, colour_folder='colour', depth_folder='depth', mask_folder='mask',
-                 output_folder='scene3d', overwrite_ok=False):
+    def __init__(self, base_path, colour_folder='colour', depth_folder='depth', mask_folder='mask',
+                 colmap_folder='colmap', output_folder='scene3d', overwrite_ok=False):
         """
-        :param base_folder: Path to the folder containing the RGB and depth image folders.'
-        :param colour_folder: Name of the folder that contains the RGB images inside the folder `base_folder`.'
-        :param depth_folder: Name of the folder that contains the depth maps inside the folder `base_folder`.'
-        :param mask_folder: Name of the folder that contains the dynamic object masks inside the folder `base_folder`.'
-        :param output_folder: Name of the folder to save the results to (will be inside the folder `base_folder`).
+        :param base_path: Path to the folder containing the RGB and depth image folders.'
+        :param colour_folder: Name of the folder that contains the RGB images inside the folder `base_path`.'
+        :param depth_folder: Name of the folder that contains the depth maps inside the folder `base_path`.'
+        :param mask_folder: Name of the folder that contains the dynamic object masks inside the folder `base_path`.'
+        :param colmap_folder: Name of the folder inside the folder `base_path` that contains the COLMAP output.
+        :param output_folder: Name of the folder to save the results to (will be inside the folder `base_path`).
         :param overwrite_ok: Whether it is okay to replace old results.
         """
-        self.base_folder = base_folder
-        self.colour_folder = os.path.join(base_folder, colour_folder)
-        self.depth_folder = os.path.join(base_folder, depth_folder)
-        self.mask_folder = os.path.join(base_folder, mask_folder)
+        self.base_path = base_path
+        self.colour_folder = colour_folder
+        self.depth_folder = depth_folder
+        self.mask_folder = mask_folder
+        self.colmap_folder = colmap_folder
         self.output_folder = output_folder
         self.overwrite_ok = overwrite_ok
+
+    @property
+    def colour_path(self):
+        return os.path.join(self.base_path, self.colour_folder)
+
+    @property
+    def depth_path(self):
+        return os.path.join(self.base_path, self.depth_folder)
+
+    @property
+    def mask_path(self):
+        return os.path.join(self.base_path, self.mask_folder)
+
+    @property
+    def colmap_path(self):
+        return os.path.join(self.base_path, self.colmap_folder)
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('Storage Options')
 
-        group.add_argument('--base_dir', type=str,
+        group.add_argument('--base_path', type=str,
                            help='Path to the folder containing the RGB and depth image folders.',
                            required=True)
-        group.add_argument('--colour_dir', type=str,
-                           help='Name of the folder that contains the RGB images inside the folder `base_folder`.',
+        group.add_argument('--colour_folder', type=str,
+                           help='Name of the folder that contains the RGB images inside the folder `base_path`.',
                            default='colour')
-        group.add_argument('--depth_dir', type=str,
-                           help='Name of the folder that contains the depth maps inside the folder `base_folder`.',
+        group.add_argument('--depth_folder', type=str,
+                           help='Name of the folder that contains the depth maps inside the folder `base_path`.',
                            default='depth')
-        group.add_argument('--mask_dir', type=str,
-                           help='Name of the folder that contains the dynamic object masks inside the folder `base_folder`.',
+        group.add_argument('--mask_folder', type=str,
+                           help='Name of the folder that contains the dynamic object masks inside the folder `base_path`.',
                            default='mask')
-        group.add_argument('--output_dir', type=str,
-                           help='Name of the folder to save the results to (will be inside the folder `base_folder`).',
+        group.add_argument('--output_folder', type=str,
+                           help='Name of the folder to save the results to (will be inside the folder `base_path`).',
                            default='scene3d')
 
         group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
@@ -61,11 +104,11 @@ class StorageOptions(ReprMixin):
     @staticmethod
     def from_args(args):
         return StorageOptions(
-            base_folder=args.base_dir,
-            colour_folder=args.colour_dir,
-            depth_folder=args.depth_dir,
-            mask_folder=args.mask_dir,
-            output_folder=args.output_dir,
+            base_path=args.base_path,
+            colour_folder=args.colour_folder,
+            depth_folder=args.depth_folder,
+            mask_folder=args.mask_folder,
+            output_folder=args.output_folder,
             overwrite_ok=args.overwrite_ok
         )
 
@@ -75,7 +118,7 @@ class DepthFormat(enum.Enum):
     DEPTH_TO_PLANE = enum.auto()
 
 
-class DepthOptions(ReprMixin):
+class DepthOptions(Options, ReprMixin):
     """Options for depth maps."""
 
     def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE):
@@ -101,7 +144,7 @@ class DepthOptions(ReprMixin):
                            choices=['uint8', 'uint16'])
 
     @staticmethod
-    def from_args(args):
+    def from_args(args) -> 'DepthOptions':
         max_depth = args.max_depth
         dtype = args.depth_dtype
         depth_format = args.depth_format
@@ -122,3 +165,37 @@ class DepthOptions(ReprMixin):
                                f"expected 'depth_to_point' or 'depth_to_plane'")
 
         return DepthOptions(max_depth, dtype, depth_format)
+
+
+class COLMAPOptions(Options, ReprMixin):
+    quality_choices = ('low', 'medium', 'high', 'extreme')
+
+    def __init__(self, is_single_camera=True, dense=False, quality='high', binary_path='/usr/local/bin/colmap'):
+        self.binary_path = binary_path
+        self.is_single_camera = is_single_camera
+        self.dense = dense
+        self.quality = quality
+
+        assert quality in COLMAPOptions.quality_choices, f"Quality must be one of: {COLMAPOptions.quality_choices}, got {quality}."
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('COLMAP Options')
+
+        group.add_argument('--multiple_cameras', action='store_true',
+                           help='Whether the video dataset was captured with multiple camera devices or '
+                                'a single camera device with different settings per-frame (e.g. focal length).')
+        group.add_argument('--dense', action='store_true', help='Whether to run dense reconstruction.')
+        group.add_argument('--quality', type=str, help='The quality of the COLMAP reconstruction.',
+                           default='low', choices=COLMAPOptions.quality_choices)
+        group.add_argument('--binary_path', type=str, help='The path to the COLMAP binary.',
+                           default='/usr/local/bin/colmap')
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'COLMAPOptions':
+        return COLMAPOptions(
+            binary_path=args.binary_path,
+            is_single_camera=not args.multiple_cameras,
+            dense=args.dense,
+            quality=args.quality
+        )

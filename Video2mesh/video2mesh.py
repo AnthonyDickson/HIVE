@@ -11,16 +11,17 @@ import trimesh
 from PIL import Image
 from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
+from typing import Optional
 
-from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler
-from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions
+from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler, COLMAPProcessor
+from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions, COLMAPOptions, Options
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
 
 setup_logger()
 
 
-class MeshDecimationOptions(ReprMixin):
+class MeshDecimationOptions(Options, ReprMixin):
     """Options for mesh decimation."""
 
     def __init__(self, num_vertices_background=2 ** 14, num_vertices_object=2 ** 10, max_error=0.001):
@@ -45,7 +46,7 @@ class MeshDecimationOptions(ReprMixin):
                            default=0.001)
 
     @staticmethod
-    def from_args(args):
+    def from_args(args) -> 'MeshDecimationOptions':
         return MeshDecimationOptions(
             num_vertices_background=args.num_vertices_background,
             num_vertices_object=args.num_vertices_object,
@@ -53,7 +54,7 @@ class MeshDecimationOptions(ReprMixin):
         )
 
 
-class MaskDilationOptions(ReprMixin):
+class MaskDilationOptions(Options, ReprMixin):
     """Options for the function `dilate_mask`."""
 
     def __init__(self, num_iterations=3, dilation_filter=cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))):
@@ -75,11 +76,11 @@ class MaskDilationOptions(ReprMixin):
                            default=3)
 
     @staticmethod
-    def from_args(args):
+    def from_args(args) -> 'MaskDilationOptions':
         return MaskDilationOptions(num_iterations=args.dilate_mask_iter)
 
 
-class MeshFilteringOptions(ReprMixin):
+class MeshFilteringOptions(Options, ReprMixin):
     """Options for filtering mesh faces."""
 
     def __init__(self, max_pixel_distance=2, max_depth_distance=0.02, min_num_components=5):
@@ -109,7 +110,7 @@ class MeshFilteringOptions(ReprMixin):
                                 'Fragments with fewer components will be culled.', default=5)
 
     @staticmethod
-    def from_args(args):
+    def from_args(args) -> 'MeshFilteringOptions':
         return MeshFilteringOptions(max_pixel_distance=args.max_pixel_dist,
                                     max_depth_distance=args.max_depth_dist,
                                     min_num_components=args.min_num_components)
@@ -118,47 +119,91 @@ class MeshFilteringOptions(ReprMixin):
 class Video2Mesh:
     def __init__(self, storage_options, decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 depth_options=DepthOptions(),
+                 depth_options=DepthOptions(), colmap_options: Optional[COLMAPOptions] = None,
                  should_create_masks=False, batch_size=8, num_frames=-1, fps=60, scale_factor=1.0,
+                 is_tum=False,
                  include_background=False, static_background=False,
-                 use_estimated_depth=False):
+                 estimate_depth=False, estimate_camera_params=False):
+        # TODO: Fill out Video2Mesh __init__(...) docstring.
+        """
+        :param storage_options:
+        :param decimation_options:
+        :param dilation_options:
+        :param filtering_options:
+        :param depth_options:
+        :param colmap_options:
+        :param should_create_masks:
+        :param batch_size:
+        :param num_frames:
+        :param fps:
+        :param scale_factor:
+        :param is_tum:
+        :param include_background:
+        :param static_background:
+        :param estimate_depth:
+        :param estimate_camera_params:
+        """
         self.storage_options = storage_options
         self.mask_folder = storage_options
         self.depth_options = depth_options
-        self.should_create_masks = should_create_masks
-        self.fps = fps
-        self.batch_size = batch_size
-        self.scale_factor = scale_factor
-        self.include_background = include_background
-        self.static_background = static_background
-        self.num_frames = num_frames
+        self.colmap_options = colmap_options
         self.decimation_options = decimation_options
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
-        self.use_estimated_depth = use_estimated_depth
+        # TODO: Put loose params into `DatasetOptions` class.
+        self.should_create_masks = should_create_masks
+        self.is_tum = is_tum
+        self.fps = fps
+        self.scale_factor = scale_factor
+        self.batch_size = batch_size
+        self.num_frames = num_frames
+        self.include_background = include_background
+        self.static_background = static_background
+        self.estimate_depth = estimate_depth
+        self.estimate_camera_params = estimate_camera_params
 
     def run(self):
         timer = Timer()
         timer.start()
 
-        # TODO: Check whether dataset is in TUM format.
-        # self.validate_folder_structure()
+        if self.is_tum:
+            dataset = TUMDataLoader(self.storage_options.base_path).load(storage_options=self.storage_options,
+                                                                         use_estimated_depth=self.estimate_depth,
+                                                                         frame_sampler=FrameSampler())
 
-        # K, camera_trajectory = load_camera_parameters(self.storage_options)
-        # timer.split("load camera parameters")
-        #
-        # rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
-        #                                                 self.should_create_masks, timer)
+            K = dataset.intrinsic_matrix
+            camera_trajectory = dataset.poses
+            rgb_frames = dataset.frames
+            depth_maps = dataset.depth_maps
+            masks = dataset.masks
+            frame_indices = dataset.subset_indices
+        else:
+            self.validate_folder_structure()
 
-        dataset = TUMDataLoader(self.storage_options.base_folder).load(storage_options=self.storage_options,
-                                                                       use_estimated_depth=self.use_estimated_depth,
-                                                                       frame_sampler=FrameSampler())
+            K, camera_trajectory = load_camera_parameters(self.storage_options)
+            timer.split("load camera parameters")
 
-        K = dataset.intrinsic_matrix
-        camera_trajectory = dataset.poses
-        rgb_frames = dataset.frames
-        depth_maps = dataset.depth_maps
-        masks = dataset.masks
+            # TODO: Add support for estimated depth maps for Unreal datasets.
+            rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
+                                                            self.should_create_masks, timer)
+            frame_indices = np.array(list(range(len(rgb_frames))))
+
+        if self.estimate_camera_params:
+            # TODO: Make sure COLMAP is only given the frames that are being used.
+            #  E.g. with TUM datasets some RGB frames are dropped because the RGB and depth video feeds are not synced.
+            colmap_processor = COLMAPProcessor(storage_options=self.storage_options, colmap_options=colmap_options)
+
+            if not colmap_processor.probably_has_results:
+                colmap_processor.run()
+
+            K, camera_trajectory = colmap_processor.load_camera_params()
+
+            # TUM datasets do not use all RGB frames since RGB and depth feeds are not synced.
+            camera_trajectory = camera_trajectory[frame_indices]
+
+            # K = colmap_processor.get_camera_parameters()
+            # camera_trajectory = colmap_processor.get_camera_trajectory()
+
         timer.split("load dataset")
 
         print(f"Checking maximum number of masks...")
@@ -184,9 +229,9 @@ class Video2Mesh:
             foreground_scene.apply_translation(centering_transform)
             background_scene.apply_translation(centering_transform)
 
-            self.write_results(self.storage_options.base_folder, self.storage_options.output_folder, foreground_scene,
+            self.write_results(self.storage_options.base_path, self.storage_options.output_folder, foreground_scene,
                                timer, self.storage_options.overwrite_ok)
-            self.write_results(self.storage_options.base_folder, background_output_folder, background_scene, timer,
+            self.write_results(self.storage_options.base_path, background_output_folder, background_scene, timer,
                                self.storage_options.overwrite_ok)
         else:
             scene = self.create_scene(rgb_frames, depth_maps, masks, K, camera_trajectory, timer,
@@ -195,8 +240,8 @@ class Video2Mesh:
 
             # Center scene at world origin.
             scene.apply_translation(-scene.bounds.mean(axis=0))
-
-            self.write_results(self.storage_options.base_folder, self.storage_options.output_folder, scene, timer,
+            # TODO: Undo initial pose so that video is centered at world origin with no rotation.
+            self.write_results(self.storage_options.base_path, self.storage_options.output_folder, scene, timer,
                                self.storage_options.overwrite_ok)
 
         # TODO: Summarise results - how many frames? mesh size (on disk, vertices/faces per frame and total)
@@ -216,6 +261,8 @@ class Video2Mesh:
         scene = trimesh.scene.Scene(
             camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
         )
+
+        # TODO: Simplify progress logging and dump more detailed logs to disk.
 
         for i, (rgb, depth, mask_encoded, pose) in enumerate(zip(rgb_frames, depth_maps, masks, camera_trajectory)):
             if i >= num_frames:
@@ -324,11 +371,11 @@ class Video2Mesh:
         error_message = "Could not access folder {}. Either: it does not exist; " \
                         "there was a typo in the path; or Python does not have sufficient privileges.".format
 
-        assert os.path.isdir(storage.base_folder), error_message(storage.base_folder)
-        assert os.path.isdir(storage.colour_folder), error_message(storage.colour_folder)
-        assert os.path.isdir(storage.depth_folder), error_message(storage.depth_folder)
-        assert os.path.isdir(storage.mask_folder) or self.should_create_masks, \
-            f"Could not access mask folder {storage.mask_folder}. Either: it does not exist; " \
+        assert os.path.isdir(storage.base_path), error_message(storage.base_path)
+        assert os.path.isdir(storage.colour_path), error_message(storage.colour_path)
+        assert os.path.isdir(storage.depth_path), error_message(storage.depth_path)
+        assert os.path.isdir(storage.mask_path) or self.should_create_masks, \
+            f"Could not access mask folder {storage.mask_path}. Either: it does not exist; " \
             f"there was a typo in the path; Python does not have sufficient privileges; or the path does not exist " \
             f"AND the flag `--create_masks` was not enabled in the CLI."
 
@@ -600,7 +647,8 @@ class Video2Mesh:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser("Create 3D meshes from a RGB-D sequence with camera trajectory annotations.")
+    parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
+                                                                  "camera trajectory annotations.")
 
     parser.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
                         action='store_true')
@@ -611,9 +659,14 @@ if __name__ == '__main__':
                         action='store_true')
     parser.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
                                                        'Set to -1 (default) to process all frames.', default=-1)
-    parser.add_argument('use_estimated_depth', action='store_true',
+    parser.add_argument('--is_tum', action='store_true',
+                        help='Whether the dataset is in the TUM format or the Unreal format.')
+    parser.add_argument('--estimate_depth', action='store_true',
                         help='Flag to indicate that depth maps estimated by a neural network model should be used '
-                             'instead of the ground truth depth maps..')
+                             'instead of the ground truth depth maps.')
+    parser.add_argument('--estimate_camera_params', action='store_true',
+                        help='Flag to indicate that camera intrinsic and extrinsic parameters estimated with COLMAP '
+                             'should be used instead of the ground truth parameters (if they exist).')
 
     # TODO: Use the class `UnrealDatasetInfo' to load the dataset info from disk, rather than using CLI args.
     StorageOptions.add_args(parser)
@@ -621,6 +674,7 @@ if __name__ == '__main__':
     MaskDilationOptions.add_args(parser)
     MeshFilteringOptions.add_args(parser)
     MeshDecimationOptions.add_args(parser)
+    COLMAPOptions.add_args(parser)
 
     args = parser.parse_args()
     print(args)
@@ -630,14 +684,17 @@ if __name__ == '__main__':
     filtering_options = MeshFilteringOptions.from_args(args)
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
+    colmap_options = COLMAPOptions.from_args(args)
 
-    # TODO: Why is the flag `args.use_estimated_depth` true even if not set via cli?
-
-    program = Video2Mesh(storage_options, decimation_options=decimation_options, dilation_options=dilation_options,
+    program = Video2Mesh(storage_options,
+                         decimation_options=decimation_options, dilation_options=dilation_options,
                          filtering_options=filtering_options, depth_options=depth_options,
+                         colmap_options=colmap_options,
+                         is_tum=args.is_tum,
                          num_frames=args.num_frames, fps=args.fps,
                          include_background=args.include_background,
                          should_create_masks=args.create_masks,
                          static_background=args.static_background,
-                         use_estimated_depth=args.use_estimated_depth)
+                         estimate_depth=args.estimate_depth,
+                         estimate_camera_params=args.estimate_camera_params)
     program.run()

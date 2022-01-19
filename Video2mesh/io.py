@@ -1,25 +1,26 @@
-from hashlib import sha256
-
-from pathlib import Path
-
-import os
-import struct
-from multiprocessing.pool import ThreadPool
-
 import cv2
 import numpy as np
+import os
 import psutil
+import struct
+import subprocess
 import torch
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
+from hashlib import sha256
+from multiprocessing.pool import ThreadPool
+from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
+from typing import Union, List
 
+from Video2mesh.options import COLMAPOptions, StorageOptions
 from Video2mesh.utils import Timer, log
 from thirdparty.AdaBins.infer import InferenceHelper
+from thirdparty.colmap.scripts.python.read_write_model import read_model
 
 
 def load_raw_float32_image(file_name):
@@ -113,8 +114,8 @@ def load_camera_parameters(storage_options, timer=Timer()):
     :return:
     """
     # TODO: Complete docstring for this method.
-    camera_params = np.loadtxt(os.path.join(storage_options.base_folder, "camera.txt"))
-    camera_trajectory = np.loadtxt(os.path.join(storage_options.base_folder, "trajectory.txt"))
+    camera_params = np.loadtxt(os.path.join(storage_options.base_path, "camera.txt"))
+    camera_trajectory = np.loadtxt(os.path.join(storage_options.base_path, "trajectory.txt"))
 
     if camera_params.shape != (3, 3):
         raise RuntimeError(f"Expected camera parameters (intrinsic) to be a (3, 3) matrix,"
@@ -143,28 +144,28 @@ def load_input_data(storage_options, depth_options, batch_size=-1, should_create
     # TODO: Set sensible default for batch size if arg value is -1.
     storage = storage_options
 
-    if os.path.isdir(storage.mask_folder) and \
-            len(os.listdir(storage.mask_folder)) == len(os.listdir(storage.colour_folder)):
-        print(f"Found cached masks in {storage.mask_folder}")
+    if os.path.isdir(storage.mask_path) and \
+            len(os.listdir(storage.mask_path)) == len(os.listdir(storage.colour_path)):
+        print(f"Found cached masks in {storage.mask_path}")
     elif should_create_masks:
-        rgb_loader = DataLoader(ImageFolderDataset(storage.colour_folder),
+        rgb_loader = DataLoader(ImageFolderDataset(storage.colour_path),
                                 batch_size=batch_size, shuffle=False)
-        create_masks(rgb_loader, storage.mask_folder, overwrite_ok=storage.overwrite_ok)
+        create_masks(rgb_loader, storage.mask_path, overwrite_ok=storage.overwrite_ok)
     else:
-        raise RuntimeError(f"Masks not found in path {storage.mask_folder} or number of masks do not match the "
-                           f"number of rgb frames in {storage.colour_folder}.")
+        raise RuntimeError(f"Masks not found in path {storage.mask_path} or number of masks do not match the "
+                           f"number of rgb frames in {storage.colour_path}.")
 
     timer.split('locate/create masks')
 
     pool = ThreadPool(psutil.cpu_count(logical=False))
 
-    rgb_frames = pool.map(cv2.imread, ImageFolderDataset(storage.colour_folder).image_paths)
+    rgb_frames = pool.map(cv2.imread, ImageFolderDataset(storage.colour_path).image_paths)
 
     depth_maps = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_ANYDEPTH),
-                          ImageFolderDataset(storage.depth_folder).image_paths)
+                          ImageFolderDataset(storage.depth_path).image_paths)
 
     masks = pool.map(lambda path: cv2.imread(path, cv2.IMREAD_GRAYSCALE),
-                     ImageFolderDataset(storage.mask_folder).image_paths)
+                     ImageFolderDataset(storage.mask_path).image_paths)
 
     timer.split('load frame data to RAM')
 
@@ -223,15 +224,18 @@ class BatchPredictor(DefaultPredictor):
         return predictions
 
 
-def create_masks(rgb_loader, mask_folder, overwrite_ok=False):
+def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
+                 overwrite_ok=False, for_colmap=False):
     """
     Create instance segmentation masks for the given RGB video sequence and save the masks to disk..
 
     :param rgb_loader: The PyTorch DataLoader that loads the RGB frames (no data augmentations applied).
     :param mask_folder: The path to save the masks to.
     :param overwrite_ok: Whether it is okay to write over any mask files in `mask_folder` if it already exists.
+    :param for_colmap: Whether the masks are intended for use with COLMAP or 3D video generation.
+        Masks will be black and white with the background coloured white and using the
+        corresponding input image's filename.
     """
-
     print(f"Creating masks...")
 
     cfg = get_cfg()
@@ -253,7 +257,6 @@ def create_masks(rgb_loader, mask_folder, overwrite_ok=False):
 
     os.makedirs(mask_folder, exist_ok=overwrite_ok)
     i = 0
-    max_num_masks = 0
 
     for image_batch in rgb_loader:
         outputs = predictor(image_batch.numpy())
@@ -261,15 +264,28 @@ def create_masks(rgb_loader, mask_folder, overwrite_ok=False):
         for output in outputs:
             matching_masks = output['instances'].get('pred_classes') == person_label
             people_masks = output['instances'].get('pred_masks')[matching_masks]
-            combined_masks = np.zeros_like(image_batch[0].numpy(), dtype=np.uint8)
-            combined_masks = combined_masks[:, :, 0]
 
-            for j, mask in enumerate(people_masks.cpu().numpy()):
-                combined_masks[mask] = j + 1
+            if for_colmap:
+                combined_masks = 255 * np.ones_like(image_batch[0].numpy(), dtype=np.uint8)
+                combined_masks = combined_masks[:, :, 0]
+
+                for mask in people_masks.cpu().numpy():
+                    combined_masks[mask] = 0
+            else:
+                combined_masks = np.zeros_like(image_batch[0].numpy(), dtype=np.uint8)
+                combined_masks = combined_masks[:, :, 0]
+
+                for j, mask in enumerate(people_masks.cpu().numpy()):
+                    combined_masks[mask] = j + 1
+
+            if for_colmap:
+                output_filename = f"{rgb_loader.dataset.image_filenames[i]}.png"
+            else:
+                output_filename = f"{i:03d}.png"
+
+            Image.fromarray(combined_masks).convert('L').save(os.path.join(mask_folder, output_filename))
 
             i += 1
-            max_num_masks = max(max_num_masks, combined_masks.max())
-            Image.fromarray(combined_masks).convert('L').save(os.path.join(mask_folder, f"{i:03d}.png"))
 
         print(f"{i:03,d}/{len(rgb_loader.dataset):03,d}")
 
@@ -284,6 +300,7 @@ class ImageFolderDataset(Dataset):
         filenames = list(sorted(os.listdir(base_dir)))
         assert len(filenames) > 0, f"No files found in the folder: {base_dir}"
 
+        self.image_filenames = filenames
         self.image_paths = [os.path.join(base_dir, filename) for filename in filenames]
 
     def __getitem__(self, idx):
@@ -538,6 +555,7 @@ class TUMDataLoader:
         self.depth_scale_factor = 1.0 / 5000.0 if is_16_bit else 1.0
 
         self.synced_frame_data = None
+        self.subset_indices = None
         self.frames = None
         self.depth_maps = None
         self.poses = None
@@ -650,7 +668,7 @@ class TUMDataLoader:
             map(lambda path: os.path.join(*map(str, (self.base_dir, path))), image_filenames_subset))
         depth_map_subset = list(map(lambda path: os.path.join(*map(str, (self.base_dir, path))), depth_map_subset))
 
-        return image_filenames_subset, depth_map_subset, trajectory_subset
+        return image_indices,( image_filenames_subset, depth_map_subset, trajectory_subset)
 
     def load(self, storage_options, frame_sampler=FrameSampler(), should_create_masks=True, use_estimated_depth=False):
         """
@@ -660,7 +678,7 @@ class TUMDataLoader:
         """
         # TODO: Convert log to Timer.split
         log("Getting synced frame data...")
-        self.synced_frame_data = self._get_synced_frame_data()
+        self.subset_indices, self.synced_frame_data = self._get_synced_frame_data()
 
         selected_frame_data = frame_sampler.choose(self.synced_frame_data)
         rgb_paths, depth_paths, poses = selected_frame_data
@@ -696,7 +714,8 @@ class TUMDataLoader:
                 adabins_inference = InferenceHelper(weights_path='/root/.cache/pretrained')
                 adabins_inference.predict_dir(rgb_folder, output_path)
 
-            assert os.path.isdir(estimated_depth_path) and len(os.listdir(estimated_depth_path)) == len(os.listdir(estimated_depth_path))
+            assert os.path.isdir(estimated_depth_path) and len(os.listdir(estimated_depth_path)) == len(
+                os.listdir(estimated_depth_path))
             # Depth estimation models will use the rgb image names... so the paths will be identical to the rgb paths
             # except the folder will be 'estimated_depth' instead of 'rgb'.
             depth_paths = list(pool.map(lambda path: path.replace("rgb/", f"{estimated_depth_folder}/"), rgb_paths))
@@ -784,3 +803,138 @@ class TUMDataLoader:
         ]
 
         return '\n'.join(lines)
+
+
+class COLMAPProcessor(Dataset):
+    """
+    Estimates camera trajectory and intrinsic parameters via COLMAP.
+    """
+
+    def __init__(self, storage_options: StorageOptions, colmap_options: COLMAPOptions, colmap_mask_folder='masks'):
+        self.storage_options = storage_options
+        self.colmap_options = colmap_options
+        self.mask_folder = colmap_mask_folder
+
+    @property
+    def workspace_path(self):
+        return self.storage_options.colmap_path
+
+    @property
+    def image_path(self):
+        return self.storage_options.colour_path
+
+    @property
+    def mask_path(self):
+        return os.path.join(self.workspace_path, self.mask_folder)
+
+    @property
+    def result_path(self):
+        return os.path.join(self.workspace_path, 'sparse')
+
+    @property
+    def probably_has_results(self):
+        recon_result_path = os.path.join(self.result_path, '0')
+        min_files_for_recon = 4
+
+        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
+               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
+
+    def run(self):
+        os.makedirs(self.workspace_path, exist_ok=True)
+
+        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
+            print(f"Could not find masks in folder: {self.mask_path}.")
+            print(f"Creating masks for COLMAP...")
+            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
+            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
+        else:
+            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
+
+        command = self.get_command()
+        # TODO: Check that COLMAP is using GPU
+        colmap_process = subprocess.Popen(command)
+        colmap_process.wait()
+
+        if colmap_process.returncode != 0:
+            raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
+
+        return
+
+    def get_command(self, return_as_string=False):
+        """
+        Build the command for running COLMAP .
+        Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
+
+        :param return_as_string: Whether to return the command as a single string, or as an array.
+        :return: The COLMAP command.
+        """
+        options = self.colmap_options
+
+        assert os.path.isfile(options.binary_path), f"Could not find COLMAP binary at location: {options.binary_path}."
+        assert os.path.isdir(self.workspace_path), f"Could open workspace path: {self.workspace_path}."
+        assert os.path.isdir(self.image_path), f"Could open image folder: {self.image_path}."
+
+        command = [options.binary_path, 'automatic_reconstructor',
+                   '--workspace_path', self.workspace_path,
+                   '--image_path', self.image_path,
+                   '--single_camera', 1 if options.is_single_camera else 0, # COLMAP expects 1 for True, 0 for False.
+                   '--dense', 1 if options.dense else 0,
+                   '--quality', options.quality]
+
+        if self.mask_path is not None:
+            assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
+            command += ['--mask_path', self.mask_path]
+
+        command = list(map(str, command))
+
+        return ' '.join(command) if return_as_string else command
+
+    def load_camera_params(self, raw_pose=False):
+        num_models = len(os.listdir(self.result_path))
+        assert num_models == 1, f"COLMAP reconstructed {num_models} when 1 was expected."
+        sparse_recon_path = os.path.join(self.result_path, '0')
+
+        print(f"Reading camera parameters from {sparse_recon_path}...")
+        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
+
+        f, cx, cy, _ = cameras[1].params # cameras is a dict, COLMAP indices start from one.
+
+        intrinsic = np.eye(3)
+        intrinsic[0, 0] = f
+        intrinsic[1, 1] = f
+        intrinsic[0, 2] = cx
+        intrinsic[1, 2] = cy
+        print("Read intrinsic parameters.")
+
+        extrinsic = []
+
+        if raw_pose:
+            for image in images.values():
+                r, _ = cv2.Rodrigues(image.qvec2rotmat())
+                t = image.tvec.reshape(-1, 1)
+
+                extrinsic.append(np.vstack((r, t)))
+        else:
+            # Code adapted from https://github.com/facebookresearch/consistent_depth
+            # According to some comments in the above code, "Note that colmap uses a different coordinate system
+            # where y points down and z points to the world." The below rotation apparently puts the poses back into
+            # a 'normal' coordinate frame.
+            colmap_to_normal = np.diag([1, -1, -1])
+
+            for image in images.values():
+                R = image.qvec2rotmat()
+                t = image.tvec.reshape(-1, 1)
+
+                R, t = R.T, -R.T.dot(t)
+                R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
+                t = colmap_to_normal.dot(t)
+
+                r, _ = cv2.Rodrigues(R)
+
+                extrinsic.append(np.vstack((r, t)))
+
+        extrinsic = np.asarray(extrinsic).squeeze()
+
+        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+
+        return intrinsic, extrinsic

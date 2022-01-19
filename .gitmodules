@@ -1,3 +1,6 @@
 [submodule "thirdparty/AdaBins"]
 	path = thirdparty/AdaBins
 	url = https://github.com/eight0153/AdaBins.git
+[submodule "thirdparty/colmap"]
+	path = thirdparty/colmap
+	url = https://github.com/colmap/colmap.git

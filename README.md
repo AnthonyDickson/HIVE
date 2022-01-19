@@ -66,7 +66,7 @@ tar -xvzf dance.tar.gz -C data/
 ### Example Usage
 Below is an example of how to run the program:
 ```shell
-python Video2mesh/video2mesh.py --base_dir data/dance --num_frames 10 --max_depth_dist 0.1 --include_background --static_background --overwrite_ok
+python Video2mesh/video2mesh.py --base_path data/dance --num_frames 10 --max_depth_dist 0.1 --include_background --static_background --overwrite_ok
 ```
 
  **Note:** Creating the instance segmentation masks with a CPU only image/Python environment will be *VERY* slow. 
