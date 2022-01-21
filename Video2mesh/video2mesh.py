@@ -1,3 +1,6 @@
+import psutil
+from multiprocessing.pool import ThreadPool
+
 import warnings
 
 import argparse
@@ -13,7 +16,8 @@ from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
 from typing import Optional
 
-from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler, COLMAPProcessor
+from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler, COLMAPProcessor, \
+    StrayScannerDataset
 from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions, COLMAPOptions, Options
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
@@ -121,7 +125,6 @@ class Video2Mesh:
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
                  depth_options=DepthOptions(), colmap_options: Optional[COLMAPOptions] = None,
                  should_create_masks=False, batch_size=8, num_frames=-1, fps=60, scale_factor=1.0,
-                 is_tum=False,
                  include_background=False, static_background=False,
                  estimate_depth=False, estimate_camera_params=False):
         # TODO: Fill out Video2Mesh __init__(...) docstring.
@@ -137,7 +140,6 @@ class Video2Mesh:
         :param num_frames:
         :param fps:
         :param scale_factor:
-        :param is_tum:
         :param include_background:
         :param static_background:
         :param estimate_depth:
@@ -152,7 +154,6 @@ class Video2Mesh:
         self.filtering_options = filtering_options
         # TODO: Put loose params into `DatasetOptions` class.
         self.should_create_masks = should_create_masks
-        self.is_tum = is_tum
         self.fps = fps
         self.scale_factor = scale_factor
         self.batch_size = batch_size
@@ -166,17 +167,39 @@ class Video2Mesh:
         timer = Timer()
         timer.start()
 
-        if self.is_tum:
-            dataset = TUMDataLoader(self.storage_options.base_path).load(storage_options=self.storage_options,
-                                                                         use_estimated_depth=self.estimate_depth,
-                                                                         frame_sampler=FrameSampler())
+        dataset_path = self.storage_options.base_path
+
+        if TUMDataLoader.is_valid_folder_structure(dataset_path):
+            # TODO: Store options for `load(...)` in object via init function.
+            dataset = TUMDataLoader(
+                dataset_path,
+                frame_sampler=FrameSampler(),
+                should_create_masks=self.should_create_masks,
+                overwrite_ok=storage_options.overwrite_ok,
+                use_estimated_depth=self.estimate_depth
+            ).load()
 
             K = dataset.intrinsic_matrix
-            camera_trajectory = dataset.poses
-            rgb_frames = dataset.frames
+            camera_trajectory = dataset.camera_trajectory
+            rgb_frames = dataset.rgb_frames
             depth_maps = dataset.depth_maps
             masks = dataset.masks
             frame_indices = dataset.subset_indices
+        elif StrayScannerDataset.is_valid_folder_structure(dataset_path):
+            dataset = StrayScannerDataset(
+                base_path=dataset_path,
+                resize_to=(480, 640),
+                should_create_masks=self.should_create_masks,
+                overwrite_ok=storage_options.overwrite_ok,
+                use_estimated_depth=self.estimate_depth
+            ).load()
+
+            K = dataset.camera_matrix
+            camera_trajectory = dataset.camera_trajectory
+            rgb_frames = dataset.rgb_frames
+            depth_maps = dataset.depth_maps
+            masks = dataset.masks
+            frame_indices = np.array(list(range(len(rgb_frames))))
         else:
             self.validate_folder_structure()
 
@@ -221,27 +244,27 @@ class Video2Mesh:
                                                  include_background=False,
                                                  background_only=False)
 
-            def gather_vertices(scene):
-                return [g.vertices for g in scene.geometry.values()]
+            T = np.eye(4)
+            T[:3, 3] = -camera_trajectory[0][3:]
+            T[:3, :3] = cv2.Rodrigues(camera_trajectory[0][:3])[0]
+            foreground_scene.apply_transform(T)
+            background_scene.apply_transform(T)
 
-            center = np.concatenate(gather_vertices(foreground_scene) + gather_vertices(background_scene)).mean(axis=0)
-            centering_transform = -center
-            foreground_scene.apply_translation(centering_transform)
-            background_scene.apply_translation(centering_transform)
-
-            self.write_results(self.storage_options.base_path, self.storage_options.output_folder, foreground_scene,
+            self.write_results(dataset_path, self.storage_options.output_folder, foreground_scene,
                                timer, self.storage_options.overwrite_ok)
-            self.write_results(self.storage_options.base_path, background_output_folder, background_scene, timer,
+            self.write_results(dataset_path, background_output_folder, background_scene, timer,
                                self.storage_options.overwrite_ok)
         else:
             scene = self.create_scene(rgb_frames, depth_maps, masks, K, camera_trajectory, timer,
                                       include_background=self.include_background,
                                       background_only=False)
+            T = np.eye(4)
+            T[:3, 3] = -camera_trajectory[0][3:]
+            T[:3, :3] = cv2.Rodrigues(camera_trajectory[0][:3])[0]
 
-            # Center scene at world origin.
-            scene.apply_translation(-scene.bounds.mean(axis=0))
+            scene.apply_transform(T)
             # TODO: Undo initial pose so that video is centered at world origin with no rotation.
-            self.write_results(self.storage_options.base_path, self.storage_options.output_folder, scene, timer,
+            self.write_results(dataset_path, self.storage_options.output_folder, scene, timer,
                                self.storage_options.overwrite_ok)
 
         # TODO: Summarise results - how many frames? mesh size (on disk, vertices/faces per frame and total)
@@ -264,9 +287,8 @@ class Video2Mesh:
 
         # TODO: Simplify progress logging and dump more detailed logs to disk.
 
-        for i, (rgb, depth, mask_encoded, pose) in enumerate(zip(rgb_frames, depth_maps, masks, camera_trajectory)):
-            if i >= num_frames:
-                break
+        def process_frame(i, data):
+            rgb, depth, mask_encoded, pose = data
 
             timer.split(f"start mesh generation for frame {i:02d}")
             frame_vertices = np.zeros((0, 3))
@@ -361,8 +383,12 @@ class Video2Mesh:
                     )
                 )
 
+            return mesh
+
+        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
+        meshes = pool.starmap(process_frame, enumerate(zip(rgb_frames[:num_frames], depth_maps, masks, camera_trajectory)))
+        for i, mesh in enumerate(meshes):
             scene.add_geometry(mesh, node_name=f"frame_{i:03d}")
-            timer.split("add frame mesh to scene")
 
         return scene
 
@@ -511,12 +537,15 @@ class Video2Mesh:
         connected_components = trimesh.graph.connected_components(mesh.face_adjacency, min_len=min_components)
         mask = np.zeros(len(mesh.faces), dtype=bool)
 
-        if is_object:
-            # filter vertices/faces based on result of largest component
-            largest_component_index = np.argmax([len(c) for c in connected_components])
-            mask[connected_components[largest_component_index]] = True
+        if connected_components:
+            if is_object:
+                # filter vertices/faces based on result of largest component
+                largest_component_index = np.argmax([len(c) for c in connected_components])
+                mask[connected_components[largest_component_index]] = True
+            else:
+                mask[np.concatenate(connected_components)] = True
         else:
-            mask[np.concatenate(connected_components)] = True
+            warnings.warn(f"Mesh found with no connected components.")
 
         mesh.update_faces(mask)
 
@@ -659,8 +688,6 @@ if __name__ == '__main__':
                         action='store_true')
     parser.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
                                                        'Set to -1 (default) to process all frames.', default=-1)
-    parser.add_argument('--is_tum', action='store_true',
-                        help='Whether the dataset is in the TUM format or the Unreal format.')
     parser.add_argument('--estimate_depth', action='store_true',
                         help='Flag to indicate that depth maps estimated by a neural network model should be used '
                              'instead of the ground truth depth maps.')
@@ -690,7 +717,6 @@ if __name__ == '__main__':
                          decimation_options=decimation_options, dilation_options=dilation_options,
                          filtering_options=filtering_options, depth_options=depth_options,
                          colmap_options=colmap_options,
-                         is_tum=args.is_tum,
                          num_frames=args.num_frames, fps=args.fps,
                          include_background=args.include_background,
                          should_create_masks=args.create_masks,

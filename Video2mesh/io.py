@@ -1,3 +1,7 @@
+import warnings
+
+import datetime
+
 import cv2
 import numpy as np
 import os
@@ -15,7 +19,7 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
-from typing import Union, List
+from typing import Union, List, Tuple, Optional
 
 from Video2mesh.options import COLMAPOptions, StorageOptions
 from Video2mesh.utils import Timer, log
@@ -287,7 +291,20 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
 
             i += 1
 
-        print(f"{i:03,d}/{len(rgb_loader.dataset):03,d}")
+        print(f"\r{i:03,d}/{len(rgb_loader.dataset):03,d}", end='')
+
+    print()
+
+
+class NumpyDataset(Dataset):
+    def __init__(self, rgb_frames):
+        self.frames = rgb_frames
+
+    def __getitem__(self, index):
+        return self.frames[index]
+
+    def __len__(self):
+        return len(self.frames)
 
 
 class ImageFolderDataset(Dataset):
@@ -515,7 +532,75 @@ class FrameSampler:
         return rgb, depth, pose
 
 
-class TUMDataLoader:
+class DatasetBase:
+    class InvalidDatasetFormatError(Exception):
+        pass
+
+    required_files = []
+    required_folders = []
+    mask_folder = 'mask'
+
+    def __init__(self, base_path: Union[str, Path], should_create_masks=False, overwrite_ok=False,
+                 use_estimated_depth=False, use_estimated_pose=False):
+        """
+        :param base_path: The path to the dataset.
+        :param should_create_masks: Whether instance segmentation masks should be automatically created if
+            they do not already exist.
+        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
+        :param use_estimated_depth: Whether estimated depth maps should be used instead of any
+            included ground truth depth maps.
+        :param use_estimated_pose: Whether estimated camera parameters should be used instead of any
+            included ground truth camera parameters.
+        """
+        self.base_path = base_path
+        self.should_create_masks = should_create_masks
+        self.overwrite_ok = overwrite_ok
+        self.use_estimated_depth = use_estimated_depth
+        self.use_estimated_pose = use_estimated_pose
+
+        self._validate_dataset(base_path)
+
+    @classmethod
+    def is_valid_folder_structure(cls, path):
+        try:
+            cls._validate_dataset(path)
+            return True
+        except DatasetBase.InvalidDatasetFormatError:
+            return False
+
+    @classmethod
+    def _validate_dataset(cls, base_path):
+        """
+        Check whether the given path points to a valid RGB-D dataset.
+
+        This method will throw an AssertionError if the path does not point to a valid dataset.
+
+        :param base_path: The path to the RGB-D dataset.
+        """
+        files_to_find = set(cls.required_files)
+        folders_to_find = set(cls.required_folders)
+
+        for filename in os.listdir(base_path):
+            file_path = os.path.join(base_path, filename)
+
+            if os.path.isfile(file_path):
+                files_to_find.discard(filename)
+            elif os.path.isdir(file_path):
+                if len(os.listdir(file_path)) == 0 and filename in folders_to_find:
+                    raise DatasetBase.InvalidDatasetFormatError(f"Empty folder {filename} in {base_path}.")
+
+                folders_to_find.discard(filename)
+
+        if len(files_to_find) > 0:
+            raise DatasetBase.InvalidDatasetFormatError(
+                f"Could not find the following required files {files_to_find} in {base_path}.")
+
+        if len(folders_to_find) > 0:
+            raise DatasetBase.InvalidDatasetFormatError(
+                f"Could not find the following required folders {folders_to_find} in {base_path}.")
+
+
+class TUMDataLoader(DatasetBase):
     """
     Loads image, depth and pose data from a TUM formatted dataset.
     """
@@ -533,22 +618,42 @@ class TUMDataLoader:
     fps = 30.0
     frame_time = 1.0 / fps
 
-    def __init__(self, base_dir, is_16_bit=True,
-                 pose_path="groundtruth.txt", rgb_files_path="rgb.txt",
-                 depth_map_files_path="depth.txt"):
+    """The name/path of the file that contains the camera pose information."""
+    pose_path = "groundtruth.txt"
+    """The name/path of the file that contains the mapping of timestamps to image file paths."""
+    rgb_files_path = "rgb.txt"
+    """The name/path of the file that contains the mapping of timestamps to depth map paths."""
+    depth_map_files_path = "depth.txt"
+    required_files = [pose_path, rgb_files_path, depth_map_files_path]
+
+    rgb_folder = "rgb"
+    depth_folder = "depth"
+    required_folders = [rgb_folder, depth_folder]
+
+    def __init__(self, base_path, is_16_bit=True, frame_sampler=FrameSampler(),
+                 should_create_masks=False, overwrite_ok=False, use_estimated_depth=False, use_estimated_pose=False):
         """
-        :param base_dir: The path to folder containing the dataset.
+        :param base_path: The path to folder containing the dataset.
         :param is_16_bit: Whether the images are stored with 16-bit values or 32-bit values.
-        :param pose_path: The name/path of the file that contains the camera pose information.
-        :param rgb_files_path: The name/path of the file that contains the mapping of timestamps to image file paths.
-        :param depth_map_files_path: The name/path of the file that contains the mapping of timestamps to depth map paths.
+        :param frame_sampler: The frame sampler which chooses which frames to keep or discard.
+        :param should_create_masks: Whether instance segmentation masks should be automatically created if
+            they do not already exist.
+        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
+        :param use_estimated_depth: Whether estimated depth maps should be used instead of any
+            included ground truth depth maps.
+        :param use_estimated_pose: Whether estimated camera parameters should be used instead of any
+            included ground truth camera parameters.
         """
-        self.base_dir = Path(base_dir)
-        self.pose_path = Path(os.path.join(base_dir, str(Path(pose_path))))
-        self.rgb_files_path = Path(os.path.join(base_dir, str(Path(rgb_files_path))))
-        self.depth_map_files_path = Path(os.path.join(base_dir, str(Path(depth_map_files_path))))
+        super().__init__(base_path, should_create_masks=should_create_masks, overwrite_ok=overwrite_ok,
+                         use_estimated_depth=use_estimated_depth, use_estimated_pose=use_estimated_pose)
+
+        self.base_path = Path(base_path)
+        self.pose_path = Path(os.path.join(base_path, str(Path(self.pose_path))))
+        self.rgb_files_path = Path(os.path.join(base_path, str(Path(self.rgb_files_path))))
+        self.depth_map_files_path = Path(os.path.join(base_path, str(Path(self.depth_map_files_path))))
         self.mask_path = None
 
+        self.frame_sampler = frame_sampler
         self.is_16_bit = is_16_bit
         # The depth maps need to be divided by 5000 for the 16-bit PNG files
         # or 1.0 (i.e. no effect) for the 32-bit float images in the ROS bag files
@@ -556,29 +661,14 @@ class TUMDataLoader:
 
         self.synced_frame_data = None
         self.subset_indices = None
-        self.frames = None
+        self.rgb_frames = None
         self.depth_maps = None
-        self.poses = None
+        self.camera_trajectory = None
         self.masks = None
-
-        self._validate_dataset()
-
-    def _validate_dataset(self):
-        """
-        Check whether the dataset is valid and the expected files are present.
-        :raises RuntimeError if there are any issues with the dataset.
-        """
-        if not self.base_dir.is_dir() or not self.base_dir.exists():
-            raise RuntimeError(
-                "The following path either does not exist, could not be read or is not a folder: %s." % self.base_dir)
-
-        for path in (self.pose_path, self.rgb_files_path, self.depth_map_files_path):
-            if not path.exists() or not path.is_file():
-                raise RuntimeError("The following file either does not exist or could not be read: %s." % path)
 
     @property
     def num_frames(self):
-        return len(self.frames) if self.frames is not None else 0
+        return len(self.rgb_frames) if self.rgb_frames is not None else 0
 
     @property
     def camera_matrix(self):
@@ -665,20 +755,21 @@ class TUMDataLoader:
         #
         # return synced_frame_data
         image_filenames_subset = list(
-            map(lambda path: os.path.join(*map(str, (self.base_dir, path))), image_filenames_subset))
-        depth_map_subset = list(map(lambda path: os.path.join(*map(str, (self.base_dir, path))), depth_map_subset))
+            map(lambda path: os.path.join(*map(str, (self.base_path, path))), image_filenames_subset))
+        depth_map_subset = list(map(lambda path: os.path.join(*map(str, (self.base_path, path))), depth_map_subset))
 
-        return image_indices,( image_filenames_subset, depth_map_subset, trajectory_subset)
+        return image_indices, (image_filenames_subset, depth_map_subset, trajectory_subset)
 
-    def load(self, storage_options, frame_sampler=FrameSampler(), should_create_masks=True, use_estimated_depth=False):
+    def load(self):
         """
         Load the data.
-        :param frame_sampler: The frame sampler which chooses which frames to keep or discard.
         :return: A 4-tuple containing the frames, depth maps, camera parameters and camera poses.
         """
         # TODO: Convert log to Timer.split
         log("Getting synced frame data...")
         self.subset_indices, self.synced_frame_data = self._get_synced_frame_data()
+
+        frame_sampler = self.frame_sampler
 
         selected_frame_data = frame_sampler.choose(self.synced_frame_data)
         rgb_paths, depth_paths, poses = selected_frame_data
@@ -689,12 +780,12 @@ class TUMDataLoader:
         pool = ThreadPool(psutil.cpu_count(logical=False))
 
         # TODO: Get rgb image path from the metadata
-        rgb_folder = os.path.join(self.base_dir, 'rgb')
+        rgb_folder = os.path.join(self.base_path, 'rgb')
 
-        if use_estimated_depth:
+        if self.use_estimated_depth:
             # TODO: Make the estimated depth folder configurable.
             estimated_depth_folder = 'estimated_depth'
-            estimated_depth_path = os.path.join(self.base_dir, estimated_depth_folder)
+            estimated_depth_path = os.path.join(self.base_path, estimated_depth_folder)
 
             if os.path.isdir(estimated_depth_path) and len(os.listdir(estimated_depth_path)) > 0:
                 num_estimated_depth_maps = len(os.listdir(estimated_depth_path))
@@ -729,7 +820,7 @@ class TUMDataLoader:
         depth_maps = np.asarray(depth_maps)
         log(f"Convert frame data to NumPy arrays.")
 
-        if use_estimated_depth:
+        if self.use_estimated_depth:
             # Assuming NYU formatted depth.
             # TODO: Make depth scaling factor configurable for estimated depth.
             depth_maps = depth_maps.astype(np.float32) / 1000.
@@ -738,32 +829,22 @@ class TUMDataLoader:
 
         depth_maps = depth_maps.astype(np.float32)
 
-        self.frames = rgb_frames
+        self.rgb_frames = rgb_frames
         self.depth_maps = depth_maps
-        self.poses = np.vstack(poses).reshape((-1, 6))
+        self.camera_trajectory = np.vstack(poses).reshape((-1, 6))
 
-        mask_dir_hash = sha256(f"{self.base_dir}{frame_sampler.start:06d}{frame_sampler.stop:06}"
+        mask_dir_hash = sha256(f"{self.base_path}{frame_sampler.start:06d}{frame_sampler.stop:06}"
                                f"{frame_sampler.stop_is_inclusive}".encode('utf-8')).hexdigest()
-        mask_folder = os.path.join(self.base_dir, mask_dir_hash)
+        mask_folder = os.path.join(self.base_path, mask_dir_hash)
 
         # TODO: Push this logic down to `create_masks(...)` for here and the similar code in `load_input_data(...)`.
         if os.path.isdir(mask_folder) and \
                 len(os.listdir(mask_folder)) == len(rgb_frames):
             print(f"Found cached masks in {mask_folder}")
-        elif should_create_masks:
-            class NumpyDataset(Dataset):
-                def __init__(self, rgb_frames):
-                    self.frames = rgb_frames
-
-                def __getitem__(self, index):
-                    return self.frames[index]
-
-                def __len__(self):
-                    return len(self.frames)
-
+        elif self.should_create_masks:
             rgb_loader = DataLoader(NumpyDataset(rgb_frames),
                                     batch_size=8, shuffle=False)
-            create_masks(rgb_loader, mask_folder, overwrite_ok=storage_options.overwrite_ok)
+            create_masks(rgb_loader, mask_folder, overwrite_ok=self.overwrite_ok)
         else:
             raise RuntimeError(f"Masks not found in path {mask_folder} or number of masks do not match the "
                                f"number of rgb frames in the selected set.")
@@ -784,13 +865,13 @@ class TUMDataLoader:
 
     def get_info(self):
         image_resolution = "%dx%d" % (
-            self.frames[0].shape[1], self.frames[0].shape[0]) if self.frames is not None else 'N/A'
+            self.rgb_frames[0].shape[1], self.rgb_frames[0].shape[0]) if self.rgb_frames is not None else 'N/A'
         depth_map_resolution = "%dx%d" % (
-            self.depth_maps[0].shape[1], self.depth_maps[0].shape[0]) if self.frames is not None else 'N/A'
+            self.depth_maps[0].shape[1], self.depth_maps[0].shape[0]) if self.rgb_frames is not None else 'N/A'
 
         lines = [
             f"Dataset Info:",
-            f"\tPath: {self.base_dir}",
+            f"\tPath: {self.base_path}",
             f"\tTrajectory Data Path: {self.pose_path}",
             f"\tRGB Frame List Path: {self.rgb_files_path}",
             f"\tDepth Map List Path: {self.depth_map_files_path}",
@@ -805,7 +886,7 @@ class TUMDataLoader:
         return '\n'.join(lines)
 
 
-class COLMAPProcessor(Dataset):
+class COLMAPProcessor:
     """
     Estimates camera trajectory and intrinsic parameters via COLMAP.
     """
@@ -877,7 +958,7 @@ class COLMAPProcessor(Dataset):
         command = [options.binary_path, 'automatic_reconstructor',
                    '--workspace_path', self.workspace_path,
                    '--image_path', self.image_path,
-                   '--single_camera', 1 if options.is_single_camera else 0, # COLMAP expects 1 for True, 0 for False.
+                   '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
                    '--dense', 1 if options.dense else 0,
                    '--quality', options.quality]
 
@@ -897,7 +978,7 @@ class COLMAPProcessor(Dataset):
         print(f"Reading camera parameters from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
 
-        f, cx, cy, _ = cameras[1].params # cameras is a dict, COLMAP indices start from one.
+        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
 
         intrinsic = np.eye(3)
         intrinsic[0, 0] = f
@@ -938,3 +1019,302 @@ class COLMAPProcessor(Dataset):
         print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
+
+
+Size = Tuple[int, int]
+
+
+class StrayScannerDataset(DatasetBase):
+    """A dataset captured with 'Stray Scanner' on an iOS device with a LiDAR sensor."""
+
+    # The files needed for a valid dataset.
+    video_filename = 'rgb.mp4'
+    camera_matrix_filename = 'camera_matrix.csv'
+    camera_trajectory_filename = 'odometry.csv'
+    required_files = [video_filename, camera_matrix_filename, camera_trajectory_filename]
+
+    depth_folder = 'depth'
+    confidence_map_folder = 'confidence'
+    required_folders = [depth_folder, confidence_map_folder]
+
+    depth_confidence_levels = [0, 1, 2]
+
+    def __init__(self, base_path: Union[str, Path],
+                 resize_to: Optional[Union[int, Size]] = None, depth_confidence_filter_level=0,
+                 should_create_masks=False, overwrite_ok=False,
+                 use_estimated_depth=False, use_estimated_pose=False):
+        """
+        :param base_path: The path to the dataset.
+        :param resize_to: The resolution (height, width) to resize the images to.
+        :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth
+                                              value to be kept. E.g. if set to 1, all pixels in the depth map where the
+                                              corresponding pixel in the confidence map is less than 1 will be ignored.
+        :param should_create_masks: Whether instance segmentation masks should be automatically created if
+            they do not already exist.
+        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
+        :param use_estimated_depth: Whether estimated depth maps should be used instead of any
+            included ground truth depth maps.
+        :param use_estimated_pose: Whether estimated camera parameters should be used instead of any
+            included ground truth camera parameters.
+        """
+        super().__init__(base_path, should_create_masks=should_create_masks, overwrite_ok=overwrite_ok,
+                         use_estimated_depth=use_estimated_depth, use_estimated_pose=use_estimated_pose)
+
+        self.camera_matrix: Optional[np.ndarray] = None
+        self.camera_trajectory: Optional[np.ndarray] = None
+        self.rgb_frames: Optional[np.ndarray] = None
+        self.depth_maps: Optional[np.ndarray] = None
+        self.masks: Optional[np.ndarray] = None
+
+        self.target_resolution = resize_to
+        self.depth_confidence_filter_level = depth_confidence_filter_level
+
+    def load(self):
+        """
+        Load the camera parameters and RGB-D data.
+
+        :return: A reference to this object with the loaded data.
+        """
+        source_hw = self._get_frame_size()
+
+        target_resolution = self.target_resolution
+
+        if isinstance(target_resolution, int):
+            # Cast results to int to avoid warning highlights in IDE.
+            longest_side = int(np.argmax(source_hw))
+            shortest_side = int(np.argmin(source_hw))
+
+            new_size = [0, 0]
+            new_size[longest_side] = target_resolution
+
+            scale_factor = target_resolution / source_hw[longest_side]
+            new_size[shortest_side] = source_hw[shortest_side] * scale_factor
+
+            target_resolution = new_size
+        elif isinstance(target_resolution, tuple):
+            assert len(target_resolution) == 2, \
+                f"The target resolution must be a 2-tuple, but got a {len(target_resolution)}-tuple."
+            assert isinstance(target_resolution[0], int) and isinstance(target_resolution[1], int), \
+                f"Expected target resolution to be a 2-tuple of integers, but got a tuple of" \
+                f" ({type(target_resolution[0])}, {type(target_resolution[1])})."
+        elif target_resolution is None:
+            target_resolution = source_hw
+
+        print(f"Resizing images (height, width) from {source_hw} to {target_resolution}.")
+
+        target_orientation = 'portrait' if np.argmax(target_resolution) == 0 else 'landscape'
+        source_orientation = 'portrait' if np.argmax(source_hw) == 0 else 'landscape'
+
+        if target_orientation != source_orientation:
+            warnings.warn(
+                f"The input images appear to be in {source_orientation} ({source_hw[1]}x{source_hw[0]}), "
+                f"but they are being resized to what appears to be "
+                f"{target_orientation} ({target_resolution[1]}x{target_resolution[0]})")
+
+        self.camera_matrix = self._load_camera_matrix(scale_x=target_resolution[1] / source_hw[1],
+                                                      scale_y=target_resolution[0] / source_hw[0])
+        self.camera_trajectory = self._load_camera_trajectory()
+        self.rgb_frames = self._load_rgb(target_resolution=target_resolution)
+        self.depth_maps = self._load_depth(target_resolution=target_resolution,
+                                           filter_level=self.depth_confidence_filter_level)
+
+        mask_path = os.path.join(self.base_path, self.mask_folder)
+        num_frames = len(self.rgb_frames)
+
+        if os.path.isdir(mask_path) and \
+                len(os.listdir(mask_path)) == num_frames:
+            print(f"Found cached masks in {mask_path}")
+        elif self.should_create_masks:
+            rgb_loader = DataLoader(NumpyDataset(self.rgb_frames),
+                                    batch_size=8, shuffle=False)
+            create_masks(rgb_loader, mask_path, overwrite_ok=self.overwrite_ok)
+        else:
+            raise RuntimeError(f"Masks not found in path {mask_path} or number of masks do not match the "
+                               f"number of rgb frames in the selected set.")
+
+        num_masks = len(os.listdir(mask_path))
+        assert num_masks == num_frames, f"Expected to have the same number of RGB frames and masks, " \
+                                        f"but found {num_frames} frames and {num_masks} mask."
+
+        self.masks = self._load_mask(target_resolution=target_resolution)
+
+        return self
+
+    def _get_frame_size(self):
+        """
+        Get the resolution of the RGB video frames.
+
+        :return: The frame resolution as a 2-tuple containing the height and width, respectively.
+        """
+        video_path = os.path.join(self.base_path, self.video_filename)
+        video = cv2.VideoCapture(video_path)
+
+        if not video.isOpened():
+            raise RuntimeError(f"Could not open RGB video file: {video_path}")
+
+        width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        video.release()
+
+        return height, width
+
+    def _load_camera_matrix(self, scale_x=1.0, scale_y=1.0):
+        """
+        Load the camera intrinsic parameters.
+
+        :param scale_x: The scale factor to apply to the x component of the focal length and principal point.
+        :param scale_y: The scale factor to apply to the y component of the focal length and principal point.
+        :return: The 3x3 camera matrix.
+        """
+        intrinsics_path = os.path.join(self.base_path, self.camera_matrix_filename)
+        camera_matrix = np.loadtxt(intrinsics_path, delimiter=',')
+
+        camera_matrix[0, 0] *= scale_x
+        camera_matrix[0, 2] *= scale_x
+        camera_matrix[1, 1] *= scale_y
+        camera_matrix[1, 2] *= scale_y
+
+        # Input video is rotated 90 degrees anti-clockwise for some reason.
+        # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+        camera_matrix[0, 0], camera_matrix[1, 1] = camera_matrix[1, 1], camera_matrix[0, 0]
+        camera_matrix[0, 2], camera_matrix[1, 2] = camera_matrix[1, 2], camera_matrix[0, 2]
+
+        return camera_matrix
+
+    def _load_camera_trajectory(self):
+        """
+        Load the camera poses.
+
+        :return: The Nx6 matrix where each row contains the rotation in axis-angle format and the translation vector.
+        """
+        # Code adapted from https://github.com/kekeblom/StrayVisualizer/blob/df5f39c750e8eec62b130dc9c8a91bdbcff1d952/stray_visualize.py#L43
+        trajectory_path = os.path.join(self.base_path, self.camera_trajectory_filename)
+        # The first row is the header row, so skip
+        trajectory_raw = np.loadtxt(trajectory_path, delimiter=',', skiprows=1)
+
+        trajectory = []
+
+        for line in trajectory_raw:
+            # x, y, z, qx, qy, qz, qw
+            position = line[2:5]
+            quaternion = line[5:]
+
+            r = Rotation.from_quat(quaternion).as_rotvec()
+            t = position
+
+            pose = np.concatenate((r, t))
+            trajectory.append(pose)
+
+        trajectory = np.ascontiguousarray(trajectory)
+
+        return trajectory
+
+    def _load_rgb(self, target_resolution: Size):
+        """
+        Load the RGB frames.
+
+        :param target_resolution: The resolution (height, width) to resize the images to.
+        :return: A tensor containing all the RGB frames in NHWC format.
+        """
+        video_path = os.path.join(self.base_path, self.video_filename)
+        video = cv2.VideoCapture(video_path)
+
+        if not video.isOpened():
+            raise RuntimeError(f"Could not open RGB video file: {video_path}")
+
+        fps = video.get(cv2.CAP_PROP_FPS)
+        width = video.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height = video.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        num_frames = video.get(cv2.CAP_PROP_FRAME_COUNT)
+        length_seconds = num_frames / fps
+        duration = datetime.timedelta(seconds=length_seconds)
+
+        print(f"Video: {num_frames:.0f} frames, {width:.0f} x {height:.0f} @ {fps} fps with duration of {duration}.")
+
+        frames = []
+
+        while video.grab():
+            has_frame, frame = video.retrieve()
+            if has_frame:
+                frame = cv2.resize(frame, target_resolution)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Input video is rotated 90 degrees anti-clockwise for some reason.
+                # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                frames.append(frame)
+            else:
+                print(f"has_frame == False")
+
+        frames = np.ascontiguousarray(frames)
+
+        video.release()
+
+        return frames
+
+    def _load_depth(self, target_resolution: Size, filter_level=0):
+        """
+        Load the depth maps.
+
+        :param target_resolution: The resolution (height, width) to resize the images to.
+        :param filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth value to be kept.
+                             E.g. if set to 1, all pixels in the depth map where the corresponding pixel in the
+                             confidence map is less than 1 will be ignored.
+        :return: A tensor containing all the depth maps in NHW format.
+        """
+        assert filter_level in self.depth_confidence_levels, \
+            f"Confidence filter must be one of the following: {self.depth_confidence_levels}."
+
+        depth_path = os.path.join(self.base_path, self.depth_folder)
+        confidence_path = os.path.join(self.base_path, self.confidence_map_folder)
+
+        def load_depth_map(filename):
+            # Code adapted from https://github.com/kekeblom/StrayVisualizer/blob/df5f39c750e8eec62b130dc9c8a91bdbcff1d952/stray_visualize.py#L58
+            depth_map_path = os.path.join(depth_path, filename)
+            depth_map_mm = np.load(depth_map_path)
+            depth_map_m = depth_map_mm / 1000.0
+
+            confidence_filename = f"{Path(filename).stem}.png"
+            confidence_map_path = os.path.join(confidence_path, confidence_filename)
+            confidence_map = cv2.imread(confidence_map_path, cv2.IMREAD_GRAYSCALE)
+
+            depth_map_m[confidence_map < filter_level] = 0.0
+
+            depth_map_m = cv2.resize(depth_map_m, target_resolution)
+            # Input video is rotated 90 degrees anti-clockwise for some reason.
+            # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+            depth_map_m = cv2.rotate(depth_map_m, cv2.ROTATE_90_CLOCKWISE)
+
+            return depth_map_m
+
+        pool = ThreadPool(psutil.cpu_count(logical=False))
+        depth_maps = pool.map(load_depth_map, sorted(os.listdir(depth_path)))
+        depth_maps = np.ascontiguousarray(depth_maps)
+
+        return depth_maps
+
+    def _load_mask(self, target_resolution: Size):
+        """
+        Load the instance segmentation masks.
+
+        :param target_resolution: The resolution (height, width) to resize the masks to.
+        :return: A tensor containing all the masks in NHW format.
+        """
+        # Input video is rotated 90 degrees anti-clockwise for some reason.
+        # Need to adjust target_resolution so that it is the right way up.
+        target_resolution = tuple(reversed(target_resolution))
+
+        mask_path = os.path.join(self.base_path, self.mask_folder)
+
+        def load_mask(filename):
+            path = os.path.join(mask_path, filename)
+            mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            mask = cv2.resize(mask, target_resolution)
+
+            return mask
+
+        pool = ThreadPool(psutil.cpu_count(logical=False))
+        masks = pool.map(load_mask, sorted(os.listdir(mask_path)))
+        masks = np.ascontiguousarray(masks)
+
+        return masks

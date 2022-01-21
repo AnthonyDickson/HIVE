@@ -102,7 +102,7 @@ class StorageOptions(Options, ReprMixin):
                            action='store_true')
 
     @staticmethod
-    def from_args(args):
+    def from_args(args) -> 'StorageOptions':
         return StorageOptions(
             base_path=args.base_path,
             colour_folder=args.colour_folder,

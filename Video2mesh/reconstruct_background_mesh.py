@@ -142,11 +142,11 @@ if __name__ == '__main__':
     depth_options = DepthOptions.from_args(args)
 
     if args.is_tum:
-        dataset = TUMDataLoader(storage_options.base_folder).load(storage_options=storage_options)
+        dataset = TUMDataLoader(storage_options.base_path, overwrite_ok=storage_options.overwrite_ok).load()
 
         K = dataset.intrinsic_matrix
-        trajectory = dataset.poses
-        rgb_frames = dataset.frames
+        trajectory = dataset.camera_trajectory
+        rgb_frames = dataset.rgb_frames
         depth_maps = dataset.depth_maps
         masks = dataset.masks
     else:
