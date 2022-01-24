@@ -1,26 +1,23 @@
-import psutil
-from multiprocessing.pool import ThreadPool
-
-import warnings
-
 import argparse
 import os
 import shutil
+import warnings
+from multiprocessing.pool import ThreadPool
+from typing import Optional
 
 import cv2
 import numpy as np
 import openmesh as om
+import psutil
 import trimesh
 from PIL import Image
 from detectron2.utils.logger import setup_logger
 from scipy.spatial import Delaunay
-from typing import Optional
 
-from Video2mesh.io import load_input_data, load_camera_parameters, TUMDataLoader, FrameSampler, COLMAPProcessor, \
-    StrayScannerDataset
+from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
+from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset
 from Video2mesh.options import StorageOptions, ReprMixin, DepthOptions, COLMAPOptions, Options
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image
 
 setup_logger()
 
@@ -169,78 +166,18 @@ class Video2Mesh:
 
         dataset_path = self.storage_options.base_path
 
-        if TUMDataLoader.is_valid_folder_structure(dataset_path):
-            # TODO: Store options for `load(...)` in object via init function.
-            dataset = TUMDataLoader(
-                dataset_path,
-                frame_sampler=FrameSampler(),
-                should_create_masks=self.should_create_masks,
-                overwrite_ok=storage_options.overwrite_ok,
-                use_estimated_depth=self.estimate_depth
-            ).load()
+        dataset = self._get_dataset(dataset_path)
 
-            K = dataset.intrinsic_matrix
-            camera_trajectory = dataset.camera_trajectory
-            rgb_frames = dataset.rgb_frames
-            depth_maps = dataset.depth_maps
-            masks = dataset.masks
-            frame_indices = dataset.subset_indices
-        elif StrayScannerDataset.is_valid_folder_structure(dataset_path):
-            dataset = StrayScannerDataset(
-                base_path=dataset_path,
-                resize_to=(480, 640),
-                should_create_masks=self.should_create_masks,
-                overwrite_ok=storage_options.overwrite_ok,
-                use_estimated_depth=self.estimate_depth
-            ).load()
+        timer.split("configure dataset")
 
-            K = dataset.camera_matrix
-            camera_trajectory = dataset.camera_trajectory
-            rgb_frames = dataset.rgb_frames
-            depth_maps = dataset.depth_maps
-            masks = dataset.masks
-            frame_indices = np.array(list(range(len(rgb_frames))))
-        else:
-            self.validate_folder_structure()
-
-            K, camera_trajectory = load_camera_parameters(self.storage_options)
-            timer.split("load camera parameters")
-
-            # TODO: Add support for estimated depth maps for Unreal datasets.
-            rgb_frames, depth_maps, masks = load_input_data(self.storage_options, self.depth_options, self.batch_size,
-                                                            self.should_create_masks, timer)
-            frame_indices = np.array(list(range(len(rgb_frames))))
-
-        if self.estimate_camera_params:
-            # TODO: Make sure COLMAP is only given the frames that are being used.
-            #  E.g. with TUM datasets some RGB frames are dropped because the RGB and depth video feeds are not synced.
-            colmap_processor = COLMAPProcessor(storage_options=self.storage_options, colmap_options=colmap_options)
-
-            if not colmap_processor.probably_has_results:
-                colmap_processor.run()
-
-            K, camera_trajectory = colmap_processor.load_camera_params()
-
-            # TUM datasets do not use all RGB frames since RGB and depth feeds are not synced.
-            camera_trajectory = camera_trajectory[frame_indices]
-
-            # K = colmap_processor.get_camera_parameters()
-            # camera_trajectory = colmap_processor.get_camera_trajectory()
-
-        timer.split("load dataset")
-
-        print(f"Checking maximum number of masks...")
-        max_num_masks = masks.max()
-
-        print(f"Maximum number of masks: {max_num_masks}")
-        print(f"Creating {max_num_masks} meshes for dynamic objects...")
+        camera_trajectory = dataset.camera_trajectory
 
         if self.include_background and self.static_background:
             background_output_folder = f"{self.storage_options.output_folder}_bg"
-            background_scene = self.create_scene(rgb_frames, depth_maps, masks, K, camera_trajectory, timer,
+            background_scene = self.create_scene(dataset, timer,
                                                  include_background=True,
                                                  background_only=True)
-            foreground_scene = self.create_scene(rgb_frames, depth_maps, masks, K, camera_trajectory, timer,
+            foreground_scene = self.create_scene(dataset, timer,
                                                  include_background=False,
                                                  background_only=False)
 
@@ -255,7 +192,7 @@ class Video2Mesh:
             self.write_results(dataset_path, background_output_folder, background_scene, timer,
                                self.storage_options.overwrite_ok)
         else:
-            scene = self.create_scene(rgb_frames, depth_maps, masks, K, camera_trajectory, timer,
+            scene = self.create_scene(dataset, timer,
                                       include_background=self.include_background,
                                       background_only=False)
             T = np.eye(4)
@@ -270,16 +207,46 @@ class Video2Mesh:
         # TODO: Summarise results - how many frames? mesh size (on disk, vertices/faces per frame and total)
         timer.stop()
 
-    def create_scene(self, rgb_frames, depth_maps, masks, K, camera_trajectory, timer, include_background=False,
+    def _get_dataset(self, dataset_path):
+        if TUMAdaptor.is_valid_folder_structure(dataset_path):
+            # TODO: Test TUMAdaptor
+            dataset = TUMAdaptor(
+                base_path=dataset_path,
+                output_path=f"{dataset_path}_vtm",
+                overwrite_ok=storage_options.overwrite_ok
+            ).convert()
+        elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
+            dataset = StrayScannerAdaptor(
+                base_path=dataset_path,
+                output_path=f"{dataset_path}_vtm",
+                overwrite_ok=storage_options.overwrite_ok,
+                resize_to=640,  # Resize the longest side to 640
+                depth_confidence_filter_level=0
+            ).convert()
+        elif VTMDataset.is_valid_folder_structure(dataset_path):
+            dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
+        else:
+            raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
+
+        dataset.create_or_find_masks()
+
+        if self.estimate_depth:
+            dataset.use_estimated_depth()
+        if self.estimate_camera_params:
+            dataset.use_estimated_camera_parameters(colmap_options=colmap_options)
+
+        return dataset
+
+    def create_scene(self, dataset: VTMDataset, timer: Timer, include_background=False,
                      background_only=False):
         if background_only:
             num_frames = 1
         elif self.num_frames == -1:
-            num_frames = len(rgb_frames)
+            num_frames = dataset.num_frames
         else:
             num_frames = self.num_frames
 
-        fx, fy, height, width = self.extract_camera_params(K)
+        fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
 
         scene = trimesh.scene.Scene(
             camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
@@ -287,8 +254,11 @@ class Video2Mesh:
 
         # TODO: Simplify progress logging and dump more detailed logs to disk.
 
-        def process_frame(i, data):
-            rgb, depth, mask_encoded, pose = data
+        def process_frame(i):
+            rgb = dataset.rgb_dataset[i]
+            depth = dataset.depth_dataset[i]
+            mask_encoded = dataset.mask_dataset[i]
+            pose = dataset.camera_trajectory[i]
 
             timer.split(f"start mesh generation for frame {i:02d}")
             frame_vertices = np.zeros((0, 3))
@@ -386,7 +356,7 @@ class Video2Mesh:
             return mesh
 
         pool = ThreadPool(processes=psutil.cpu_count(logical=False))
-        meshes = pool.starmap(process_frame, enumerate(zip(rgb_frames[:num_frames], depth_maps, masks, camera_trajectory)))
+        meshes = pool.starmap(process_frame, range(num_frames))
         for i, mesh in enumerate(meshes):
             scene.add_geometry(mesh, node_name=f"frame_{i:03d}")
 

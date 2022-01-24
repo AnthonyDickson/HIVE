@@ -102,4 +102,4 @@ def num2str(num: Optional[int]):
 
 
 def log(message, end='\n', file=sys.stdout):
-    print("[%s] %s" % (datetime.datetime.now(), message), file=file, end=end)
+    print("[%s] %s" % (datetime.datetime.now().time(), message), file=file, end=end)

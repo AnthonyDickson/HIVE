@@ -38,7 +38,7 @@ Start by choosing on of the following methods for setting up the Python environm
 4.  Docker - CUDA (11.3)
 
    Either:
-     1. Pull (download) a pre-built image (~8.3 GB): 
+     1. Pull (download) a pre-built image (~11.3 GB): 
         ```shell
         docker pull eight0153/video2mesh:cu113
         ```
@@ -56,17 +56,14 @@ Start by choosing on of the following methods for setting up the Python environm
 
 ## Running the Program
 ### Sample Dataset
-You can download a sample dataset from [here](https://www.icloud.com/iclouddrive/0AVLFLkxIy_M3Pm-u8aopXHHQ#dance).
-Assuming you have downloaded the dataset archive to the root of this repo, you can extract the archive to the right 
-folder via the following:
-```shell
-mkdir data/
-tar -xvzf dance.tar.gz -C data/
-```
+You can download a sample dataset from the [TUM website](https://vision.in.tum.de/data/datasets/rgbd-dataset/download).
+The sequence `fr3/walking_xyz` is a good one to start with.
+Make sure you download and extract the dataset to the `data/` folder.
+
 ### Example Usage
 Below is an example of how to run the program:
 ```shell
-python Video2mesh/video2mesh.py --base_path data/dance --num_frames 10 --max_depth_dist 0.1 --include_background --static_background --overwrite_ok
+python Video2mesh/video2mesh.py --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 10 --max_depth_dist 0.1 --include_background --static_background --overwrite_ok
 ```
 
  **Note:** Creating the instance segmentation masks with a CPU only image/Python environment will be *VERY* slow. 
@@ -94,7 +91,14 @@ docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Vid
 Refer to the [WebXR repo](https://github.com/eight0153/webxr3dvideo).
 
 ## Input Data Format
-This program expects a specific data format, as illustrated below:
+This program accepts datasets in three formats:
+- TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
+- RGB-D datasets created on an iOS device using [StrayScanner](https://apps.apple.com/nz/app/stray-scanner/id1557051662)
+- The VTM format (see below.)
+
+The above datasets are automatically converted to the VTM format if they are not already in that foramt.
+
+Overall, the expected folder structure is as follows:
 
 ```
 <project root>
@@ -103,11 +107,11 @@ This program expects a specific data format, as illustrated below:
 └───data
 │   │
 │   └───<dataset 1>
-│   │   │   camera.txt
-│   │   │   trajectory.txt
-│   │   │   colour
+│   │   │   metadata.json
+│   │   │   camera_matrix.txt
+│   │   │   camera_trajectory.txt
+│   │   │   rgb
 │   │   │   depth
-│   │   │   [mask]
 │   │
 │   └───...
 │   │
@@ -118,59 +122,50 @@ This program expects a specific data format, as illustrated below:
 Datasets should be placed in a folder inside the `data/` folder.
 Generally, the number of colour frames must match the number of depth maps, masks and lines in the camera trajectory 
 file.
-Within each dataset folder, there should the 4-5 items:
-1. The camera intrinsics in a text file in the following format:
+Within each dataset folder, there should be the following 5 items:
+1. The metadata in a JSON formatted file that contains the following fields:
+   - `num_frames`: The number of frames in the video sequence.
+   - `fps`: The framerate of the video.
+   - `width`: The width of the video frames in pixels.
+   - `height`: The height of the video frames in pixels.
+   - `depth_scale`: A scalar that when multiplied with a depth value converts that depth value to meters.
+2. The camera intrinsics in a text file in the following format:
    ```text
    fx  0 cx
     0 fy cy
     0  0  1
    ```
    where `fx`, `fy` are the focal length (pixels) and `cx`, `cy` the principal point.
-2. The camera trajectory in a text file in the following format:
+3. The camera trajectory in a text file in the following format:
    ```text
-   rx ry rz tx ty tz
+   qx qy qz qw tx ty tz
    ...
-   rx ry rz tx ty tz
+   qx qy qz qw tx ty tz
    ```
-   where: `rx`, `ry` and `rz` form a rotation vector (axis-angle, magnitude is angle in radians); and `tx`, `ty` and `tz` form a translation vector.
+   where: `qx`, `qy`, `qz` and `qw` form a quaternion; and `tx`, `ty` and `tz` form a translation vector.
    There must be one line per frame in the input video sequence.
    Absolute pose values are expected (i.e. all relative to world origin).
-3. The colour (RGB) frames, either JPEG or PNG, in a folder with names that preserve the frames' natural ordering, e.g.:
+4. The colour (RGB) frames, either JPEG or PNG, in a folder with names that preserve the frames' natural ordering, e.g.:
    ```text
-   colour
-   │   0001.jpg
-   │   0002.jpg
+   rgb
+   │   000001.jpg
+   │   000002.jpg
    │   ...
-   └───9999.jpg
+   └───999999.jpg
    ```
-4. The depth maps (either JPEG, PNG, or .raw) in a folder with names that preserve the frames' natural ordering, e.g.:
+5. The depth maps (either JPEG, PNG, or .raw) in a folder with names that preserve the frames' natural ordering, e.g.:
    ```text
    depth
-   │   0001.jpg
-   │   0002.jpg
+   │   000001.jpg
+   │   000002.jpg
    │   ...
-   └───9999.jpg
+   └───999999.jpg
    ```
-   The depth maps are expected to be stored in a 8-bit unsigned image.
+   The depth maps are expected to be stored in a 16-bit unsigned image.
    Each depth map should have their original values divided by the maximum observed depth value from the *entire* video sequence:
    ```depth_map_i = depth_map_i / max_depth```. Depth values should be increasing from the camera (i.e. depth = 0 at the camera),
    and go up to a maximum value that is defined as a command line argument. For example, if the maximum depth is 10, `--max_depth 10.0`.
    The units roughly correspond to meters.
-5. Optionally, the instance segmentation maps (either JPEG or PNG, single channel) in a folder with names that preserve the frames' 
-natural ordering, e.g.:
-   ```text
-   mask
-   │   0001.jpg
-   │   0002.jpg
-   │   ...
-   └───9999.jpg
-   ```
-   Each mask should encode each instance (up to 255) where each instance
-   is assigned the same 8-bit number for the entire sequence.
-   The background (i.e. areas with no instances) should be indicated with zero in the masks.
-
-   **Note:** If you do not have the instance segmentation masks, you can create the masks by adding the
-   CLI flag `--create_masks` when you run the program.
 
 ## Output Format
 The generated meshes are saved to a glTF formatted file.

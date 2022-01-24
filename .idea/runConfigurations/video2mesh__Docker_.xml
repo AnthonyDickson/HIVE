@@ -42,7 +42,7 @@
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Video2mesh/video2mesh.py" />
-    <option name="PARAMETERS" value="--base_path data/7251ac12ef --max_depth_dist 0.1 --include_background --overwrite_ok --create_masks --num_frames 10" />
+    <option name="PARAMETERS" value="--base_path data/7251ac12ef --max_depth_dist 0.1 --include_background --overwrite_ok --create_masks --num_frames 10 --estimate_depth --estimate_camera_params --quality low" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />
