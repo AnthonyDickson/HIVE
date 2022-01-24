@@ -1,25 +1,26 @@
-import warnings
-
 import datetime
+import json
+import os
+import struct
+import subprocess
+import time
+import warnings
+from hashlib import sha256
+from multiprocessing.pool import ThreadPool
+from pathlib import Path
+from typing import Union, List, Tuple, Optional, Callable, IO
 
 import cv2
 import numpy as np
-import os
 import psutil
-import struct
-import subprocess
 import torch
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
-from hashlib import sha256
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
-from typing import Union, List, Tuple, Optional
 
 from Video2mesh.options import COLMAPOptions, StorageOptions
 from Video2mesh.utils import Timer, log
@@ -532,6 +533,207 @@ class FrameSampler:
         return rgb, depth, pose
 
 
+File = Union[str, Path]
+
+
+class VideoMetadata:
+    """Information about a video file."""
+
+    def __init__(self, path: File, width: int, height: int, num_frames: int, fps: float):
+        """
+        :param path: The path to the video.
+        :param width: The width of the video frames.
+        :param height: The height of the video frames.
+        :param num_frames: The number of frames in the video sequence.
+        :param fps: The frame rate of the video.
+        """
+        self.path = path
+        self.width = width
+        self.height = height
+        self.num_frames = num_frames
+        self.fps = fps
+
+    @property
+    def length_seconds(self):
+        """
+        The length of the video in seconds.
+        """
+        return self.num_frames / self.fps
+
+    @property
+    def duration(self):
+        """
+        The length of the video as a datetime.timedelta object.
+        """
+        return datetime.timedelta(seconds=self.length_seconds)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(path={self.path}, width={self.width}, height={self.height}, num_frames={self.num_frames}, fps={self.fps})"
+
+    def __str__(self):
+        return f"Video at {self.path}: {self.num_frames:.0f} frames, " \
+               f"{self.width:.0f} x {self.height:.0f} @ {self.fps} fps with duration of {self.duration}."
+
+    def save(self, f: Union[File, IO]):
+        """
+        Write the metadata to disk as a JSON file.
+
+        :param f: The file pointer or path to the write to.
+        """
+        if isinstance(f, (str, Path)):
+            with open(f) as file:
+                json.dump(self.__dict__, file)
+        else:
+            json.dump(self.__dict__, f)
+
+    @staticmethod
+    def load(f: Union[File, IO]) -> 'VideoMetadata':
+        """
+        Read the JSON metadata from disk.
+
+        :param f: The file pointer or path to the read from.
+        :return: The metadata object.
+        """
+        if isinstance(f, (str, Path)):
+            with open(f) as file:
+                kwargs = json.load(file)
+        else:
+            kwargs = json.load(f)
+
+        return VideoMetadata(**kwargs)
+
+
+class RGBSource(Dataset):
+    """Reads RGB video frames from disk in various formats (image folder, video file)."""
+
+    def __init__(self, base_path: File, file_list: List[File],
+                 transform: Optional[Callable[[np.ndarray], np.ndarray]] = None):
+        """
+        :param base_path: The path to a folder of video frames (images).
+        :param file_list: The list of the images that should be loaded (just the filenames).
+        :param transform: (optional) A function that takes in an image (HWC format) and returns an image of the same
+            format that will be applied when the images are loaded later.
+        """
+        if file_list is None:
+            file_list = []
+
+        self.base_path = base_path
+        self.file_list = file_list
+        self.transform = transform
+
+        self._validate()
+
+    def _validate(self):
+        """
+        Make sure the folder and files exist.
+        Throws an exception if the folder or any images cannot be opened.
+        """
+        if not os.path.isdir(self.base_path):
+            raise RuntimeError(f"Could not open the folder {self.base_path}.")
+
+        for filename in self.file_list:
+            file_path = os.path.join(self.base_path, filename)
+
+            if not os.path.isfile(file_path):
+                raise RuntimeError(f"Could not open the file '{file_path}' in the folder {self.base_path}")
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, index):
+        image_path = os.path.join(self.base_path, self.file_list[index])
+
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
+
+    @staticmethod
+    def from_video(video_path: File, output_path: File,
+                   transform: Callable[[np.ndarray], np.ndarray] = None) -> 'RGBSource':
+        """
+        Create a folder of images from a video file.
+
+        :param video_path: The path to the video.
+        :param output_path: The path to save the frames to (does not have to created first).
+        :param transform: (optional) A function that takes in an image (HWC format) and returns an image of the same
+            format that will be applied when the images are loaded later.
+        :return: A RGBSource that points to the newly created image folder.
+        """
+        if not os.path.exists(video_path):
+            raise RuntimeError(f"Could not open video file at {video_path}.")
+
+        if not os.path.isfile(video_path):
+            raise RuntimeError(f"Excepted a video file, got a folder for the path {video_path}.")
+
+        if not os.path.isdir(output_path):
+            os.makedirs(output_path, exist_ok=False)
+
+            frames = RGBSource._get_video_frames(video_path)
+            file_list = []
+
+            for i, frame in enumerate(frames):
+                filename = f"{i:06d}.jpg"
+                file_list.append(filename)
+
+                frame_output_path = os.path.join(output_path, filename)
+                cv2.imwrite(frame_output_path, frame)
+        else:
+            file_list = sorted(os.listdir(output_path))
+
+            video = cv2.VideoCapture(video_path)
+
+            if not video.isOpened():
+                raise RuntimeError(f"Could not open video file at {video_path}.")
+
+            num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            if len(file_list) != num_frames:
+                raise RuntimeError(f"Expected {num_frames:,d} frames in {output_path}, but found {len(file_list):,d}.")
+
+        return RGBSource(output_path, file_list, transform)
+
+    @staticmethod
+    def _get_video_frames(video_path):
+        """
+        Get frames from a video.
+
+        :param video_path: The path to the video file.
+        :return: Yields each frame (BGR, HWC format).
+        """
+        video = cv2.VideoCapture(video_path)
+
+        if not video.isOpened():
+            raise RuntimeError(f"Could not open RGB video file: {video_path}")
+
+        # TODO: Have each dataset class either infer or retrieve this information.
+        fps = float(video.get(cv2.CAP_PROP_FPS))
+        width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        video_metadata = VideoMetadata(video_path, width=width, height=height, num_frames=num_frames, fps=fps)
+        print(video_metadata)
+
+        i = 0
+
+        while video.grab():
+            has_frame, frame = video.retrieve()
+            if has_frame:
+                yield frame
+
+                i += 1
+                print(f"\r[{i:03d}:{num_frames:03d}] Loading video...", end='')
+            else:
+                print(f"has_frame == False")
+
+        print()
+        video.release()
+
+
 class DatasetBase:
     class InvalidDatasetFormatError(Exception):
         pass
@@ -557,6 +759,11 @@ class DatasetBase:
         self.overwrite_ok = overwrite_ok
         self.use_estimated_depth = use_estimated_depth
         self.use_estimated_pose = use_estimated_pose
+
+        self.rgb_provider = None
+        self.depth_provider = None
+        self.camera_matrix_provider = None
+        self.camera_trajectory_provider = None
 
         self._validate_dataset(base_path)
 
@@ -620,10 +827,13 @@ class TUMDataLoader(DatasetBase):
 
     """The name/path of the file that contains the camera pose information."""
     pose_path = "groundtruth.txt"
+
     """The name/path of the file that contains the mapping of timestamps to image file paths."""
     rgb_files_path = "rgb.txt"
+
     """The name/path of the file that contains the mapping of timestamps to depth map paths."""
     depth_map_files_path = "depth.txt"
+
     required_files = [pose_path, rgb_files_path, depth_map_files_path]
 
     rgb_folder = "rgb"
@@ -1114,6 +1324,7 @@ class StrayScannerDataset(DatasetBase):
         self.camera_matrix = self._load_camera_matrix(scale_x=target_resolution[1] / source_hw[1],
                                                       scale_y=target_resolution[0] / source_hw[0])
         self.camera_trajectory = self._load_camera_trajectory()
+
         self.rgb_frames = self._load_rgb(target_resolution=target_resolution)
         self.depth_maps = self._load_depth(target_resolution=target_resolution,
                                            filter_level=self.depth_confidence_filter_level)
@@ -1217,38 +1428,28 @@ class StrayScannerDataset(DatasetBase):
         :param target_resolution: The resolution (height, width) to resize the images to.
         :return: A tensor containing all the RGB frames in NHWC format.
         """
-        video_path = os.path.join(self.base_path, self.video_filename)
-        video = cv2.VideoCapture(video_path)
 
-        if not video.isOpened():
-            raise RuntimeError(f"Could not open RGB video file: {video_path}")
+        def rgb_transform(frame):
+            frame = cv2.resize(frame, target_resolution)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Input video is rotated 90 degrees anti-clockwise for some reason.
+            # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
-        fps = video.get(cv2.CAP_PROP_FPS)
-        width = video.get(cv2.CAP_PROP_FRAME_WIDTH)
-        height = video.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        num_frames = video.get(cv2.CAP_PROP_FRAME_COUNT)
-        length_seconds = num_frames / fps
-        duration = datetime.timedelta(seconds=length_seconds)
+            return frame
 
-        print(f"Video: {num_frames:.0f} frames, {width:.0f} x {height:.0f} @ {fps} fps with duration of {duration}.")
+        rgb_dataset = RGBSource.from_video(
+            os.path.join(self.base_path, self.video_filename),
+            os.path.join(self.base_path, 'rgb'),
+            transform=rgb_transform)
 
-        frames = []
+        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
 
-        while video.grab():
-            has_frame, frame = video.retrieve()
-            if has_frame:
-                frame = cv2.resize(frame, target_resolution)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Input video is rotated 90 degrees anti-clockwise for some reason.
-                # Need to adjust camera matrix and RGB-D data so that it is the right way up.
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                frames.append(frame)
-            else:
-                print(f"has_frame == False")
-
+        start = time.time()
+        frames = pool.map(lambda i: rgb_dataset[i], range(len(rgb_dataset)))
+        elapsed = time.time() - start
+        print(f"Took {elapsed:.2f}s to load {len(frames):,d} frames.")
         frames = np.ascontiguousarray(frames)
-
-        video.release()
 
         return frames
 
