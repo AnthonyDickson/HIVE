@@ -1,24 +1,24 @@
+import cv2
 import datetime
 import json
+import numpy as np
 import os
+import psutil
 import shutil
 import struct
 import subprocess
-import warnings
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
-from typing import Union, Tuple, Optional, Callable, IO
-
-import cv2
-import numpy as np
-import psutil
 import torch
+import warnings
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
+from multiprocessing.pool import ThreadPool
+from pathlib import Path
+from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
+from typing import Union, Tuple, Optional, Callable, IO
 
 from Video2mesh.options import COLMAPOptions
 from Video2mesh.utils import Timer, log
@@ -220,13 +220,13 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
             if for_colmap:
                 output_filename = f"{rgb_loader.dataset.image_filenames[i]}.png"
             else:
-                output_filename = f"{i:03d}.png"
+                output_filename = f"{i:06d}.png"
 
             Image.fromarray(combined_masks).convert('L').save(os.path.join(mask_folder, output_filename))
 
             i += 1
 
-        log(f"{i:03,d}/{len(rgb_loader.dataset):03,d}\r", end='')
+        log(f"[{i:03,d}/{len(rgb_loader.dataset):03,d}] Creating segmentation masks...", prefix='\r', end='')
 
     print()
 
@@ -263,7 +263,9 @@ class ImageFolderDataset(Dataset):
         else:
             image = Image.open(image_path)
 
-            if image.mode != 'L':
+            if image.mode == 'I':
+                image = image.convert('I;16')
+            elif image.mode != 'L' and image.mode != 'I;16':
                 image = image.convert('RGB')
 
             image = np.asarray(image)
@@ -672,7 +674,11 @@ class VTMDataset(DatasetBase):
         scaling_factor = self.metadata.depth_scale
 
         def transform(depth_map):
-            return scaling_factor * depth_map
+            depth_map = scaling_factor * depth_map.astype(np.float32)
+            # TODO: Make max depth configurable.
+            depth_map[depth_map > 10] = 0.0
+
+            return depth_map
 
         return transform
 
@@ -892,12 +898,13 @@ class TUMAdaptor(DatasetAdaptor):
         # data loaded by `load_timestamps_and_paths(...)` gives data as a 2d array (in this case a column vector),
         # but we want the paths as a 1d array.
         image_filenames_subset = image_filenames_subset.flatten()
-        # Convert paths to Path objects to ensure cross compatibility between operating systems.
-        image_filenames_subset = map(Path, image_filenames_subset)
+        # Image filenames include the prefix `rgb/`, so we cut that part off.
+        image_filenames_subset = map(lambda path: path[4:], image_filenames_subset)
         image_filenames_subset = list(image_filenames_subset)
 
         depth_map_subset = depth_map_paths.flatten()
-        depth_map_subset = map(Path, depth_map_subset)
+        # Similar to the image filenames, the depth map filenames include the prefix `depth/`, so we cut that part off.
+        depth_map_subset = map(lambda path: path[6:], depth_map_subset)
         depth_map_subset = list(depth_map_subset)
 
         # Select the matching trajectory readings.
@@ -920,7 +927,7 @@ class TUMAdaptor(DatasetAdaptor):
 
         if VTMDataset.is_valid_folder_structure(self.output_path):
             log(f"Found cached dataset at {self.output_path}.")
-            dataset = VTMDataset(self.output_path)
+            dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
             num_frames = len(os.listdir(dataset.path_to_rgb_frames))
             num_depth_maps = len(os.listdir(dataset.path_to_depth_maps))
@@ -933,49 +940,51 @@ class TUMAdaptor(DatasetAdaptor):
 
             return dataset
 
+        os.makedirs(self.output_path, exist_ok=self.overwrite_ok)
+
         join = os.path.join
 
         source_image_folder = join(self.base_path, self.rgb_folder)
         output_image_folder = join(self.output_path, VTMDataset.rgb_folder)
+        os.makedirs(output_image_folder, exist_ok=self.overwrite_ok)
 
         source_depth_folder = join(self.base_path, self.depth_folder)
         output_depth_folder = join(self.output_path, VTMDataset.depth_folder)
+        os.makedirs(output_depth_folder, exist_ok=self.overwrite_ok)
 
-        # def copy(files, source_folder, dest_folder):
-        #     for i, filename in enumerate(files):
-        #         print(f"\r[{i + 1:03,d}/{len(files)}] Copying {filename} from {source_folder} to {dest_folder}...", end='')
-        #
-        #         source_file_path = os.path.join(source_folder, filename)
-        #         output_file_path = os.path.join(dest_folder, filename)
-        #         shutil.copy(source_file_path, output_file_path)
-        #
-        # copy(image_filenames, source_image_folder, output_image_folder)
-        # copy(depth_filenames, source_depth_folder, output_depth_folder)
-
+        log(f"Creating metadata for dataset.")
         metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, depth_scale=self.depth_scale_factor,
                                    width=self.width, height=self.height)
         metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
+        log(f"Creating camera matrix file.")
         camera_matrix_path = os.path.join(self.output_path, VTMDataset.camera_matrix_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_matrix_path, self.intrinsic_matrix)
 
-        camera_trajectory_path = os.path, join(self.output_path, VTMDataset.camera_trajectory_filename)
+        log(f"Converting camera trajectory.")
+        camera_trajectory_path = join(self.output_path, VTMDataset.camera_trajectory_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_trajectory_path, camera_trajectory)
 
         pool = ThreadPool(processes=psutil.cpu_count(logical=False))
 
-        image_copy_jobs = [(join(source_image_folder, filename), join(output_image_folder, filename)) for filename in
-                           image_filenames]
+        log(f"Copying RGB frames.")
+        image_file_ext = Path(image_filenames[0]).suffix
+        image_copy_jobs = [(join(source_image_folder, filename), join(output_image_folder, f"{i:06d}{image_file_ext}"))
+                           for i, filename in enumerate(image_filenames)]
         pool.starmap(shutil.copy, image_copy_jobs)
 
-        depth_copy_jobs = [(join(source_depth_folder, filename), join(output_depth_folder, filename)) for filename in
-                           depth_filenames]
+        log(f"Copying depth maps.")
+        depth_map_ext = Path(depth_filenames[0]).suffix
+        depth_copy_jobs = [(join(source_depth_folder, filename), join(output_depth_folder, f"{i:06d}{depth_map_ext}"))
+                           for i, filename in enumerate(depth_filenames)]
         pool.starmap(shutil.copy, depth_copy_jobs)
 
-        return VTMDataset(self.output_path)
+        log(f"Created new dataset at {self.output_path}.")
+
+        return VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
 
 class Video2ImageFolder:
@@ -1033,7 +1042,7 @@ class Video2ImageFolder:
                 yield frame
 
                 i += 1
-                log(f"[{i:03d}/{num_frames:03d}] Loading video...\r", end='')
+                log(f"[{i:03d}/{num_frames:03d}] Loading video...", prefix='\r', end='')
             else:
                 break
 
@@ -1441,13 +1450,17 @@ class COLMAPProcessor:
 
         if raw_pose:
             for image in images.values():
-                r, _ = cv2.Rodrigues(image.qvec2rotmat())
-                t = image.tvec.reshape(-1, 1)
+                # COLMAP quaternions seem to be stored in scalar first format.
+                # However, rather than assuming the format we can just rely on the provided function to convert to a
+                # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
+                # This avoids any future issues if the quaternion format ever changes.
+                r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
+                t = image.tvec
 
-                extrinsic.append(np.vstack((r, t)))
+                extrinsic.append(np.hstack((r, t)))
         else:
-            # Code adapted from https://github.com/facebookresearch/consistent_depth
-            # According to some comments in the above code, "Note that colmap uses a different coordinate system
+            #             # Code adapted from https://github.com/facebookresearch/consistent_depth
+            #             # According to some comments in the above code, "Note that colmap uses a different coordinate system
             # where y points down and z points to the world." The below rotation apparently puts the poses back into
             # a 'normal' coordinate frame.
             colmap_to_normal = np.diag([1, -1, -1])
@@ -1459,13 +1472,164 @@ class COLMAPProcessor:
                 R, t = R.T, -R.T.dot(t)
                 R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
                 t = colmap_to_normal.dot(t)
+                t = t.squeeze()
 
-                r, _ = cv2.Rodrigues(R)
+                r = Rotation.from_matrix(R).as_quat()
 
-                extrinsic.append(np.vstack((r, t)))
+                extrinsic.append(np.hstack((r, t)))
 
         extrinsic = np.asarray(extrinsic).squeeze()
 
         print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
+
+
+class UnrealDatasetInfo:
+    def __init__(self, width, height, num_frames, fps=30.0, max_depth=10.0, invalid_depth_value=0.0,
+                 is_16bit_depth=True, intrinsics_filename='camera.txt', trajectory_filename='trajectory.txt',
+                 colour_folder='colour', depth_folder='depth'):
+        """
+        :param width: The width in pixels of the colour frames and depth maps.
+        :param height: The height in pixels of the colour frames and depth maps.
+        :param num_frames: The number of frames in the dataset.
+        :param fps: The framerate of the captured video.
+        :param max_depth: The maximum depth value allowed in a depth map.
+        :param invalid_depth_value: The values used to indicate invalid (e.g. missing) depth.
+        :param is_16bit_depth: Whether the depth maps use 16-bit values.
+        :param intrinsics_filename: The name of camera parameters file.
+        :param trajectory_filename: The name of the camera pose file.
+        :param colour_folder: The name of the folder that contains the colour frames.
+        :param depth_folder: The name of the folder that contains the depth maps.
+        """
+        self.width = width
+        self.height = height
+        self.num_frames = num_frames
+        self.fps = fps
+        self.max_depth = max_depth
+        self.invalid_depth_value = invalid_depth_value
+        self.is_16bit_depth = is_16bit_depth
+        self.intrinsics_filename = intrinsics_filename
+        self.trajectory_filename = trajectory_filename
+        self.colour_folder = colour_folder
+        self.depth_folder = depth_folder
+
+    def save_json(self, fp):
+        if isinstance(fp, str):
+            with open(fp, 'w') as f:
+                json.dump(self.__dict__, f)
+        else:
+            json.dump(self.__dict__, fp)
+
+    @staticmethod
+    def from_json(fp):
+        if isinstance(fp, str):
+            with open(fp, 'r') as f:
+                data = json.load(f)
+        else:
+            data = json.load(fp)
+
+        return UnrealDatasetInfo(**data)
+
+
+class UnrealAdaptor(DatasetAdaptor):
+    """Convert datasets created in Unreal Engine (https://github.com/eight0153/UnrealDataset.git) to the VTMDataset format."""
+
+    metadata_filename = 'info.json'
+    camera_matrix_filename = 'camera.txt'
+    camera_trajectory_filename = 'trajectory.txt'
+    required_files = [camera_matrix_filename, camera_trajectory_filename]
+
+    rgb_folder = 'colour'
+    depth_folder = 'depth'
+    required_folders = [rgb_folder, depth_folder]
+
+    def convert(self) -> VTMDataset:
+        join = os.path.join
+
+        image_filenames = os.listdir(join(self.base_path, self.rgb_folder))
+        depth_filenames = os.listdir(join(self.base_path, self.depth_folder))
+
+        dataset_metadata = UnrealDatasetInfo.from_json(join(self.base_path, self.metadata_filename))
+        camera_matrix = np.loadtxt(join(self.base_path, self.camera_matrix_filename))
+        camera_trajectory = np.loadtxt(join(self.base_path, self.camera_trajectory_filename))
+
+        if VTMDataset.is_valid_folder_structure(self.output_path):
+            log(f"Found cached dataset at {self.output_path}.")
+            dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
+
+            num_frames = len(os.listdir(dataset.path_to_rgb_frames))
+            num_depth_maps = len(os.listdir(dataset.path_to_depth_maps))
+            trajectory_length = len(dataset.camera_trajectory)
+
+            if (not num_frames == len(image_filenames)) or (not num_depth_maps == len(depth_filenames)):
+                raise RuntimeError(f"Expected {len(image_filenames):03,d} frames, "
+                                   f"found {num_frames:03,d} RGB frames and "
+                                   f"{num_depth_maps:03,d} depth maps in {dataset.base_path}.")
+
+            if trajectory_length != len(camera_trajectory):
+                raise RuntimeError(f"Expected a camera trajectory with {len(camera_trajectory):03,d} poses, "
+                                   f"found {trajectory_length:03,d} poses {dataset.base_path}.")
+
+            return dataset
+
+        os.makedirs(self.output_path, exist_ok=self.overwrite_ok)
+
+        log(f"Creating metadata for dataset.")
+        depth_map_max_value = np.iinfo(np.uint16).max if dataset_metadata.is_16bit_depth else np.iinfo(np.uint8).max
+        depth_scale = dataset_metadata.max_depth / depth_map_max_value
+
+        metadata = DatasetMetadata(
+            num_frames=dataset_metadata.num_frames,
+            fps=dataset_metadata.fps,
+            depth_scale=depth_scale,
+            width=dataset_metadata.width,
+            height=dataset_metadata.height
+        )
+        metadata.save(join(self.output_path, VTMDataset.metadata_filename))
+
+        log(f"Creating camera matrix file.")
+
+        # noinspection PyTypeChecker
+        np.savetxt(join(self.output_path, VTMDataset.camera_matrix_filename), camera_matrix)
+
+        log(f"Converting camera trajectory.")
+        converted_trajectory = []
+
+        for (rx, ry, rz, tx, ty, tz) in camera_trajectory:
+            qx, qy, qz, qw = Rotation.from_rotvec((rx, ry, rz)).as_quat()
+
+            converted_trajectory.append((qx, qy, qz, qw, tx, ty, tz))
+
+        converted_trajectory = np.array(converted_trajectory)
+
+        # noinspection PyTypeChecker
+        np.savetxt(join(self.output_path, VTMDataset.camera_trajectory_filename), converted_trajectory)
+
+        log(f"Copying RGB frames to new dataset.")
+
+        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
+
+        def copy_frames(source_path, dest_path, files):
+            os.makedirs(dest_path, exist_ok=self.overwrite_ok)
+
+            extension = Path(files[0]).suffix
+            copy_jobs = [(join(source_path, filename), join(dest_path, f"{i:06d}{extension}"))
+                         for i, filename in enumerate(files)]
+
+            pool.starmap(shutil.copy, copy_jobs)
+
+        image_source_path = join(self.base_path, self.rgb_folder)
+        image_dest_path = join(self.output_path, VTMDataset.rgb_folder)
+        copy_frames(image_source_path, image_dest_path, image_filenames)
+
+        log(f"Copying depth maps to new dataset.")
+        depth_source_path = join(self.base_path, self.depth_folder)
+        depth_dest_path = join(self.output_path, VTMDataset.depth_folder)
+        copy_frames(depth_source_path, depth_dest_path, depth_filenames)
+
+        log(f"Created new dataset at {self.output_path}.")
+
+        dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
+
+        return dataset

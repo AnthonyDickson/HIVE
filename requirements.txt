@@ -1,9 +1,13 @@
-numpy==1.21.3
-scipy==1.7.1
-opencv-python
+numpy==1.21.5
+scipy==1.7.3
+opencv-python==4.5.5.62
 openmesh==1.1.6
-trimesh==3.9.34
-Pillow==8.3.2
-psutil==5.8.0
+trimesh==3.9.42
+Pillow==9.0
+psutil==5.9.0
 tqdm==4.62.3
 gdown==4.2.0
+# tsdf-fusion-python
+numba==0.55.0
+pycuda==2021.1
+scikit-image==0.19.1

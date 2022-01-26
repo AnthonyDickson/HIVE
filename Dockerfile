@@ -50,7 +50,10 @@ WORKDIR /app
 ADD scripts scripts
 ARG WEIGHTS_PATH=/root/.cache/pretrained
 RUN python3 scripts/download_detectron2_weights.py && \
-    python3 scripts/download_adabins_basemodel.py && \
-    gdown --id 1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF && mkdir -p ${WEIGHTS_PATH} && mv AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt
+    # AdaBins Weights
+    python3 scripts/download_adabins_basemodel.py &&  \
+    gdown --id 1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF &&  \
+    mkdir -p ${WEIGHTS_PATH} &&  \
+    mv AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt
 
 ENTRYPOINT ["python3"]

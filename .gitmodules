@@ -4,3 +4,9 @@
 [submodule "thirdparty/colmap"]
 	path = thirdparty/colmap
 	url = https://github.com/colmap/colmap.git
+[submodule "thirdparty/tsdf_fusion_python"]
+	path = thirdparty/tsdf_fusion_python
+	url = https://github.com/andyzeng/tsdf-fusion-python.git
+[submodule "thirdparty/webxr3dvideo"]
+	path = thirdparty/webxr3dvideo
+	url = https://github.com/eight0153/webxr3dvideo.git

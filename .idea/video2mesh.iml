@@ -7,9 +7,6 @@
     <orderEntry type="jdk" jdkName="Remote Python 3.8.10 Docker (eight0153/video2mesh:cu113)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="UnrealDataset" />
-    <orderEntry type="module" module-name="video-3d-viewer" />
-    <orderEntry type="module" module-name="consistent_depth" />
-    <orderEntry type="module" module-name="MiDaS" />
     <orderEntry type="module" module-name="AdaBins" />
   </component>
 </module>

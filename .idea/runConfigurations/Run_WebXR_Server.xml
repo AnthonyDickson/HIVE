@@ -18,12 +18,12 @@
           <list>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/src" />
-              <option name="hostPath" value="C:\dev\webxr3dvideo\src" />
+              <option name="hostPath" value="C:\dev\video2mesh\thirdparty\webxr3dvideo\src" />
               <option name="readOnly" value="true" />
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="C:\dev\webxr3dvideo\docs" />
+              <option name="hostPath" value="C:\dev\video2mesh\thirdparty\webxr3dvideo\docs" />
             </DockerVolumeBindingImpl>
           </list>
         </option>

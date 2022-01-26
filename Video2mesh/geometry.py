@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
@@ -11,9 +12,9 @@ def pose_vec2mat(pose):
     :param pose: The 6-vector to convert.
     :return: The (4, 4) homogeneous transformation matrix.
     """
-    validate_shape(pose, 'pose', expected_shape=(6,))
-    R = cv2.Rodrigues(pose[:3])[0]
-    t = pose[3:].reshape((-1, 1))
+    validate_shape(pose, 'pose', expected_shape=(7,))
+    R = Rotation.from_quat(pose[:4]).as_matrix()
+    t = pose[4:].reshape((-1, 1))
 
     M = np.hstack((R, t))
     M = np.vstack((M, np.zeros(4)))
