@@ -606,6 +606,9 @@ class VTMDataset(DatasetBase):
         """
         super().__init__(base_path=base_path, overwrite_ok=overwrite_ok)
 
+        self._using_estimated_depth = False
+        self._using_estimated_camera_parameters = False
+
         self.metadata = DatasetMetadata.load(self.path_to_metadata)
 
         self.camera_matrix = np.loadtxt(self.path_to_camera_matrix)
@@ -614,9 +617,6 @@ class VTMDataset(DatasetBase):
         self.rgb_dataset = ImageFolderDataset(self.path_to_rgb_frames)
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
         self._mask_dataset: Optional[ImageFolderDataset] = None
-
-        self._using_estimated_depth = False
-        self._using_estimated_camera_parameters = False
 
     @property
     def path_to_metadata(self):
@@ -670,11 +670,16 @@ class VTMDataset(DatasetBase):
             raise RuntimeError(f"Masks have not been for this dataset yet."
                                f"Please make sure you have called `.create_masks()` before trying to access the masks.")
 
-    def _get_depth_map_transform(self):
-        scaling_factor = self.metadata.depth_scale
+    @property
+    def depth_scaling_factor(self):
+        if self._using_estimated_depth:
+            return 1. / 1000.
+        else:
+            return self.metadata.depth_scale
 
+    def _get_depth_map_transform(self):
         def transform(depth_map):
-            depth_map = scaling_factor * depth_map.astype(np.float32)
+            depth_map = self.depth_scaling_factor * depth_map.astype(np.float32)
             # TODO: Make max depth configurable.
             depth_map[depth_map > 10] = 0.0
 

@@ -397,7 +397,7 @@ class Video2Mesh:
         meshes = pool.map(process_frame, range(num_frames))
 
         for i, mesh in enumerate(meshes):
-            scene.add_geometry(mesh, node_name=f"frame_{i:03d}")
+            scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene
 
