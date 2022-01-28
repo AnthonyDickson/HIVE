@@ -2,7 +2,7 @@ FROM nvidia/cuda:11.3.1-devel-ubuntu20.04
 
 RUN apt update && \
     DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends \
-    python3 python3-dev python3-pip make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
+    python3 python3-dev python3-pip wget make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
     # COLMAP Dependencies
     build-essential \
     git libboost-program-options-dev libboost-filesystem-dev libboost-graph-dev  \
@@ -36,7 +36,6 @@ RUN cd / && \
     make -j 8 && \
     make install
 
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir torch==1.10.1+cu113 torchvision==0.11.2+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
@@ -49,11 +48,14 @@ WORKDIR /app
 # they do not need to be downloaded each time you run the container.
 ADD scripts scripts
 ARG WEIGHTS_PATH=/root/.cache/pretrained
+ARG COLMAP_VOCAB_PATH=/root/.cache/colmap
 RUN python3 scripts/download_detectron2_weights.py && \
     # AdaBins Weights
     python3 scripts/download_adabins_basemodel.py &&  \
     gdown --id 1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF &&  \
     mkdir -p ${WEIGHTS_PATH} &&  \
-    mv AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt
+    mv AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt && \
+    mkdir -p ${COLMAP_VOCAB_PATH} && \
+    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
 
 ENTRYPOINT ["python3"]

@@ -773,6 +773,152 @@ class VTMDataset(DatasetBase):
         self._using_estimated_camera_parameters = True
 
 
+class COLMAPProcessor:
+    """
+    Estimates camera trajectory and intrinsic parameters via COLMAP.
+    """
+
+    def __init__(self, image_path: File, workspace_path: File, colmap_options: COLMAPOptions,
+                 colmap_mask_folder='masks'):
+        self.image_path = image_path
+        self.workspace_path = workspace_path
+        self.colmap_options = colmap_options
+        self.mask_folder = colmap_mask_folder
+
+    @property
+    def mask_path(self):
+        return os.path.join(self.workspace_path, self.mask_folder)
+
+    @property
+    def result_path(self):
+        return os.path.join(self.workspace_path, 'sparse')
+
+    @property
+    def probably_has_results(self):
+        recon_result_path = os.path.join(self.result_path, '0')
+        min_files_for_recon = 4
+
+        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
+               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
+
+    def run(self):
+        os.makedirs(self.workspace_path, exist_ok=True)
+
+        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
+            print(f"Could not find masks in folder: {self.mask_path}.")
+            print(f"Creating masks for COLMAP...")
+            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
+            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
+        else:
+            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
+
+        command = self.get_command()
+        # TODO: Check that COLMAP is using GPU
+        colmap_process = subprocess.Popen(command)
+        colmap_process.wait()
+
+        if colmap_process.returncode != 0:
+            raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
+
+        return
+
+    def get_command(self, return_as_string=False):
+        """
+        Build the command for running COLMAP .
+        Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
+
+        :param return_as_string: Whether to return the command as a single string, or as an array.
+        :return: The COLMAP command.
+        """
+        options = self.colmap_options
+
+        assert os.path.isfile(options.binary_path), f"Could not find COLMAP binary at location: {options.binary_path}."
+        assert os.path.isdir(self.workspace_path), f"Could open workspace path: {self.workspace_path}."
+        assert os.path.isdir(self.image_path), f"Could open image folder: {self.image_path}."
+
+        command = [options.binary_path, 'automatic_reconstructor',
+                   '--workspace_path', self.workspace_path,
+                   '--image_path', self.image_path,
+                   '--vocab_tree_path', self.colmap_options.vocab_path,
+                   '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
+                   '--dense', 1 if options.dense else 0,
+                   '--quality', options.quality]
+
+        if self.mask_path is not None:
+            assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
+            command += ['--mask_path', self.mask_path]
+
+        command = list(map(str, command))
+
+        return ' '.join(command) if return_as_string else command
+
+    def load_camera_params(self, raw_pose: Optional[bool] = None):
+        """
+        Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
+        :param raw_pose: (optional) Whether to use the raw pose data straight from COLMAP.
+                         This value will override `COLMAPProcessor.colmap_options.use_raw_pose` if set.
+        :return: A 2-tuple containing the camera matrix (intrinsic parameters) and camera trajectory (extrinsic
+            parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
+            translation vector, in that order.
+        """
+        num_models = len(os.listdir(self.result_path))
+        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
+        sparse_recon_path = os.path.join(self.result_path, '0')
+
+        if raw_pose is None:
+            raw_pose = self.colmap_options.use_raw_pose
+
+        print(f"Reading camera parameters from {sparse_recon_path}...")
+        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
+
+        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
+
+        intrinsic = np.eye(3)
+        intrinsic[0, 0] = f
+        intrinsic[1, 1] = f
+        intrinsic[0, 2] = cx
+        intrinsic[1, 2] = cy
+        print("Read intrinsic parameters.")
+
+        extrinsic = []
+
+        if raw_pose:
+            for image in images.values():
+                # COLMAP quaternions seem to be stored in scalar first format.
+                # However, rather than assuming the format we can just rely on the provided function to convert to a
+                # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
+                # This avoids any future issues if the quaternion format ever changes.
+                r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
+                t = image.tvec
+
+                extrinsic.append(np.hstack((r, t)))
+        else:
+            #             # Code adapted from https://github.com/facebookresearch/consistent_depth
+            #             # According to some comments in the above code, "Note that colmap uses a different coordinate system
+            # where y points down and z points to the world." The below rotation apparently puts the poses back into
+            # a 'normal' coordinate frame.
+            colmap_to_normal = np.diag([1, -1, -1])
+
+            for image in images.values():
+                R = image.qvec2rotmat()
+                t = image.tvec.reshape(-1, 1)
+
+                R, t = R.T, -R.T.dot(t)
+                R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
+                t = colmap_to_normal.dot(t)
+                t = t.squeeze()
+
+                r = Rotation.from_matrix(R).as_quat()
+
+                extrinsic.append(np.hstack((r, t)))
+
+        extrinsic = np.asarray(extrinsic).squeeze()
+
+        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+
+        return intrinsic, extrinsic
+
+
 class DatasetAdaptor(DatasetBase):
     """Creates a copy of a dataset in the VTMDataset format."""
 
@@ -1354,140 +1500,6 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
         pool = ThreadPool(psutil.cpu_count(logical=False))
         pool.starmap(convert_depth_map, enumerate(sorted(os.listdir(source_depth_path))))
-
-
-class COLMAPProcessor:
-    """
-    Estimates camera trajectory and intrinsic parameters via COLMAP.
-    """
-
-    def __init__(self, image_path: File, workspace_path: File, colmap_options: COLMAPOptions,
-                 colmap_mask_folder='masks'):
-        self.image_path = image_path
-        self.workspace_path = workspace_path
-        self.colmap_options = colmap_options
-        self.mask_folder = colmap_mask_folder
-
-    @property
-    def mask_path(self):
-        return os.path.join(self.workspace_path, self.mask_folder)
-
-    @property
-    def result_path(self):
-        return os.path.join(self.workspace_path, 'sparse')
-
-    @property
-    def probably_has_results(self):
-        recon_result_path = os.path.join(self.result_path, '0')
-        min_files_for_recon = 4
-
-        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
-               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
-
-    def run(self):
-        os.makedirs(self.workspace_path, exist_ok=True)
-
-        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
-            print(f"Could not find masks in folder: {self.mask_path}.")
-            print(f"Creating masks for COLMAP...")
-            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
-            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
-        else:
-            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
-
-        command = self.get_command()
-        # TODO: Check that COLMAP is using GPU
-        colmap_process = subprocess.Popen(command)
-        colmap_process.wait()
-
-        if colmap_process.returncode != 0:
-            raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
-
-        return
-
-    def get_command(self, return_as_string=False):
-        """
-        Build the command for running COLMAP .
-        Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
-
-        :param return_as_string: Whether to return the command as a single string, or as an array.
-        :return: The COLMAP command.
-        """
-        options = self.colmap_options
-
-        assert os.path.isfile(options.binary_path), f"Could not find COLMAP binary at location: {options.binary_path}."
-        assert os.path.isdir(self.workspace_path), f"Could open workspace path: {self.workspace_path}."
-        assert os.path.isdir(self.image_path), f"Could open image folder: {self.image_path}."
-
-        command = [options.binary_path, 'automatic_reconstructor',
-                   '--workspace_path', self.workspace_path,
-                   '--image_path', self.image_path,
-                   '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
-                   '--dense', 1 if options.dense else 0,
-                   '--quality', options.quality]
-
-        if self.mask_path is not None:
-            assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
-            command += ['--mask_path', self.mask_path]
-
-        command = list(map(str, command))
-
-        return ' '.join(command) if return_as_string else command
-
-    def load_camera_params(self, raw_pose=False):
-        num_models = len(os.listdir(self.result_path))
-        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
-        sparse_recon_path = os.path.join(self.result_path, '0')
-
-        print(f"Reading camera parameters from {sparse_recon_path}...")
-        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
-
-        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
-
-        intrinsic = np.eye(3)
-        intrinsic[0, 0] = f
-        intrinsic[1, 1] = f
-        intrinsic[0, 2] = cx
-        intrinsic[1, 2] = cy
-        print("Read intrinsic parameters.")
-
-        extrinsic = []
-
-        if raw_pose:
-            for image in images.values():
-                # COLMAP quaternions seem to be stored in scalar first format.
-                # However, rather than assuming the format we can just rely on the provided function to convert to a
-                # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
-                # This avoids any future issues if the quaternion format ever changes.
-                r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
-                t = image.tvec
-
-                extrinsic.append(np.hstack((r, t)))
-        else:
-            #             # Code adapted from https://github.com/facebookresearch/consistent_depth
-            #             # According to some comments in the above code, "Note that colmap uses a different coordinate system
-            # where y points down and z points to the world." The below rotation apparently puts the poses back into
-            # a 'normal' coordinate frame.
-            colmap_to_normal = np.diag([1, -1, -1])
-
-            for image in images.values():
-                R = image.qvec2rotmat()
-                t = image.tvec.reshape(-1, 1)
-
-                R, t = R.T, -R.T.dot(t)
-                R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
-                t = colmap_to_normal.dot(t)
-                t = t.squeeze()
-
-                r = Rotation.from_matrix(R).as_quat()
-
-                extrinsic.append(np.hstack((r, t)))
-
-        extrinsic = np.asarray(extrinsic).squeeze()
-
-        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
-
-        return intrinsic, extrinsic
 
 
 class UnrealDatasetInfo:

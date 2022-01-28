@@ -133,11 +133,14 @@ class DepthOptions(Options, ReprMixin):
 class COLMAPOptions(Options, ReprMixin):
     quality_choices = ('low', 'medium', 'high', 'extreme')
 
-    def __init__(self, is_single_camera=True, dense=False, quality='high', binary_path='/usr/local/bin/colmap'):
+    def __init__(self, is_single_camera=True, dense=False, quality='high', use_raw_pose=False,
+                 binary_path='/usr/local/bin/colmap', vocab_path='/root/.cache/colmap/vocab.bin'):
         self.binary_path = binary_path
+        self.vocab_path = vocab_path
         self.is_single_camera = is_single_camera
         self.dense = dense
         self.quality = quality
+        self.use_raw_pose = use_raw_pose
 
         assert quality in COLMAPOptions.quality_choices, f"Quality must be one of: {COLMAPOptions.quality_choices}, got {quality}."
 
@@ -151,16 +154,24 @@ class COLMAPOptions(Options, ReprMixin):
         group.add_argument('--dense', action='store_true', help='Whether to run dense reconstruction.')
         group.add_argument('--quality', type=str, help='The quality of the COLMAP reconstruction.',
                            default='low', choices=COLMAPOptions.quality_choices)
+        group.add_argument('--use_raw_pose', action='store_true',
+                           help='Whether to use the pose data straight from COLMAP, or to convert the pose data into a '
+                                'more "normal" coordinate system.')
         group.add_argument('--binary_path', type=str, help='The path to the COLMAP binary.',
                            default='/usr/local/bin/colmap')
+        group.add_argument('--vocab_path', type=str,
+                           help='The path to the COLMAP vocabulary file. Defaults to the vocab file included in the '
+                                'Docker image.',  default='/root/.cache/colmap/vocab.bin')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'COLMAPOptions':
         return COLMAPOptions(
             binary_path=args.binary_path,
+            vocab_path=args.vocab_path,
             is_single_camera=not args.multiple_cameras,
             dense=args.dense,
-            quality=args.quality
+            quality=args.quality,
+            use_raw_pose=args.use_raw_pose
         )
 
 
