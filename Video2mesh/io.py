@@ -14,12 +14,14 @@ from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
+from matplotlib import pyplot as plt
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 from typing import Union, Tuple, Optional, Callable, IO
 
+from Video2mesh.geometry import pose_vec2mat
 from Video2mesh.options import COLMAPOptions
 from Video2mesh.utils import Timer, log
 from thirdparty.AdaBins.infer import InferenceHelper
@@ -526,6 +528,9 @@ class DatasetBase:
             raise InvalidDatasetFormatError(
                 f"Could not find the following required folders {folders_to_find} in {base_path}.")
 
+    def __str__(self):
+        return f"<{self.__class__.__name__} {Path(self.base_path).stem}>"
+
 
 class DatasetMetadata:
     """Information about a dataset."""
@@ -599,7 +604,7 @@ class VTMDataset(DatasetBase):
 
     required_folders = [rgb_folder, depth_folder]
 
-    def __init__(self, base_path, overwrite_ok):
+    def __init__(self, base_path, overwrite_ok=False):
         """
         :param base_path: The path to the dataset.
         :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
@@ -654,6 +659,9 @@ class VTMDataset(DatasetBase):
     def num_frames(self):
         return self.metadata.num_frames
 
+    def __len__(self):
+        return self.num_frames
+
     @property
     def frame_width(self):
         return self.metadata.width
@@ -667,7 +675,7 @@ class VTMDataset(DatasetBase):
         if self._mask_dataset:
             return self._mask_dataset
         else:
-            raise RuntimeError(f"Masks have not been for this dataset yet."
+            raise RuntimeError(f"Masks have not been for this dataset yet. "
                                f"Please make sure you have called `.create_masks()` before trying to access the masks.")
 
     @property
@@ -687,7 +695,7 @@ class VTMDataset(DatasetBase):
 
         return transform
 
-    def create_or_find_masks(self):
+    def create_or_find_masks(self) -> 'VTMDataset':
         """
         Locate the instance segmentation masks (if they exist), otherwise create them.
         """
@@ -709,11 +717,15 @@ class VTMDataset(DatasetBase):
             raise RuntimeError(f"Expected masks with a resolution of {expected_width}x{expected_height}, "
                                f"but got {width}x{height} (width, height).")
 
-    def use_ground_truth_depth(self):
+        return self
+
+    def use_ground_truth_depth(self) -> 'VTMDataset':
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
         self._using_estimated_depth = False
 
-    def use_estimated_depth(self):
+        return self
+
+    def use_estimated_depth(self) -> 'VTMDataset':
         """Use estimated depth maps, or create them if they do not already exist."""
         estimated_depth_path = self.path_to_estimated_depth_maps
 
@@ -752,12 +764,16 @@ class VTMDataset(DatasetBase):
         self.depth_dataset = depth_dataset
         self._using_estimated_depth = True
 
-    def use_ground_truth_camera_parameters(self):
+        return self
+
+    def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
         self.camera_matrix = np.loadtxt(self.path_to_camera_matrix)
         self.camera_trajectory = np.loadtxt(self.path_to_camera_trajectory)
         self._using_estimated_camera_parameters = False
 
-    def use_estimated_camera_parameters(self, colmap_options: COLMAPOptions):
+        return self
+
+    def use_estimated_camera_parameters(self, colmap_options: COLMAPOptions) -> 'VTMDataset':
         """
         Use camera matrix and trajectory data estimated with COLMAP.
         These will be created if they do not already exist.
@@ -769,8 +785,95 @@ class VTMDataset(DatasetBase):
         if not processor.probably_has_results:
             processor.run()
 
+        old_cm = self.camera_matrix.copy()
+        old_ct = self.camera_trajectory.copy()
+
         self.camera_matrix, self.camera_trajectory = processor.load_camera_params()
         self._using_estimated_camera_parameters = True
+
+        depth = processor.get_sparse_depth_maps()
+
+        t_gt = old_ct[:, 4:].copy()
+        t_gt = t_gt - t_gt[0]
+
+        t_cmp = self.camera_trajectory[:, 4:].copy()
+        t_cmp = t_cmp - t_cmp[0]
+        t_cmp /= 16
+
+        t_cmp[:, 1], t_cmp[:, 2] = -t_cmp[:, 2].copy(), t_cmp[:, 1].copy()
+
+        if colmap_options.use_raw_pose:
+            t_cmp[:, 0] *= -1.
+
+        R_gt = Rotation.from_quat(old_ct[:, :4].copy()).as_euler('xyz', degrees=True)
+        R_gt = R_gt - R_gt[0]
+
+        R_cmp = self.camera_trajectory[:, :4].copy()
+        R_cmp[:, :3] = R_cmp[:, :3] - R_cmp[0, :3]
+
+        R_cmp[:, 1], R_cmp[:, 2] = -R_cmp[:, 2].copy(), R_cmp[:, 1].copy()
+
+        if colmap_options.use_raw_pose:
+            R_cmp[:, 0] *= -1.
+
+        self.camera_trajectory[:, :4] = R_cmp
+        self.camera_trajectory[:, 4:] = t_cmp
+
+        R_cmp = Rotation.from_quat(R_cmp).as_euler('xyz', degrees=True)
+
+        # 2D Plots
+        plt.close('all')
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+        ax = axes[0, 0]
+        ax.set_title('Trajectory (XY)')
+        ax.plot(t_gt[:, 0], t_gt[:, 1], label='gt')
+        ax.plot(t_cmp[:, 0], t_cmp[:, 1], label='cmp')
+        ax.legend()
+
+        ax = axes[0, 1]
+        ax.set_title('Trajectory (XZ)')
+        ax.plot(t_gt[:, 0], t_gt[:, 2], label='gt')
+        ax.plot(t_cmp[:, 0], t_cmp[:, 2], label='cmp')
+        ax.legend()
+
+        ax = axes[1, 0]
+        ax.set_title('Rotation (XY)')
+        ax.plot(R_gt[:, 0], R_gt[:, 1], label='gt')
+        ax.plot(R_cmp[:, 0], R_cmp[:, 1], label='cmp')
+        ax.legend()
+
+        ax = axes[1, 1]
+        ax.set_title('Rotation (XZ)')
+        ax.plot(R_gt[:, 0], R_gt[:, 2], label='gt')
+        ax.plot(R_cmp[:, 0], R_cmp[:, 2], label='cmp')
+        ax.legend()
+
+        plt.tight_layout()
+        plt.savefig('trajectory_viz.png')
+        plt.close('all')
+
+        # 3D Plot
+        plt.close('all')
+        fig = plt.figure(figsize=plt.figaspect(0.5))
+
+        ax = fig.add_subplot(1, 2, 1, projection='3d')
+        ax.set_title('Trajectory')
+        ax.plot(t_gt[:, 0], t_gt[:, 1], t_gt[:, 2], label='gt')
+        ax.plot(t_cmp[:, 0], t_cmp[:, 1], t_cmp[:, 2], label='cmp')
+        ax.legend()
+
+        ax = fig.add_subplot(1, 2, 2, projection='3d')
+        ax.set_title('Rotation')
+        ax.plot(R_gt[:, 0], R_gt[:, 1], R_gt[:, 2], label='gt')
+        ax.plot(R_cmp[:, 0], R_cmp[:, 1], R_cmp[:, 2], label='cmp')
+        ax.legend()
+
+        plt.tight_layout()
+        plt.savefig('trajectory_viz.png')
+        plt.close('all')
+
+        return self
 
 
 class COLMAPProcessor:
@@ -852,6 +955,16 @@ class COLMAPProcessor:
 
         return ' '.join(command) if return_as_string else command
 
+    def _load_model(self):
+        num_models = len(os.listdir(self.result_path))
+        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
+        sparse_recon_path = os.path.join(self.result_path, '0')
+
+        log(f"Reading COLMAP model from {sparse_recon_path}...")
+        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
+
+        return cameras, images, points3d
+
     def load_camera_params(self, raw_pose: Optional[bool] = None):
         """
         Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
@@ -861,15 +974,10 @@ class COLMAPProcessor:
             parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
             translation vector, in that order.
         """
-        num_models = len(os.listdir(self.result_path))
-        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
-        sparse_recon_path = os.path.join(self.result_path, '0')
-
         if raw_pose is None:
             raw_pose = self.colmap_options.use_raw_pose
 
-        print(f"Reading camera parameters from {sparse_recon_path}...")
-        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
+        cameras, images, points3d = self._load_model()
 
         f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
 
@@ -917,6 +1025,44 @@ class COLMAPProcessor:
         print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
+
+    def get_sparse_depth_maps(self):
+        cameras, images, points3d = self._load_model()
+
+        camera_matrix, camera_trajectory = self.load_camera_params()
+
+        source_image_shape = cv2.imread(os.path.join(self.image_path, images[1].name)).shape[:2]
+        depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
+
+        for index_zero_based in range(len(images)):
+            index = index_zero_based + 1
+            image_data = images[index]
+
+            points2d = np.round(image_data.xys[:, ::-1]).astype(int)
+
+            K = np.eye(4)
+            K[:3, :3] = camera_matrix
+            points = np.zeros((len(points2d), 3))
+            has_3d_points = np.zeros(len(points2d), dtype=bool)
+
+            for i, point3d_id in enumerate(image_data.point3D_ids):
+                if point3d_id == -1:
+                    continue
+
+                points[i] = points3d[point3d_id].xyz
+                has_3d_points[i] = True
+
+            pose = pose_vec2mat(camera_trajectory[index_zero_based])
+            R = pose[:3, :3]
+            t = pose[:3, 3:]
+
+            points_camera_space = (R @ points.T) + t
+            projected_points = (camera_matrix @ points_camera_space).T
+            projected_points[~has_3d_points] = [0., 0., 0.]
+
+            depth_maps[index_zero_based, points2d[:, 0], points2d[:, 1]] = projected_points[:, 2]
+
+        return depth_maps
 
 
 class DatasetAdaptor(DatasetBase):
@@ -1128,6 +1274,7 @@ class TUMAdaptor(DatasetAdaptor):
         pool.starmap(shutil.copy, image_copy_jobs)
 
         log(f"Copying depth maps.")
+        # TODO: Convert depth to mm.
         depth_map_ext = Path(depth_filenames[0]).suffix
         depth_copy_jobs = [(join(source_depth_folder, filename), join(output_depth_folder, f"{i:06d}{depth_map_ext}"))
                            for i, filename in enumerate(depth_filenames)]
@@ -1641,6 +1788,7 @@ class UnrealAdaptor(DatasetAdaptor):
         copy_frames(image_source_path, image_dest_path, image_filenames)
 
         log(f"Copying depth maps to new dataset.")
+        # TODO: Convert depth to mm.
         depth_source_path = join(self.base_path, self.depth_folder)
         depth_dest_path = join(self.output_path, VTMDataset.depth_folder)
         copy_frames(depth_source_path, depth_dest_path, depth_filenames)

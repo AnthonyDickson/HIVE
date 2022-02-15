@@ -123,10 +123,6 @@ class Video2Mesh:
         self.filtering_options = filtering_options
 
     @property
-    def scale_factor(self):
-        return self.options.scale_factor
-
-    @property
     def should_create_masks(self):
         return self.options.create_masks
 
@@ -270,6 +266,8 @@ class Video2Mesh:
 
         if self.estimate_camera_params:
             dataset.use_estimated_camera_parameters(colmap_options=colmap_options)
+
+        self.options.num_frames = min(dataset.num_frames, self.num_frames)
 
         return dataset
 
