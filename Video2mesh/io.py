@@ -1,15 +1,20 @@
+from collections import OrderedDict
+
 import cv2
 import datetime
+import imageio
 import json
 import numpy as np
 import os
 import psutil
+import re
 import shutil
 import struct
 import subprocess
 import torch
 import warnings
 from PIL import Image
+from argparse import Namespace
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
@@ -19,10 +24,11 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from typing import Union, Tuple, Optional, Callable, IO
 
-from Video2mesh.geometry import pose_vec2mat
-from Video2mesh.options import COLMAPOptions
+from Video2mesh.geometry import pose_vec2mat, dilate_mask
+from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
 from Video2mesh.utils import Timer, log
 from thirdparty.AdaBins.infer import InferenceHelper
 from thirdparty.colmap.scripts.python.read_write_model import read_model
@@ -231,6 +237,195 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
         log(f"[{i:03,d}/{len(rgb_loader.dataset):03,d}] Creating segmentation masks...", prefix='\r', end='')
 
     print()
+
+
+class COLMAPProcessor:
+    """
+    Estimates camera trajectory and intrinsic parameters via COLMAP.
+    """
+
+    def __init__(self, image_path: File, workspace_path: File, colmap_options: COLMAPOptions,
+                 colmap_mask_folder='masks'):
+        self.image_path = image_path
+        self.workspace_path = workspace_path
+        self.colmap_options = colmap_options
+        self.mask_folder = colmap_mask_folder
+
+    @property
+    def mask_path(self):
+        return os.path.join(self.workspace_path, self.mask_folder)
+
+    @property
+    def result_path(self):
+        return os.path.join(self.workspace_path, 'sparse')
+
+    @property
+    def probably_has_results(self):
+        recon_result_path = os.path.join(self.result_path, '0')
+        min_files_for_recon = 4
+
+        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
+               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
+
+    def run(self):
+        os.makedirs(self.workspace_path, exist_ok=True)
+
+        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
+            print(f"Could not find masks in folder: {self.mask_path}.")
+            print(f"Creating masks for COLMAP...")
+            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
+            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
+        else:
+            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
+
+        command = self.get_command()
+        # TODO: Check that COLMAP is using GPU
+        colmap_process = subprocess.Popen(command)
+        colmap_process.wait()
+
+        if colmap_process.returncode != 0:
+            raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
+
+        # TODO: Save pose data to disk.
+
+    def get_command(self, return_as_string=False):
+        """
+        Build the command for running COLMAP .
+        Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
+
+        :param return_as_string: Whether to return the command as a single string, or as an array.
+        :return: The COLMAP command.
+        """
+        options = self.colmap_options
+
+        assert os.path.isfile(options.binary_path), f"Could not find COLMAP binary at location: {options.binary_path}."
+        assert os.path.isdir(self.workspace_path), f"Could open workspace path: {self.workspace_path}."
+        assert os.path.isdir(self.image_path), f"Could open image folder: {self.image_path}."
+
+        command = [options.binary_path, 'automatic_reconstructor',
+                   '--workspace_path', self.workspace_path,
+                   '--image_path', self.image_path,
+                   '--vocab_tree_path', self.colmap_options.vocab_path,
+                   '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
+                   '--dense', 1 if options.dense else 0,
+                   '--quality', options.quality]
+
+        if self.mask_path is not None:
+            assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
+            command += ['--mask_path', self.mask_path]
+
+        command = list(map(str, command))
+
+        return ' '.join(command) if return_as_string else command
+
+    def _load_model(self):
+        num_models = len(os.listdir(self.result_path))
+        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
+        sparse_recon_path = os.path.join(self.result_path, '0')
+
+        log(f"Reading COLMAP model from {sparse_recon_path}...")
+        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
+
+        return cameras, images, points3d
+
+    def load_camera_params(self, raw_pose: Optional[bool] = None):
+        """
+        Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
+        :param raw_pose: (optional) Whether to use the raw pose data straight from COLMAP.
+                         This value will override `COLMAPProcessor.colmap_options.use_raw_pose` if set.
+        :return: A 2-tuple containing the camera matrix (intrinsic parameters) and camera trajectory (extrinsic
+            parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
+            translation vector, in that order.
+        """
+        if raw_pose is None:
+            raw_pose = self.colmap_options.use_raw_pose
+
+        cameras, images, points3d = self._load_model()
+
+        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
+
+        intrinsic = np.eye(3)
+        intrinsic[0, 0] = f
+        intrinsic[1, 1] = f
+        intrinsic[0, 2] = cx
+        intrinsic[1, 2] = cy
+        print("Read intrinsic parameters.")
+
+        extrinsic = []
+
+        if raw_pose:
+            for image in images.values():
+                # COLMAP quaternions seem to be stored in scalar first format.
+                # However, rather than assuming the format we can just rely on the provided function to convert to a
+                # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
+                # This avoids any future issues if the quaternion format ever changes.
+                r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
+                t = image.tvec
+
+                extrinsic.append(np.hstack((r, t)))
+        else:
+            # Code adapted from https://github.com/facebookresearch/consistent_depth
+            # According to some comments in the above code, "Note that colmap uses a different coordinate system
+            # where y points down and z points to the world." The below rotation apparently puts the poses back into
+            # a 'normal' coordinate frame.
+            colmap_to_normal = np.diag([1, -1, -1])
+
+            for image in images.values():
+                R = image.qvec2rotmat()
+                t = image.tvec.reshape(-1, 1)
+
+                R, t = R.T, -R.T.dot(t)
+                R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
+                t = colmap_to_normal.dot(t)
+                t = t.squeeze()
+
+                r = Rotation.from_matrix(R).as_quat()
+
+                extrinsic.append(np.hstack((r, t)))
+
+        extrinsic = np.asarray(extrinsic).squeeze()
+
+        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+
+        return intrinsic, extrinsic
+
+    def get_sparse_depth_maps(self):
+        cameras, images, points3d = self._load_model()
+
+        camera_matrix, camera_trajectory = self.load_camera_params()
+
+        source_image_shape = cv2.imread(os.path.join(self.image_path, images[1].name)).shape[:2]
+        depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
+
+        for index_zero_based in range(len(images)):
+            index = index_zero_based + 1
+            image_data = images[index]
+
+            points2d = np.round(image_data.xys[:, ::-1]).astype(int)
+
+            K = np.eye(4)
+            K[:3, :3] = camera_matrix
+            points = np.zeros((len(points2d), 3))
+            has_3d_points = np.zeros(len(points2d), dtype=bool)
+
+            for i, point3d_id in enumerate(image_data.point3D_ids):
+                if point3d_id == -1:
+                    continue
+
+                points[i] = points3d[point3d_id].xyz
+                has_3d_points[i] = True
+
+            pose = pose_vec2mat(camera_trajectory[index_zero_based])
+            R = pose[:3, :3]
+            t = pose[:3, 3:]
+
+            points_camera_space = (R @ points.T) + t
+            projected_points = (camera_matrix @ points_camera_space).T
+            projected_points[~has_3d_points] = [0., 0., 0.]
+
+            depth_maps[index_zero_based, points2d[:, 0], points2d[:, 1]] = projected_points[:, 2]
+
+        return depth_maps
 
 
 class NumpyDataset(Dataset):
@@ -535,15 +730,26 @@ class DatasetBase:
 class DatasetMetadata:
     """Information about a dataset."""
 
-    def __init__(self, num_frames: int, fps: float, depth_scale: float, width: int, height: int):
+    def __init__(self, num_frames: int, fps: float, depth_scale: float, width: int, height: int,
+                 depth_mask_dilation_iterations: Optional[int] = None,
+                 depth_estimation_model: Optional[str] = None):
         self.num_frames = num_frames
         self.fps = fps
         self.depth_scale = depth_scale
         self.width = width
         self.height = height
+        self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
+        self.depth_estimation_model = depth_estimation_model
+
+        assert depth_estimation_model is None or depth_estimation_model in DepthEstimationModel.get_choices(), \
+            f"Invalid depth estimation model. Got {depth_estimation_model} but expected one of the following: " \
+            f"{list(DepthEstimationModel.get_choices().keys())}"
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, depth_scale={self.depth_scale}, width={self.width}, height={self.height})"
+        return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
+               f"depth_scale={self.depth_scale}, width={self.width}, height={self.height}," \
+               f"depth_mask_dilation_iterations={self.depth_mask_dilation_iterations}," \
+               f"depth_estimation_model={self.depth_estimation_model})"
 
     def __str__(self):
         return f"Dataset info: {self.num_frames} frames, " \
@@ -623,6 +829,8 @@ class VTMDataset(DatasetBase):
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
         self._mask_dataset: Optional[ImageFolderDataset] = None
 
+        self._masked_depth_path: Optional[str] = None
+
     @property
     def path_to_metadata(self):
         return os.path.join(self.base_path, self.metadata_filename)
@@ -659,9 +867,6 @@ class VTMDataset(DatasetBase):
     def num_frames(self):
         return self.metadata.num_frames
 
-    def __len__(self):
-        return self.num_frames
-
     @property
     def frame_width(self):
         return self.metadata.width
@@ -675,8 +880,23 @@ class VTMDataset(DatasetBase):
         if self._mask_dataset:
             return self._mask_dataset
         else:
-            raise RuntimeError(f"Masks have not been for this dataset yet. "
+            raise RuntimeError(f"Masks have not been created for this dataset yet. "
                                f"Please make sure you have called `.create_masks()` before trying to access the masks.")
+
+    @property
+    def masked_depth_path(self):
+        if self._masked_depth_path:
+            return self._masked_depth_path
+        else:
+            raise RuntimeError(f"Masked depth maps have not been created for this dataset yet. "
+                               f"Please make sure you have called `.create_masked_depth()` beforehand.")
+
+    @property
+    def masked_depth_folder(self):
+        if self._using_estimated_depth:
+            return 'masked_estimated_depth'
+        else:
+            return 'masked_depth'
 
     @property
     def depth_scaling_factor(self):
@@ -684,6 +904,25 @@ class VTMDataset(DatasetBase):
             return 1. / 1000.
         else:
             return self.metadata.depth_scale
+
+    @property
+    def fx(self):
+        return self.camera_matrix[0, 0]
+
+    @property
+    def fy(self):
+        return self.camera_matrix[1, 1]
+
+    @property
+    def cx(self):
+        return self.camera_matrix[0, 2]
+
+    @property
+    def cy(self):
+        return self.camera_matrix[1, 2]
+
+    def __len__(self):
+        return self.num_frames
 
     def _get_depth_map_transform(self):
         def transform(depth_map):
@@ -719,17 +958,72 @@ class VTMDataset(DatasetBase):
 
         return self
 
-    def use_ground_truth_depth(self) -> 'VTMDataset':
-        self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
-        self._using_estimated_depth = False
+    def create_masked_depth(self, dilation_options=MaskDilationOptions(num_iterations=64)) -> 'VTMDataset':
+        start = datetime.datetime.now()
+
+        masked_depth_folder = self.masked_depth_folder
+        masked_depth_path = os.path.join(self.base_path, masked_depth_folder)
+
+        if os.path.isdir(masked_depth_path) and len(os.listdir(masked_depth_path)) == len(self):
+            is_mask_dilation_iterations_same = self.metadata.depth_mask_dilation_iterations == dilation_options.num_iterations
+
+            if is_mask_dilation_iterations_same:
+                log(f"Found cached masked depth at {masked_depth_path}")
+                self._masked_depth_path = masked_depth_path
+
+                return self
+            else:
+                warnings.warn(f"Found cached masked depth maps but they were created with mask dilation iterations of "
+                              f"{self.metadata.depth_mask_dilation_iterations} instead of the specified "
+                              f"{dilation_options.num_iterations}. The old masked depth maps will be replaced.")
+
+        log(f"Creating masked depth maps at {masked_depth_path}")
+
+        os.makedirs(masked_depth_path, exist_ok=True)
+        log("Create output folder")
+
+        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
+        log("Create thread pool")
+
+        def save_depth(i, depth_map, mask):
+            binary_mask = mask > 0.0
+            binary_mask = dilate_mask(binary_mask, dilation_options)
+
+            depth_map[binary_mask] = 0.0
+            depth_map = depth_map / self.depth_scaling_factor  # undo depth scaling done during loading.
+            depth_map = depth_map.astype(np.uint16)
+            output_path = os.path.join(masked_depth_path, f"{i:06d}.png")
+            imageio.imwrite(output_path, depth_map)
+
+            log(f"Writing masked depth to {output_path}")
+
+        pool.starmap(save_depth, zip(range(len(self)), self.depth_dataset, self.mask_dataset))
+
+        self.metadata.depth_mask_dilation_iterations = dilation_options.num_iterations
+        self.metadata.save(self.path_to_metadata)
+        log(f"Update metadata")
+
+        elapsed = datetime.datetime.now() - start
+
+        log(f"Created {len(os.listdir(masked_depth_path))} masked depth maps in {elapsed}")
 
         return self
 
-    def use_estimated_depth(self) -> 'VTMDataset':
+    def use_ground_truth_depth(self) -> 'VTMDataset':
+        self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
+        self._using_estimated_depth = False
+        self._masked_depth_path = None
+
+        return self
+
+    def use_estimated_depth(self, depth_options=DepthOptions()) -> 'VTMDataset':
         """Use estimated depth maps, or create them if they do not already exist."""
         estimated_depth_path = self.path_to_estimated_depth_maps
+        depth_estimation_model = depth_options.depth_estimation_model
 
-        if os.path.isdir(estimated_depth_path):
+        uses_same_model = self.metadata.depth_estimation_model == depth_estimation_model.name.lower()
+
+        if os.path.isdir(estimated_depth_path) and uses_same_model:
             depth_dataset = ImageFolderDataset(estimated_depth_path, transform=self._get_depth_map_transform())
             num_estimated_depth_maps = len(depth_dataset)
             num_frames = self.num_frames
@@ -754,17 +1048,99 @@ class VTMDataset(DatasetBase):
 
             log(f"Found estimated depth maps in {estimated_depth_path}.")
         else:
+            if os.path.isdir(estimated_depth_path) and not uses_same_model:
+                warnings.warn(f"Found cached depth maps but they were created with the depth estimation model "
+                              f"{self.metadata.depth_estimation_model} instead of the specified "
+                              f"{depth_estimation_model.name.lower()}. The old depth maps will be replaced.")
+
             log("Estimating depth maps...")
-            # TODO: Get the weights path from a config file pointing to the location in the Docker image.
-            adabins_inference = InferenceHelper(weights_path='/root/.cache/pretrained')
-            adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
+
+            if depth_estimation_model == DepthEstimationModel.ADABINS:
+                # TODO: Get the weights path from a config file pointing to the location in the Docker image.
+                adabins_inference = InferenceHelper(weights_path='/root/.cache/pretrained')
+                adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
+            elif depth_estimation_model == DepthEstimationModel.LERES:
+                self._estimate_depth_leres(estimated_depth_path)
+            else:
+                raise RuntimeError(f"Unsupported depth estimation model '{depth_estimation_model.name}'.")
 
             depth_dataset = ImageFolderDataset(estimated_depth_path, transform=self._get_depth_map_transform())
 
+            self.metadata.depth_estimation_model = depth_estimation_model.name.lower()
+            self.metadata.save(self.path_to_metadata)
+            log(f"Update metadata")
+
+        self._masked_depth_path = None
         self.depth_dataset = depth_dataset
         self._using_estimated_depth = True
 
         return self
+
+    def _estimate_depth_leres(self, estimated_depth_path: str):
+        # TODO: Make the below options configurable via cli.
+        args = Namespace()
+        args.image_path = self.path_to_rgb_frames
+        args.output_path = estimated_depth_path
+        args.load_ckpt = os.path.join(os.environ['WEIGHTS_PATH'], 'res101.pth')
+        args.backbone = 'resnext101'
+
+        # create depth model
+        from thirdparty.adelai_depth.LeReS.lib.net_tools import load_ckpt
+        from thirdparty.adelai_depth.LeReS.lib.multi_depth_model_woauxi import RelDepthModel
+
+        depth_model = RelDepthModel(backbone=args.backbone)
+        depth_model.eval()
+
+        # load checkpoint
+        load_ckpt(args, depth_model, None, None)
+        depth_model.cuda()
+
+        images_folder = args.image_path
+        imgs_list = os.listdir(images_folder)
+        imgs_list.sort()
+        imgs_path = [os.path.join(images_folder, i) for i in imgs_list if i != 'outputs']
+        image_dir_out = args.output_path
+        os.makedirs(image_dir_out, exist_ok=True)
+
+        def scale_torch(img):
+            """
+            Scale the image and output it in torch.tensor.
+            :param img: input rgb is in shape [H, W, C], input depth/disp is in shape [H, W]
+            :param scale: the scale factor. float
+            :return: img. [C, H, W]
+            """
+            if len(img.shape) == 2:
+                img = img[np.newaxis, :, :]
+
+            if img.shape[2] == 3:
+                transform = transforms.Compose([transforms.ToTensor(),
+                                                transforms.Normalize((0.485, 0.456, 0.406),
+                                                                     (0.229, 0.224, 0.225))])
+                img = transform(img)
+            else:
+                img = img.astype(np.float32)
+                img = torch.from_numpy(img)
+
+            return img
+
+        for i, image_path in enumerate(imgs_path):
+            print(f"[{i:04d}/{len(imgs_path):04d}] {image_path}")
+            rgb = cv2.imread(image_path)
+            rgb_c = rgb[:, :, ::-1].copy()
+            A_resize = cv2.resize(rgb_c, (448, 448))
+
+            img_torch = scale_torch(A_resize)[None, :, :, :]
+            pred_depth = depth_model.inference(img_torch).cpu().numpy().squeeze()
+            pred_depth_ori = cv2.resize(pred_depth, (rgb.shape[1], rgb.shape[0]))
+
+            if pred_depth_ori.max() > 10.0:
+                warnings.warn("Found depth value greater than 10.0.")
+
+            pred_depth_ori[pred_depth_ori > 10.0] = 10.0
+            pred_depth_mm = (1000 * pred_depth_ori).astype(
+                np.uint16)  # Convert to mm as per KinectFusion style datasets.
+
+            imageio.imwrite(os.path.join(image_dir_out, f"{i:06d}.png"), pred_depth_mm)
 
     def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
         self.camera_matrix = np.loadtxt(self.path_to_camera_matrix)
@@ -779,24 +1155,67 @@ class VTMDataset(DatasetBase):
         These will be created if they do not already exist.
         """
         # TODO: Sample subset of frames to speed up this step.
-        processor = COLMAPProcessor(image_path=self.path_to_rgb_frames, workspace_path=self.path_to_colmap,
-                                    colmap_options=colmap_options)
+        processor = self._get_colmap_processor(colmap_options)
 
         if not processor.probably_has_results:
             processor.run()
 
-        old_cm = self.camera_matrix.copy()
-        old_ct = self.camera_trajectory.copy()
-
         self.camera_matrix, self.camera_trajectory = processor.load_camera_params()
+        self.camera_trajectory = self._adjust_colmap_poses(colmap_options)
         self._using_estimated_camera_parameters = True
 
-        depth = processor.get_sparse_depth_maps()
+        return self
 
+    def _get_colmap_processor(self, colmap_options: COLMAPOptions) -> COLMAPProcessor:
+        processor = COLMAPProcessor(image_path=self.path_to_rgb_frames, workspace_path=self.path_to_colmap,
+                                    colmap_options=colmap_options)
+
+        return processor
+
+    def _adjust_colmap_poses(self, colmap_options: COLMAPOptions) -> np.array:
+        processor = self._get_colmap_processor(colmap_options)
+
+        _, colmap_trajectory = processor.load_camera_params()
+
+        t_cmp = colmap_trajectory[:, 4:].copy()
+        t_cmp = t_cmp - t_cmp[0]
+        # TODO: Estimate appropriate scale and shift per dataset.
+        t_cmp /= 16
+
+        t_cmp[:, 1], t_cmp[:, 2] = -t_cmp[:, 2].copy(), t_cmp[:, 1].copy()
+
+        if colmap_options.use_raw_pose:
+            t_cmp[:, 0] *= -1.
+
+        R_cmp = colmap_trajectory[:, :4].copy()
+        R_cmp[:, :3] = R_cmp[:, :3] - R_cmp[0, :3]
+
+        R_cmp[:, 1], R_cmp[:, 2] = -R_cmp[:, 2].copy(), R_cmp[:, 1].copy()
+
+        if colmap_options.use_raw_pose:
+            R_cmp[:, 0] *= -1.
+
+        refined_trajectory = np.eye(4)
+
+        refined_trajectory[:, :4] = R_cmp
+        refined_trajectory[:, 4:] = t_cmp
+
+        return refined_trajectory
+
+    def compare_gt_and_colmap_pose(self, colmap_options: COLMAPOptions):
+        processor = COLMAPProcessor(image_path=self.path_to_rgb_frames, workspace_path=self.path_to_colmap,
+                                    colmap_options=colmap_options)
+
+        if not processor.probably_has_results:
+            raise RuntimeError(f"Did not find COLMAP reconstruction data in the folder: {self.path_to_colmap}")
+
+        _, colmap_trajectory = processor.load_camera_params()
+
+        old_ct = np.loadtxt(self.path_to_camera_trajectory)
         t_gt = old_ct[:, 4:].copy()
         t_gt = t_gt - t_gt[0]
 
-        t_cmp = self.camera_trajectory[:, 4:].copy()
+        t_cmp = colmap_trajectory[:, 4:].copy()
         t_cmp = t_cmp - t_cmp[0]
         t_cmp /= 16
 
@@ -808,7 +1227,7 @@ class VTMDataset(DatasetBase):
         R_gt = Rotation.from_quat(old_ct[:, :4].copy()).as_euler('xyz', degrees=True)
         R_gt = R_gt - R_gt[0]
 
-        R_cmp = self.camera_trajectory[:, :4].copy()
+        R_cmp = colmap_trajectory[:, :4].copy()
         R_cmp[:, :3] = R_cmp[:, :3] - R_cmp[0, :3]
 
         R_cmp[:, 1], R_cmp[:, 2] = -R_cmp[:, 2].copy(), R_cmp[:, 1].copy()
@@ -816,8 +1235,8 @@ class VTMDataset(DatasetBase):
         if colmap_options.use_raw_pose:
             R_cmp[:, 0] *= -1.
 
-        self.camera_trajectory[:, :4] = R_cmp
-        self.camera_trajectory[:, 4:] = t_cmp
+        colmap_trajectory[:, :4] = R_cmp
+        colmap_trajectory[:, 4:] = t_cmp
 
         R_cmp = Rotation.from_quat(R_cmp).as_euler('xyz', degrees=True)
 
@@ -872,197 +1291,6 @@ class VTMDataset(DatasetBase):
         plt.tight_layout()
         plt.savefig('trajectory_viz.png')
         plt.close('all')
-
-        return self
-
-
-class COLMAPProcessor:
-    """
-    Estimates camera trajectory and intrinsic parameters via COLMAP.
-    """
-
-    def __init__(self, image_path: File, workspace_path: File, colmap_options: COLMAPOptions,
-                 colmap_mask_folder='masks'):
-        self.image_path = image_path
-        self.workspace_path = workspace_path
-        self.colmap_options = colmap_options
-        self.mask_folder = colmap_mask_folder
-
-    @property
-    def mask_path(self):
-        return os.path.join(self.workspace_path, self.mask_folder)
-
-    @property
-    def result_path(self):
-        return os.path.join(self.workspace_path, 'sparse')
-
-    @property
-    def probably_has_results(self):
-        recon_result_path = os.path.join(self.result_path, '0')
-        min_files_for_recon = 4
-
-        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
-               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
-
-    def run(self):
-        os.makedirs(self.workspace_path, exist_ok=True)
-
-        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
-            print(f"Could not find masks in folder: {self.mask_path}.")
-            print(f"Creating masks for COLMAP...")
-            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
-            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
-        else:
-            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
-
-        command = self.get_command()
-        # TODO: Check that COLMAP is using GPU
-        colmap_process = subprocess.Popen(command)
-        colmap_process.wait()
-
-        if colmap_process.returncode != 0:
-            raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
-
-        return
-
-    def get_command(self, return_as_string=False):
-        """
-        Build the command for running COLMAP .
-        Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
-
-        :param return_as_string: Whether to return the command as a single string, or as an array.
-        :return: The COLMAP command.
-        """
-        options = self.colmap_options
-
-        assert os.path.isfile(options.binary_path), f"Could not find COLMAP binary at location: {options.binary_path}."
-        assert os.path.isdir(self.workspace_path), f"Could open workspace path: {self.workspace_path}."
-        assert os.path.isdir(self.image_path), f"Could open image folder: {self.image_path}."
-
-        command = [options.binary_path, 'automatic_reconstructor',
-                   '--workspace_path', self.workspace_path,
-                   '--image_path', self.image_path,
-                   '--vocab_tree_path', self.colmap_options.vocab_path,
-                   '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
-                   '--dense', 1 if options.dense else 0,
-                   '--quality', options.quality]
-
-        if self.mask_path is not None:
-            assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
-            command += ['--mask_path', self.mask_path]
-
-        command = list(map(str, command))
-
-        return ' '.join(command) if return_as_string else command
-
-    def _load_model(self):
-        num_models = len(os.listdir(self.result_path))
-        assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
-        sparse_recon_path = os.path.join(self.result_path, '0')
-
-        log(f"Reading COLMAP model from {sparse_recon_path}...")
-        cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
-
-        return cameras, images, points3d
-
-    def load_camera_params(self, raw_pose: Optional[bool] = None):
-        """
-        Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
-        :param raw_pose: (optional) Whether to use the raw pose data straight from COLMAP.
-                         This value will override `COLMAPProcessor.colmap_options.use_raw_pose` if set.
-        :return: A 2-tuple containing the camera matrix (intrinsic parameters) and camera trajectory (extrinsic
-            parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
-            translation vector, in that order.
-        """
-        if raw_pose is None:
-            raw_pose = self.colmap_options.use_raw_pose
-
-        cameras, images, points3d = self._load_model()
-
-        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
-
-        intrinsic = np.eye(3)
-        intrinsic[0, 0] = f
-        intrinsic[1, 1] = f
-        intrinsic[0, 2] = cx
-        intrinsic[1, 2] = cy
-        print("Read intrinsic parameters.")
-
-        extrinsic = []
-
-        if raw_pose:
-            for image in images.values():
-                # COLMAP quaternions seem to be stored in scalar first format.
-                # However, rather than assuming the format we can just rely on the provided function to convert to a
-                # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
-                # This avoids any future issues if the quaternion format ever changes.
-                r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
-                t = image.tvec
-
-                extrinsic.append(np.hstack((r, t)))
-        else:
-            #             # Code adapted from https://github.com/facebookresearch/consistent_depth
-            #             # According to some comments in the above code, "Note that colmap uses a different coordinate system
-            # where y points down and z points to the world." The below rotation apparently puts the poses back into
-            # a 'normal' coordinate frame.
-            colmap_to_normal = np.diag([1, -1, -1])
-
-            for image in images.values():
-                R = image.qvec2rotmat()
-                t = image.tvec.reshape(-1, 1)
-
-                R, t = R.T, -R.T.dot(t)
-                R = colmap_to_normal.dot(R).dot(colmap_to_normal.T)
-                t = colmap_to_normal.dot(t)
-                t = t.squeeze()
-
-                r = Rotation.from_matrix(R).as_quat()
-
-                extrinsic.append(np.hstack((r, t)))
-
-        extrinsic = np.asarray(extrinsic).squeeze()
-
-        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
-
-        return intrinsic, extrinsic
-
-    def get_sparse_depth_maps(self):
-        cameras, images, points3d = self._load_model()
-
-        camera_matrix, camera_trajectory = self.load_camera_params()
-
-        source_image_shape = cv2.imread(os.path.join(self.image_path, images[1].name)).shape[:2]
-        depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
-
-        for index_zero_based in range(len(images)):
-            index = index_zero_based + 1
-            image_data = images[index]
-
-            points2d = np.round(image_data.xys[:, ::-1]).astype(int)
-
-            K = np.eye(4)
-            K[:3, :3] = camera_matrix
-            points = np.zeros((len(points2d), 3))
-            has_3d_points = np.zeros(len(points2d), dtype=bool)
-
-            for i, point3d_id in enumerate(image_data.point3D_ids):
-                if point3d_id == -1:
-                    continue
-
-                points[i] = points3d[point3d_id].xyz
-                has_3d_points[i] = True
-
-            pose = pose_vec2mat(camera_trajectory[index_zero_based])
-            R = pose[:3, :3]
-            t = pose[:3, 3:]
-
-            points_camera_space = (R @ points.T) + t
-            projected_points = (camera_matrix @ points_camera_space).T
-            projected_points[~has_3d_points] = [0., 0., 0.]
-
-            depth_maps[index_zero_based, points2d[:, 0], points2d[:, 1]] = projected_points[:, 2]
-
-        return depth_maps
 
 
 class DatasetAdaptor(DatasetBase):
@@ -1250,7 +1478,8 @@ class TUMAdaptor(DatasetAdaptor):
         os.makedirs(output_depth_folder, exist_ok=self.overwrite_ok)
 
         log(f"Creating metadata for dataset.")
-        metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, depth_scale=self.depth_scale_factor,
+        # Depth scale here is it to 1 / 1000 because the depth maps will be converted to millimetres later on.
+        metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, depth_scale=1. / 1000.,
                                    width=self.width, height=self.height)
         metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
@@ -1274,11 +1503,17 @@ class TUMAdaptor(DatasetAdaptor):
         pool.starmap(shutil.copy, image_copy_jobs)
 
         log(f"Copying depth maps.")
-        # TODO: Convert depth to mm.
+
+        def convert_depth_to_mm(input_path, output_path):
+            depth_map = imageio.imread(input_path)
+            depth_map = depth_map * self.depth_scale_factor  # convert to metres from non-standard scale & units.
+            depth_map = (1000 * depth_map).astype(np.uint16)  # convert to 16-bit millimetres.
+            imageio.imwrite(output_path, depth_map)
+
         depth_map_ext = Path(depth_filenames[0]).suffix
         depth_copy_jobs = [(join(source_depth_folder, filename), join(output_depth_folder, f"{i:06d}{depth_map_ext}"))
                            for i, filename in enumerate(depth_filenames)]
-        pool.starmap(shutil.copy, depth_copy_jobs)
+        pool.starmap(convert_depth_to_mm, depth_copy_jobs)
 
         log(f"Created new dataset at {self.output_path}.")
 
@@ -1740,13 +1975,11 @@ class UnrealAdaptor(DatasetAdaptor):
         os.makedirs(self.output_path, exist_ok=self.overwrite_ok)
 
         log(f"Creating metadata for dataset.")
-        depth_map_max_value = np.iinfo(np.uint16).max if dataset_metadata.is_16bit_depth else np.iinfo(np.uint8).max
-        depth_scale = dataset_metadata.max_depth / depth_map_max_value
 
         metadata = DatasetMetadata(
             num_frames=dataset_metadata.num_frames,
             fps=dataset_metadata.fps,
-            depth_scale=depth_scale,
+            depth_scale=1. / 1000.,
             width=dataset_metadata.width,
             height=dataset_metadata.height
         )
@@ -1774,27 +2007,131 @@ class UnrealAdaptor(DatasetAdaptor):
 
         pool = ThreadPool(processes=psutil.cpu_count(logical=False))
 
-        def copy_frames(source_path, dest_path, files):
+        def copy_frames(source_path, dest_path, files, copy_func=shutil.copy):
             os.makedirs(dest_path, exist_ok=self.overwrite_ok)
 
             extension = Path(files[0]).suffix
             copy_jobs = [(join(source_path, filename), join(dest_path, f"{i:06d}{extension}"))
                          for i, filename in enumerate(files)]
 
-            pool.starmap(shutil.copy, copy_jobs)
+            pool.starmap(copy_func, copy_jobs)
 
         image_source_path = join(self.base_path, self.rgb_folder)
         image_dest_path = join(self.output_path, VTMDataset.rgb_folder)
         copy_frames(image_source_path, image_dest_path, image_filenames)
 
         log(f"Copying depth maps to new dataset.")
-        # TODO: Convert depth to mm.
+
+        depth_map_max_value = np.iinfo(np.uint16).max if dataset_metadata.is_16bit_depth else np.iinfo(np.uint8).max
+        depth_scale = dataset_metadata.max_depth / depth_map_max_value
+
+        def convert_depth_to_mm(input_path, output_path):
+            depth_map = imageio.imread(input_path)
+            depth_map = depth_scale * depth_map
+            depth_map = (1000 * depth_map).astype(np.uint16)
+            imageio.imwrite(output_path, depth_map)
+
         depth_source_path = join(self.base_path, self.depth_folder)
         depth_dest_path = join(self.output_path, VTMDataset.depth_folder)
-        copy_frames(depth_source_path, depth_dest_path, depth_filenames)
+        copy_frames(depth_source_path, depth_dest_path, depth_filenames, copy_func=convert_depth_to_mm)
 
         log(f"Created new dataset at {self.output_path}.")
 
         dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
         return dataset
+
+
+class BundleFusionConfig:
+    def __init__(self, **kwargs):
+        self.config_dict = OrderedDict(**kwargs)
+
+    def __getitem__(self, key):
+        return self.config_dict[key]
+
+    def __setitem__(self, key, value):
+        if key in self.config_dict and (value_type := type(value)) != (expected_type := type(self.config_dict[key])):
+            warnings.warn(f"The config file entry \"{key}\" is of type {expected_type} "
+                          f"but it is being set to a new value of type {value_type}")
+
+        self.config_dict[key] = value
+
+    @staticmethod
+    def load(f) -> 'BundleFusionConfig':
+        if isinstance(f, str):
+            with open(f, 'r') as fp:
+                return BundleFusionConfig._read_file(fp)
+        else:
+            return BundleFusionConfig._read_file(f)
+
+    @staticmethod
+    def _read_file(fp) -> 'BundleFusionConfig':
+        config = OrderedDict()
+
+        delimiter_pattern = re.compile("[;#]|(//)")
+
+        def convert_value(string_value):
+            if string_value[0] == '"' and string_value[-1] == '"':
+                return string_value.strip('"')
+            elif string_value == 'true':
+                return True
+            elif string_value == 'false':
+                return False
+            elif string_value[-1] == 'f':
+                return float(string_value[:-1])
+            else:
+                return int(string_value)
+
+        for line in fp:
+            line = line.strip()
+
+            if delimiter_match := re.search(delimiter_pattern, line):
+                line = line[:delimiter_match.start()]
+
+            if len(line) < 1:
+                continue
+
+            attribute_name, values = line.split("=")
+            attribute_name = attribute_name.strip()
+            values = values.strip()
+
+            if len(attribute_name) < 1 or len(values) < 1:
+                continue
+
+            parts = values.split(" ")
+
+            if len(parts) > 1:
+                converted_values = [convert_value(value) for value in parts]
+            else:
+                converted_values = convert_value(values)
+
+            config[attribute_name] = converted_values
+
+        return BundleFusionConfig(**config)
+
+    def save(self, f):
+        if isinstance(f, str):
+            with open(f, 'w') as fp:
+                self._write_to_disk(fp)
+        else:
+            self._write_to_disk(f)
+
+    def _write_to_disk(self, fp):
+        def convert_to_string(value):
+            if type(value) == list:
+                return ' '.join([convert_to_string(item) for item in value])
+            elif type(value) == float:
+                return f"{value}f"
+            elif type(value) == int:
+                return str(value)
+            elif type(value) == str:
+                return f"\"{value}\""
+            elif type(value) == bool:
+                return str(value).lower()
+            else:
+                raise ValueError(
+                    f"The type '{type(value)}' is not supported for serialisation. Supported types are list, float, int and str.")
+
+        for attribute_name, value in self.config_dict.items():
+            line = f"{attribute_name} = {convert_to_string(value)};\n"
+            fp.write(line)

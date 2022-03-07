@@ -1,7 +1,6 @@
-from pathlib import Path
+import subprocess
 
 import argparse
-import cv2
 import numpy as np
 import openmesh as om
 import os
@@ -12,89 +11,22 @@ import trimesh
 import warnings
 from PIL import Image
 from multiprocessing.pool import ThreadPool
+from pathlib import Path
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from trimesh.exchange.export import export_mesh
-from typing import Optional
+from trimesh.exchange.ply import load_ply
 
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
-from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor
+from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask, \
+    point_cloud_from_rgbd
+from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig, \
+    COLMAPProcessor
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
-    MaskDilationOptions, MeshFilteringOptions, Options
+    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
 from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape, log
 from thirdparty.tsdf_fusion_python import fusion
 
-
-class Video2MeshOptions(Options):
-
-    def __init__(self, create_masks=False, include_background=False, static_background=False, num_frames=-1,
-                 estimate_depth=False, estimate_camera_params=False,
-                 webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
-        """
-        :param create_masks: Whether to create masks for dynamic objects
-        :param include_background: Include the background in the reconstructed mesh.
-        :param static_background: Whether to use the first frame to generate a static background.
-        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
-        :param estimate_depth: Flag to indicate that depth maps estimated by a neural network model should be used
-                                instead of the ground truth depth maps.
-        :param estimate_camera_params: Flag to indicate that camera intrinsic and extrinsic parameters estimated with
-                                       COLMAP should be used instead of the ground truth parameters (if they exist).
-        :param webxr_path: Where to export the 3D video files to.
-        :param webxr_url: The URL to the WebXR 3D video player.
-        """
-        self.create_masks = create_masks
-        self.include_background = include_background
-        self.static_background = static_background
-        self.num_frames = num_frames
-        self.estimate_depth = estimate_depth
-        self.estimate_camera_params = estimate_camera_params
-        self.webxr_path = webxr_path
-        self.webxr_url = webxr_url
-
-        if self.include_background:
-            warnings.warn("The command line option `--include_background` is deprecated and will be removed in "
-                          "future versions. KinectFusion will reconstruct the 3D background instead.")
-
-        if self.static_background:
-            warnings.warn("The command line option `--static_background` is deprecated and will be removed in "
-                          "future versions. KinectFusion will reconstruct the 3D background instead.")
-
-    @staticmethod
-    def add_args(parser: argparse.ArgumentParser):
-        group = parser.add_argument_group('video2mesh')
-
-        group.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
-                           action='store_true')
-        group.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
-                           action='store_true')
-        group.add_argument('--static_background',
-                           help='Whether to use the first frame to generate a static background.',
-                           action='store_true')
-        group.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
-                                                          'Set to -1 (default) to process all frames.', default=-1)
-        group.add_argument('--estimate_depth', action='store_true',
-                           help='Flag to indicate that depth maps estimated by a neural network model should be used '
-                                'instead of the ground truth depth maps.')
-        group.add_argument('--estimate_camera_params', action='store_true',
-                           help='Flag to indicate that camera intrinsic and extrinsic parameters estimated with COLMAP '
-                                'should be used instead of the ground truth parameters (if they exist).')
-        group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
-                           default='thirdparty/webxr3dvideo/docs')
-        group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
-                           default='http://localhost:8080')
-
-    @staticmethod
-    def from_args(args: argparse.Namespace) -> 'Video2MeshOptions':
-        return Video2MeshOptions(
-            create_masks=args.create_masks,
-            include_background=args.include_background,
-            static_background=args.static_background,
-            num_frames=args.num_frames,
-            estimate_depth=args.estimate_depth,
-            estimate_camera_params=args.estimate_camera_params,
-            webxr_path=args.webxr_path,
-            webxr_url=args.webxr_url
-        )
+pjoin = os.path.join
 
 
 class Video2Mesh:
@@ -103,7 +35,7 @@ class Video2Mesh:
     def __init__(self, options: Video2MeshOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 depth_options=DepthOptions(), colmap_options=COLMAPOptions()):
+                 depth_options=DepthOptions(), colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions()):
         """
         :param options: Options pertaining to the core program.
         :param storage_options: Options regarding storage of inputs and outputs.
@@ -112,6 +44,7 @@ class Video2Mesh:
         :param filtering_options: Options for face filtering.
         :param depth_options: Options for depth maps.
         :param colmap_options: Options for COLMAP.
+        :param static_mesh_options: Options for creating the background static mesh.
         """
         self.options = options
         self.storage_options = storage_options
@@ -121,6 +54,7 @@ class Video2Mesh:
         self.decimation_options = decimation_options
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
+        self.static_mesh_options = static_mesh_options
 
     @property
     def should_create_masks(self):
@@ -152,21 +86,13 @@ class Video2Mesh:
 
         storage_options = self.storage_options
 
-        dataset = self._get_dataset(storage_options.base_path)
+        dataset = self._get_dataset()
         storage_options.base_path = dataset.base_path
-
         timer.split("configure dataset")
 
         background_output_folder = f"{storage_options.output_folder}_bg"
 
-        camera_trajectory = dataset.camera_trajectory
-
-        pose = pose_vec2mat(camera_trajectory[0])
-        R, t = get_pose_components(pose)
-        rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
-        centering_transform = np.eye(4, dtype=np.float32)
-        centering_transform[:3, :3] = rot_180 @ R.T
-        centering_transform[:3, 3:] = -(R.T @ t)
+        centering_transform = self._get_centering_transform(dataset)
 
         if self.include_background and self.static_background:
             background_scene = self.create_scene(dataset, timer,
@@ -184,6 +110,30 @@ class Video2Mesh:
             self.write_results(dataset.base_path, background_output_folder, background_scene, timer,
                                storage_options.overwrite_ok)
         else:
+            if not self.include_background:
+                fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
+
+                bg_scene = trimesh.scene.Scene(
+                    camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
+                )
+
+                static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
+                                                      options=self.static_mesh_options)
+
+                if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+                    static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
+
+                    if self.estimate_camera_params and self.options.refine_colmap_poses:
+                        dataset.camera_trajectory = self._refine_colmap_poses()
+
+                # TODO: Compress background mesh? PLY + Draco?
+                timer.split("create static mesh")
+
+                bg_scene.add_geometry(static_mesh)
+
+                self.write_results(dataset.base_path, background_output_folder, bg_scene, timer,
+                                   storage_options.overwrite_ok)
+
             scene = self.create_scene(dataset, timer,
                                       include_background=self.include_background,
                                       background_only=False)
@@ -193,36 +143,32 @@ class Video2Mesh:
             self.write_results(dataset.base_path, storage_options.output_folder, scene, timer,
                                storage_options.overwrite_ok)
 
-            if not self.include_background:
-                fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
-
-                bg_scene = trimesh.scene.Scene(
-                    camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
-                )
-
-                static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames)
-                timer.split("create static mesh")
-
-                bg_scene.add_geometry(static_mesh)
-                bg_scene.apply_transform(centering_transform)
-
-                self.write_results(dataset.base_path, background_output_folder, bg_scene, timer,
-                                   storage_options.overwrite_ok)
-
         self._export_video_webxr(dataset, background_output_folder)
         # TODO: Summarise results - how many frames? mesh size (on disk, vertices/faces per frame and total)
         timer.stop()
+
+    def _get_centering_transform(self, dataset):
+        camera_trajectory = dataset.camera_trajectory
+        pose = pose_vec2mat(camera_trajectory[0])
+        R, t = get_pose_components(pose)
+
+        rot_180 = Rotation.from_euler('xyz', [180, 180, 0], degrees=True).as_matrix()
+        centering_transform = np.eye(4, dtype=np.float32)
+        centering_transform[:3, :3] = rot_180 @ R.T
+        centering_transform[:3, 3:] = -(R.T @ t)
+
+        return centering_transform
 
     def _export_video_webxr(self, dataset, background_output_folder):
         storage_options = self.storage_options
 
         dataset_name = Path(dataset.base_path).name
-        webxr_output_path = os.path.join(self.options.webxr_path, dataset_name)
+        webxr_output_path = pjoin(self.options.webxr_path, dataset_name)
         os.makedirs(webxr_output_path, exist_ok=storage_options.overwrite_ok)
 
         def copy_video_files(video_folder):
-            scene3d_path = os.path.join(dataset.base_path, video_folder)
-            scene3d_output_path = os.path.join(webxr_output_path, video_folder)
+            scene3d_path = pjoin(dataset.base_path, video_folder)
+            scene3d_output_path = pjoin(webxr_output_path, video_folder)
 
             os.makedirs(scene3d_output_path, exist_ok=storage_options.overwrite_ok)
             shutil.copytree(scene3d_path, scene3d_output_path, dirs_exist_ok=storage_options.overwrite_ok)
@@ -232,7 +178,9 @@ class Video2Mesh:
 
         log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={dataset_name}")
 
-    def _get_dataset(self, dataset_path):
+    def _get_dataset(self):
+        dataset_path = self.storage_options.base_path
+
         if TUMAdaptor.is_valid_folder_structure(dataset_path):
             # TODO: Test TUMAdaptor
             dataset = TUMAdaptor(
@@ -245,8 +193,8 @@ class Video2Mesh:
                 base_path=dataset_path,
                 output_path=f"{dataset_path}_vtm",
                 overwrite_ok=storage_options.overwrite_ok,
-                resize_to=640,  # Resize the longest side to 640
-                depth_confidence_filter_level=0
+                resize_to=640,  # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
+                depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
             ).convert()
         elif UnrealAdaptor.is_valid_folder_structure(dataset_path):
             dataset = UnrealAdaptor(
@@ -262,7 +210,7 @@ class Video2Mesh:
         dataset.create_or_find_masks()
 
         if self.estimate_depth:
-            dataset.use_estimated_depth()
+            dataset.use_estimated_depth(depth_options=self.depth_options)
 
         if self.estimate_camera_params:
             dataset.use_estimated_camera_parameters(colmap_options=colmap_options)
@@ -271,8 +219,43 @@ class Video2Mesh:
 
         return dataset
 
+    def _refine_colmap_poses(self):
+        """
+        Refine the pose data estimated with COLMAP with additional data from BundleFusion.
+
+        :return: The refined camera trajectory data.
+        """
+        raise NotImplementedError
+
+        refined_trajectory = np.eye(4)
+
+        dataset_path = self.storage_options.base_path
+        bundle_fusion_output_dir = pjoin(dataset_path, 'bundle_fusion')
+        trajectory_path = pjoin(bundle_fusion_output_dir, 'trajectory.txt')
+        bf_trajectory = np.loadtxt(trajectory_path)
+
+        rows_with_data = np.any(np.isfinite(bf_trajectory), axis=1)
+        # TODO: Scale COLMAP pose data with BundleFusion pose data. Could use sklearn's polyfit.
+
+        bf_trajectory = bf_trajectory.reshape((-1, 4, 4))
+        rot_as_quat = Rotation.from_matrix(bf_trajectory[:, :3, :3]).as_quat()
+
+        # TODO: Interpolate missing poses
+
+        return refined_trajectory
+
     def create_scene(self, dataset: VTMDataset, timer: Timer, include_background=False,
-                     background_only=False):
+                     background_only=False) -> trimesh.Scene:
+        """
+        Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
+
+        :param dataset: The set of RGB frames and depth maps to use as input.
+        :param timer: The timer object for debug output.
+        :param include_background: Whether to include the background mesh for each frame.
+        :param background_only: Whether to exclude dynamic foreground objects.
+
+        :return: The Trimesh scene object.
+        """
         if background_only:
             num_frames = 1
         elif self.num_frames == -1:
@@ -329,7 +312,7 @@ class Video2Mesh:
                     continue
 
                 if is_object:
-                    mask = self.dilate_mask(mask, self.dilation_options)
+                    mask = dilate_mask(mask, self.dilation_options)
                     timer.split(f"\t\tdilate mask")
 
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
@@ -400,80 +383,128 @@ class Video2Mesh:
         return scene
 
     @staticmethod
-    def create_static_mesh(dataset: VTMDataset, num_frames=-1):
+    def create_static_mesh(dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
         """
         Create a static mesh of the scene.
 
         :param dataset: The dataset to create the mesh from.
         :param num_frames: The max number of frames to use from the dataset.
+        :param options: The options/settings for creating the static mesh.
 
         :return: The reconstructed 3D mesh of the scene.
         """
-        # ======================================================================================================== #
-        # (Optional) This is an example of how to compute the 3D bounds
-        # in world coordinates of the convex hull of all camera view
-        # frustums in the dataset
-        # ======================================================================================================== #
-        log("Estimating voxel volume bounds...")
-
-        cam_intr = dataset.camera_matrix
-        vol_bnds = np.zeros((3, 2))
-
-        # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
-        # (this typically results in floating fragments in the static mesh.)
-        mask_dilation_options = MaskDilationOptions(num_iterations=10)
-
         if num_frames < 1:
             num_frames = dataset.num_frames
 
-        for i in range(num_frames):
-            # Read depth image and camera pose
-            mask = dataset.mask_dataset[i]
-            mask = Video2Mesh.dilate_mask(mask, mask_dilation_options)
-            depth_im = dataset.depth_dataset[i]
-            depth_im[mask > 0] = 0.0
-            cam_pose = pose_vec2mat(dataset.camera_trajectory[i])  # 4x4 rigid transformation matrix
+        if options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+            dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
+            dataset_path = os.path.abspath(dataset.base_path)
 
-            # Compute camera view frustum and extend convex hull
-            view_frust_pts = fusion.get_view_frustum(depth_im, cam_intr, cam_pose)
-            vol_bnds[:, 0] = np.minimum(vol_bnds[:, 0], np.amin(view_frust_pts, axis=1))
-            vol_bnds[:, 1] = np.maximum(vol_bnds[:, 1], np.amax(view_frust_pts, axis=1))
-        # ======================================================================================================== #
+            bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
+            default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
+            config = BundleFusionConfig.load(default_config_path)
+            config['s_SDFMaxIntegrationDistance'] = options.sdf_volume_size
+            config['s_SDFVoxelSize'] = options.sdf_voxel_size
+            config['s_cameraIntrinsicFx'] = int(dataset.fx)
+            config['s_cameraIntrinsicFy'] = int(dataset.fy)
+            config['s_cameraIntrinsicCx'] = int(dataset.cx)
+            config['s_cameraIntrinsicCy'] = int(dataset.cy)
 
-        # ======================================================================================================== #
-        # Integrate
-        # ======================================================================================================== #
-        # Initialize voxel volume
-        log("Initializing voxel volume...")
-        tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=0.02)
+            bundle_fusion_output_dir = pjoin(dataset_path, 'bundle_fusion')
+            config['s_generateMeshDir'] = bundle_fusion_output_dir
 
-        # Loop through RGB-D images and fuse them together
-        t0_elapse = time.time()
-        for i in range(num_frames):
-            log("Fusing frame %d/%d" % (i + 1, (num_frames)))
+            config_output_path = pjoin(dataset_path, 'bundleFusionConfig.txt')
+            config.save(config_output_path)
 
-            # Read RGB-D image and camera pose
-            color_image = dataset.rgb_dataset[i]
-            mask = dataset.mask_dataset[i]
-            mask = Video2Mesh.dilate_mask(mask, mask_dilation_options)
-            depth_im = dataset.depth_dataset[i]
-            depth_im[mask > 0] = 0.0
-            cam_pose = pose_vec2mat(dataset.camera_trajectory[i])
+            bundle_fusion_bin = os.environ['BUNDLE_FUSION_BIN']
+            bundling_config_path = pjoin(bundle_fusion_path, 'zParametersBundlingDefault.txt')
+            bundling_config = BundleFusionConfig.load(bundling_config_path)
 
-            # Integrate observation into voxel volume (assume color aligned with depth)
-            tsdf_vol.integrate(color_image, depth_im, cam_intr, cam_pose, obs_weight=1.)
+            submap_size = bundling_config['s_submapSize']
+            bundling_config['s_maxNumImages'] = (
+                                                        num_frames + submap_size) // submap_size  # the `+ submap_size` is to avoid 'off-by-one' like errors.
 
-        fps = dataset.num_frames / (time.time() - t0_elapse)
-        log("Average FPS: {:.2f}".format(fps))
+            bundling_config_output_path = pjoin(dataset_path, 'bundleFusionBundlingConfig.txt')
+            bundling_config.save(bundling_config_output_path)
 
-        # Get mesh from voxel volume and save to disk (can be viewed with Meshlab)
-        verts, faces, norms, colors = tsdf_vol.get_mesh()
+            return_code = subprocess.call([bundle_fusion_bin, config_output_path, bundling_config_output_path,
+                                           dataset_path, dataset.masked_depth_folder])
 
-        # TODO: Cleanup mesh for floating fragments (e.g. via connected components analysis).
-        # TODO: Fix this. It seems to mess up the order of the face vertices or something.
-        # verts, faces = Video2Mesh.cleanup_with_connected_components(verts, faces, is_object=False, min_components=10)
+            if return_code:
+                raise RuntimeError(f"BundleFusion returned a non-zero code, check the logs for what went wrong.")
 
-        mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors, vertex_normals=norms)
+            # Read ply file into trimesh object
+            mesh_path = pjoin(bundle_fusion_output_dir, 'mesh.ply')
+
+            with open(mesh_path, 'rb') as mesh_file:
+                mesh_data = load_ply(mesh_file)
+
+            mesh = trimesh.Trimesh(**mesh_data)
+        elif options.reconstruction_method == MeshReconstructionMethod.TSDF_FUSION:
+            # ======================================================================================================== #
+            # (Optional) This is an example of how to compute the 3D bounds
+            # in world coordinates of the convex hull of all camera view
+            # frustums in the dataset
+            # ======================================================================================================== #
+            log("Estimating voxel volume bounds...")
+
+            cam_intr = dataset.camera_matrix
+            vol_bnds = np.zeros((3, 2))
+
+            # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
+            # (this typically results in floating fragments in the static mesh.)
+            mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
+
+            for i in range(num_frames):
+                # Read depth image and camera pose
+                mask = dataset.mask_dataset[i]
+                mask = dilate_mask(mask, mask_dilation_options)
+                depth_im = dataset.depth_dataset[i]
+                depth_im[mask > 0] = 0.0
+                cam_pose = pose_vec2mat(dataset.camera_trajectory[i])  # 4x4 rigid transformation matrix
+
+                # Compute camera view frustum and extend convex hull
+                view_frust_pts = fusion.get_view_frustum(depth_im, cam_intr, cam_pose)
+                vol_bnds[:, 0] = np.minimum(vol_bnds[:, 0], np.amin(view_frust_pts, axis=1))
+                vol_bnds[:, 1] = np.maximum(vol_bnds[:, 1], np.amax(view_frust_pts, axis=1))
+            # ======================================================================================================== #
+
+            # ======================================================================================================== #
+            # Integrate
+            # ======================================================================================================== #
+            # Initialize voxel volume
+            log("Initializing voxel volume...")
+            tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=options.sdf_voxel_size)
+
+            # Loop through RGB-D images and fuse them together
+            t0_elapse = time.time()
+            for i in range(num_frames):
+                log("Fusing frame %d/%d" % (i + 1, (num_frames)))
+
+                # Read RGB-D image and camera pose
+                color_image = dataset.rgb_dataset[i]
+                mask = dataset.mask_dataset[i]
+                mask = dilate_mask(mask, mask_dilation_options)
+                depth_im = dataset.depth_dataset[i]
+                depth_im[mask > 0] = 0.0
+                cam_pose = pose_vec2mat(dataset.camera_trajectory[i])
+
+                # Integrate observation into voxel volume (assume color aligned with depth)
+                tsdf_vol.integrate(color_image, depth_im, cam_intr, cam_pose, obs_weight=1.)
+
+            fps = dataset.num_frames / (time.time() - t0_elapse)
+            log("Average FPS: {:.2f}".format(fps))
+
+            # Get mesh from voxel volume and save to disk (can be viewed with Meshlab)
+            verts, faces, norms, colors = tsdf_vol.get_mesh()
+
+            # TODO: Cleanup mesh for floating fragments (e.g. via connected components analysis).
+            # TODO: Fix this. It seems to mess up the order of the face vertices or something.
+            # verts, faces = Video2Mesh.cleanup_with_connected_components(verts, faces, is_object=False, min_components=10)
+
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors, vertex_normals=norms)
+        else:
+            raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
 
         return mesh
 
@@ -487,23 +518,6 @@ class Video2Mesh:
         fy = camera_intrinsics[1, 1]
 
         return fx, fy, height, width
-
-    @staticmethod
-    def dilate_mask(mask, dilation_options: MaskDilationOptions):
-        """
-        Dilate an instance segmentation mask so that it covers a larger area.
-
-        :param mask: The mask to enlarge/dilate.
-
-        :return: The dilated mask.
-        """
-        validate_shape(mask, 'mask', expected_shape=(None, None))
-
-        mask = mask.astype(np.float32)
-        mask = cv2.dilate(mask.astype(float), dilation_options.filter, iterations=dilation_options.num_iterations)
-        mask = mask.astype(bool)
-
-        return mask
 
     @staticmethod
     def triangulate_faces(points):
@@ -716,7 +730,7 @@ class Video2Mesh:
 
     @staticmethod
     def write_results(base_folder, output_dir, scene, timer, replace_old_results_ok=False):
-        scene3d_path = os.path.join(base_folder, output_dir)
+        scene3d_path = pjoin(base_folder, output_dir)
         old_results_path = f"{scene3d_path}.old"
 
         if replace_old_results_ok:
@@ -731,7 +745,7 @@ class Video2Mesh:
             output_files = trimesh.exchange.gltf.export_gltf(scene, merge_buffers=True)
 
             for filename in output_files:
-                with open(os.path.join(scene3d_path, filename), 'wb') as f:
+                with open(pjoin(scene3d_path, filename), 'wb') as f:
                     f.write(output_files[filename])
 
             timer.split("write mesh data to disk")
@@ -746,6 +760,50 @@ class Video2Mesh:
 
             raise
 
+    def align_bundle_fusion_reconstruction(self, dataset: VTMDataset, mesh: trimesh.Trimesh):
+        # TODO: Check if the below transform is always the correct fix for reconstructions regardless of dataset.
+        rgb = dataset.rgb_dataset[0][:, :, :3]
+        depth_map = dataset.depth_dataset[0]
+        pose = dataset.camera_trajectory[0]
+        mask_encoded = dataset.mask_dataset[0]
+        binary_mask = mask_encoded == 0
+
+        pose_matrix = pose_vec2mat(pose)
+        pose_matrix = np.linalg.inv(pose_matrix)
+        R = pose_matrix[:3, :3]
+        t = pose_matrix[:3, 3:]
+
+        colours, points3d = point_cloud_from_rgbd(rgb=rgb, depth=depth_map, mask=binary_mask,
+                                                  K=dataset.camera_matrix, R=R, t=t)
+        points3d_homogenous = np.ones(shape=(points3d.shape[0], 4))
+        points3d_homogenous[:, :3] = points3d
+
+        centering_transform = self._get_centering_transform(dataset)
+        points3d = (centering_transform @ points3d_homogenous.T).T[:, :3]
+
+        rotation_transform = np.eye(4)
+        rotation = Rotation.from_euler('xyz', [180, 180, 0], degrees=True).as_matrix()
+        rotation_transform[:3, :3] = rotation
+
+        translation_transform = np.eye(4)
+        translation_transform[:3, 3] = -mesh.centroid
+
+        scale_transform = np.eye(4)
+        scale_transform[0, 0] = -1.
+
+        aligned_mesh = mesh.copy()
+        aligned_mesh = aligned_mesh.apply_transform(rotation_transform @ translation_transform @ scale_transform)
+
+        sample_points = 2 ** 15  # TODO: Make number of mesh/pcd samples configurable via cli.
+        bf_sampled_points, _ = trimesh.sample.sample_surface(mesh, count=sample_points)
+
+        # TODO: Make number of ICP iterations and stopping threshold configurable via cli.
+        transform, _, cost = trimesh.registration.icp(bf_sampled_points, points3d[sample_points::len(
+            points3d) // sample_points], max_iterations=40, threshold=1e-10, scale=False, reflection=False)
+
+        aligned_mesh = aligned_mesh.apply_transform(transform)
+
+        return aligned_mesh
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
@@ -758,6 +816,7 @@ if __name__ == '__main__':
     MeshFilteringOptions.add_args(parser)
     MeshDecimationOptions.add_args(parser)
     COLMAPOptions.add_args(parser)
+    StaticMeshOptions.add_args(parser)
 
     args = parser.parse_args()
     print(args)
@@ -769,6 +828,7 @@ if __name__ == '__main__':
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
     colmap_options = COLMAPOptions.from_args(args)
+    static_mesh_options = StaticMeshOptions.from_args(args)
 
     program = Video2Mesh(options=video2mesh_options,
                          storage_options=storage_options,
@@ -776,5 +836,6 @@ if __name__ == '__main__':
                          dilation_options=dilation_options,
                          filtering_options=filtering_options,
                          depth_options=depth_options,
-                         colmap_options=colmap_options)
+                         colmap_options=colmap_options,
+                         static_mesh_options=static_mesh_options)
     program.run()

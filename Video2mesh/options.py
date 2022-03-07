@@ -1,3 +1,5 @@
+import warnings
+
 import argparse
 import cv2
 import enum
@@ -81,20 +83,51 @@ class DepthFormat(enum.Enum):
     DEPTH_TO_PLANE = enum.auto()
 
 
+class DepthEstimationModel(enum.Enum):
+    ADABINS = enum.auto()
+    LERES = enum.auto()
+
+    @classmethod
+    def get_choices(cls):
+        return {
+            'adabins': cls.ADABINS,
+            'leres': cls.LERES
+        }
+
+    @classmethod
+    def from_string(cls, name):
+        choices = cls.get_choices()
+
+        if name.lower() in choices:
+            return choices[name.lower()]
+        else:
+            raise RuntimeError(f"No model called {name}, valid choices are: {list(choices.keys())}")
+
+
 class DepthOptions(Options, ReprMixin):
     """Options for depth maps."""
 
-    def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE):
+    supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES]
+
+    def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE,
+                 depth_estimation_model=DepthEstimationModel.ADABINS):
         """
         :param max_depth: The maximum depth value in the depth maps.
         :param dtype: The type of the depth values.
         :param depth_format: How depth values are measured in the depth maps.
+        :param depth_estimation_model: The model to use to estimate depth maps.
         """
         assert dtype is np.uint8 or dtype is np.uint16, 'Only 8-bit and 16-bit depth maps are supported.'
+
+        assert depth_estimation_model in DepthOptions.supported_depth_estimation_models, \
+            f"Depth estimation model must be one of the following: " \
+            f"{[model.name for model in self.supported_depth_estimation_models]}, but got {depth_estimation_model.name} " \
+            f"instead."
 
         self.max_depth = max_depth
         self.depth_dtype = dtype
         self.depth_format = depth_format
+        self.depth_estimation_model = depth_estimation_model
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -105,6 +138,10 @@ class DepthOptions(Options, ReprMixin):
                            choices=['depth_to_point', 'depth_to_plane'], default='depth_to_plane')
         group.add_argument('--depth_dtype', type=str, help='The type of the depth values.', default='uint16',
                            choices=['uint8', 'uint16'])
+        group.add_argument('--depth_estimation_model', type=str,
+                           help="The model to use for estimating depth maps.",
+                           choices=[model.name.lower() for model in DepthOptions.supported_depth_estimation_models],
+                           default=DepthEstimationModel.ADABINS.name.lower())
 
     @staticmethod
     def from_args(args) -> 'DepthOptions':
@@ -127,7 +164,8 @@ class DepthOptions(Options, ReprMixin):
             raise RuntimeError(f"Unsupported depth format {depth_format}, "
                                f"expected 'depth_to_point' or 'depth_to_plane'")
 
-        return DepthOptions(max_depth, dtype, depth_format)
+        return DepthOptions(max_depth, dtype, depth_format,
+                            DepthEstimationModel.from_string(args.depth_estimation_model))
 
 
 class COLMAPOptions(Options, ReprMixin):
@@ -161,7 +199,7 @@ class COLMAPOptions(Options, ReprMixin):
                            default='/usr/local/bin/colmap')
         group.add_argument('--vocab_path', type=str,
                            help='The path to the COLMAP vocabulary file. Defaults to the vocab file included in the '
-                                'Docker image.',  default='/root/.cache/colmap/vocab.bin')
+                                'Docker image.', default='/root/.cache/colmap/vocab.bin')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'COLMAPOptions':
@@ -268,3 +306,159 @@ class MeshFilteringOptions(Options, ReprMixin):
         return MeshFilteringOptions(max_pixel_distance=args.max_pixel_dist,
                                     max_depth_distance=args.max_depth_dist,
                                     min_num_components=args.min_num_components)
+
+
+class MeshReconstructionMethod(enum.Enum):
+    TSDF_FUSION = enum.auto()
+    BUNDLE_FUSION = enum.auto()
+
+    @classmethod
+    def get_choices(cls):
+        return {
+            'tsdf_fusion': cls.TSDF_FUSION,
+            'bundle_fusion': cls.BUNDLE_FUSION
+        }
+
+    @classmethod
+    def from_string(cls, name):
+        choices = cls.get_choices()
+
+        if name.lower() in choices:
+            return choices[name.lower()]
+        else:
+            raise RuntimeError(f"No method called {name}, valid choices are: {list(choices.keys())}")
+
+
+class StaticMeshOptions(Options):
+    supported_reconstruction_methods = [MeshReconstructionMethod.TSDF_FUSION,
+                                        MeshReconstructionMethod.BUNDLE_FUSION]
+
+    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
+                 depth_mask_dilation_iterations=32, sdf_volume_size=3.0, sdf_voxel_size=0.02):
+        """
+        :param reconstruction_method: The method to use for reconstructing the static mesh.
+        :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
+            depth maps.
+        :param sdf_volume_size: The size of the SDF volume in cubic meters. This option has no effect for the
+            reconstruction method `TSDF_FUSION` as it automatically infers the volume size from the input data.
+        :param sdf_voxel_size: The size of a voxel in the SDF volume in cubic meters.
+        """
+        assert reconstruction_method in StaticMeshOptions.supported_reconstruction_methods, \
+            f"Reconstruction method must be one of the following: " \
+            f"{[method.name for method in self.supported_reconstruction_methods]}, but got {reconstruction_method} " \
+            f"instead."
+        assert depth_mask_dilation_iterations >= 0 and isinstance(depth_mask_dilation_iterations, int), \
+            f"The depth mask dilation iterations must be a positive integer."
+        assert sdf_volume_size > 0.0, f"Volume size must be a positive number, instead got {sdf_volume_size}"
+        assert sdf_voxel_size > 0.0, f"Voxel size must be a positive number, instead got {sdf_voxel_size}"
+
+        self.reconstruction_method = reconstruction_method
+        self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
+        self.sdf_volume_size = sdf_volume_size
+        self.sdf_voxel_size = sdf_voxel_size
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('Static Mesh Options')
+        group.add_argument('--mesh_reconstruction_method', type=str,
+                           help="The method to use for reconstructing the static mesh.",
+                           choices=[method.name.lower() for method in
+                                    StaticMeshOptions.supported_reconstruction_methods],
+                           default='tsdf_fusion')
+        group.add_argument('--depth_mask_dilation_iterations', type=int,
+                           help="The number of times to dilate the dynamic object masks for masking the depth maps.",
+                           default=32)
+        group.add_argument('--sdf_volume_size', type=float,
+                           help="The size of the SDF volume in cubic meters. This option has no effect for the "
+                                "reconstruction method `TSDF_FUSION` as it automatically infers the volume "
+                                "size from the input data.", default=3.0)
+        group.add_argument('--sdf_voxel_size', type=float,
+                           help="The size of a voxel in the SDF volume in cubic meters.", default=0.02)
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'StaticMeshOptions':
+        return StaticMeshOptions(
+            reconstruction_method=MeshReconstructionMethod.from_string(args.mesh_reconstruction_method),
+            depth_mask_dilation_iterations=args.depth_mask_dilation_iterations,
+            sdf_volume_size=args.sdf_volume_size,
+            sdf_voxel_size=args.sdf_voxel_size
+        )
+
+
+class Video2MeshOptions(Options):
+
+    def __init__(self, create_masks=False,
+                 include_background=False, static_background=False,
+                 num_frames=-1,
+                 estimate_depth=False, estimate_camera_params=False,
+                 refine_colmap_poses=False,
+                 webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
+        """
+        :param create_masks: Whether to create masks for dynamic objects
+        :param include_background: Include the background in the reconstructed mesh.
+        :param static_background: Whether to use the first frame to generate a static background.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param estimate_depth: Flag to indicate that depth maps estimated by a neural network model should be used
+                                instead of the ground truth depth maps.
+        :param estimate_camera_params: Flag to indicate that camera intrinsic and extrinsic parameters estimated with
+                                       COLMAP should be used instead of the ground truth parameters (if they exist).
+        :param refine_colmap_poses: Whether to refine estimated pose data from COLMAP with pose data from BundleFusion.
+            Note that this argument is only valid if the flag '--estimate_camera_params' is used and BundleFusion is the
+            specified mesh reconstruction method.
+        :param webxr_path: Where to export the 3D video files to.
+        :param webxr_url: The URL to the WebXR 3D video player.
+        """
+        self.create_masks = create_masks
+        self.include_background = include_background
+        self.static_background = static_background
+        self.num_frames = num_frames
+        self.estimate_depth = estimate_depth
+        self.estimate_camera_params = estimate_camera_params
+        self.refine_colmap_poses = refine_colmap_poses
+        self.webxr_path = webxr_path
+        self.webxr_url = webxr_url
+
+        if self.include_background:
+            warnings.warn("The command line option `--include_background` is deprecated and will be removed in "
+                          "future versions. KinectFusion will reconstruct the 3D background instead.")
+
+        if self.static_background:
+            warnings.warn("The command line option `--static_background` is deprecated and will be removed in "
+                          "future versions. KinectFusion will reconstruct the 3D background instead.")
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('video2mesh')
+
+        group.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
+                           action='store_true')
+        group.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
+                           action='store_true')
+        group.add_argument('--static_background',
+                           help='Whether to use the first frame to generate a static background.',
+                           action='store_true')
+        group.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
+                                                          'Set to -1 (default) to process all frames.', default=-1)
+        group.add_argument('--estimate_depth', action='store_true',
+                           help='Flag to indicate that depth maps estimated by a neural network model should be used '
+                                'instead of the ground truth depth maps.')
+        group.add_argument('--estimate_camera_params', action='store_true',
+                           help='Flag to indicate that camera intrinsic and extrinsic parameters estimated with COLMAP '
+                                'should be used instead of the ground truth parameters (if they exist).')
+        group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
+                           default='thirdparty/webxr3dvideo/docs')
+        group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
+                           default='http://localhost:8080')
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'Video2MeshOptions':
+        return Video2MeshOptions(
+            create_masks=args.create_masks,
+            include_background=args.include_background,
+            static_background=args.static_background,
+            num_frames=args.num_frames,
+            estimate_depth=args.estimate_depth,
+            estimate_camera_params=args.estimate_camera_params,
+            webxr_path=args.webxr_path,
+            webxr_url=args.webxr_url
+        )

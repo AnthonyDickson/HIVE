@@ -6,8 +6,10 @@ trimesh==3.9.42
 Pillow==9.0
 psutil==5.9.0
 tqdm==4.62.3
-gdown==4.2.0
 # tsdf-fusion-python
 numba==0.55.0
 pycuda==2021.1
 scikit-image==0.19.1
+# trimesh icp
+rtree==0.9.7
+plyfile==0.7.4

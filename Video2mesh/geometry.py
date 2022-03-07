@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from Video2mesh.options import MaskDilationOptions
 from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
@@ -39,6 +40,17 @@ def get_pose_components(pose):
 
 
 def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+    """
+
+    :param depth: A depth map.
+    :param mask: A binary mask the same shape as the depth maps.
+        Truthy values indicate parts of the depth maps that should be kept.
+    :param K: The camera intrinsics matrix.
+    :param R: The (3, 3) rotation matrix.
+    :param t: The (3, 1) translation vector.
+    :param scale_factor:
+    :return:
+    """
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
     points2d = np.array([U, V]).T
@@ -47,6 +59,18 @@ def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scal
 
     return points
 
+def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+
+    valid_pixels = mask & (depth > 0.0)
+    V, U = valid_pixels.nonzero()
+    points2d = np.array([U, V]).T
+
+    points = image2world(points2d, depth[valid_pixels], K, R, t, scale_factor)
+    colour = np.zeros(shape=(len(points), 4), dtype=rgb.dtype)
+    colour[:, :3] = rgb[valid_pixels]
+    colour[:, 3] = 255
+
+    return colour, points
 
 def world2image(points, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0, dtype=np.int32):
     """
@@ -100,3 +124,21 @@ def image2world(points, depth, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=
     pixel_world = R.T @ (depth * pixel_i - t)
 
     return pixel_world.T
+
+
+def dilate_mask(mask, dilation_options: MaskDilationOptions):
+    """
+    Dilate an instance segmentation mask so that it covers a larger area.
+
+    :param mask: The mask to enlarge/dilate.
+    :param dilation_options: The object containing the dilation mask/filter and other settings.
+
+    :return: The dilated mask.
+    """
+    validate_shape(mask, 'mask', expected_shape=(None, None))
+
+    mask = mask.astype(np.float32)
+    mask = cv2.dilate(mask.astype(float), dilation_options.filter, iterations=dilation_options.num_iterations)
+    mask = mask.astype(bool)
+
+    return mask

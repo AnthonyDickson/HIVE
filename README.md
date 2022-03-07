@@ -12,7 +12,7 @@ If forget to or cannot clone with `--recurse-submodules` then clone the git depe
 git submodule update --init --recursive
 ```
 ## Setting Up Python
-Start by choosing on of the following methods for setting up the Python environment:
+Start by choosing on of the following methods for setting up the Python environment (Docker is the recommended approach):
 1. Conda
 
     You can install all the required Python dependencies with [Conda](https://docs.conda.io/en/latest/miniconda.html):
@@ -35,24 +35,36 @@ Start by choosing on of the following methods for setting up the Python environm
     pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cuda113/torch1.10/index.html
     ```
 
-4.  Docker - CUDA (11.3)
+4. Docker - CUDA (11.3)
 
    Either:
-     1. Pull (download) a pre-built image (~11.3 GB): 
-        ```shell
-        docker pull eight0153/video2mesh:cu113
-        ```
-     2. Build the Docker Image:
+5. Pull (download) a pre-built image (~11.3 GB): 
+   ```shell
+   docker pull eight0153/video2mesh:cu116
+   ```
+6. Build the Docker Image:
     
-        ```shell
-        docker build -t eight0153/video2mesh:cu113 .
-        ```
+   ```shell
+   docker build -t eight0153/video2mesh:cu116 .
+   ```
         
-        **Note:** For M1 Macs you should specify amd64 as the platform:
-        ```shell
-        docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cu113 .
-        ```
-        It is important to do this as not all the required packages have arm64 pre-built binaries available.
+   **Note:** For M1 Macs you should specify amd64 as the platform:
+   ```shell
+   docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cu116 .
+   ```
+   It is important to do this as not all the required packages have arm64 pre-built binaries available.
+
+**Note**: If you either set up the environment or build the Docker image locally, you will need to 
+download the weights for the depth estimation models from [Google Drive](https://drive.google.com/file/d/1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF/view?usp=sharing) and [CloudStor](https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31), and place them in the folder `weights/`. 
+
+## Setting Up C++ Environment
+If you use the Docker image, you do not need to do anything for this step.
+Otherwise, ensure that you have installed the following:
+- CUDA Toolkit 11.6
+- OpenCV 3.4.16 
+  - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
+  
+Refer to `Dockerfile` for detailed setup instructions on Ubuntu 20.04.  
 
 ## Running the Program
 ### Sample Dataset
@@ -80,11 +92,11 @@ The Docker containers will, by default, bring up the python interpreter.
 All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
-docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu113 
+docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu116 
 ```
 For example, if you wanted to run the CUDA enabled container: 
 ```shell
-docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu113 -c "import torch; print(torch.cuda.is_available())"
+docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu116 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ### Viewing the 3D Video
@@ -96,7 +108,7 @@ This program accepts datasets in three formats:
 - RGB-D datasets created on an iOS device using [StrayScanner](https://apps.apple.com/nz/app/stray-scanner/id1557051662)
 - The VTM format (see below.)
 
-The above datasets are automatically converted to the VTM format if they are not already in that foramt.
+The above datasets are automatically converted to the VTM format if they are not already in that format.
 
 Overall, the expected folder structure is as follows:
 
@@ -161,11 +173,7 @@ Within each dataset folder, there should be the following 5 items:
    │   ...
    └───999999.jpg
    ```
-   The depth maps are expected to be stored in a 16-bit unsigned image.
-   Each depth map should have their original values divided by the maximum observed depth value from the *entire* video sequence:
-   ```depth_map_i = depth_map_i / max_depth```. Depth values should be increasing from the camera (i.e. depth = 0 at the camera),
-   and go up to a maximum value that is defined as a command line argument. For example, if the maximum depth is 10, `--max_depth 10.0`.
-   The units roughly correspond to meters.
+   The depth maps are expected to be stored in a 16-bit grayscale image. The depth values should be in millimeters and increasing from the camera (i.e. depth = 0 at the camera).
 
 ## Output Format
 The generated meshes are saved to a glTF formatted file.
