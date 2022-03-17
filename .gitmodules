@@ -13,3 +13,6 @@
 [submodule "thirdparty/adelai_depth"]
 	path = thirdparty/adelai_depth
 	url = https://github.com/eight0153/AdelaiDepth.git
+[submodule "thirdparty/consistent_depth"]
+	path = thirdparty/consistent_depth
+	url = https://github.com/eight0153/consistent_video_depth.git

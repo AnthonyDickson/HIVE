@@ -28,8 +28,7 @@ RUN cd / && \
     make -j 8 && \
     make install
 
-## Install COLMAP from source
-# Download and install OpenCV
+## Download and install OpenCV
 ENV OPENCV_VERSION=3.4.16
 
 RUN cd / && \
@@ -46,6 +45,19 @@ RUN cd / && \
     rm -rf opencv-${OPENCV_VERSION} && \
     rm -rf opencv-build
 
+## Install COLMAP from source
+RUN cd / && \
+    wget -O colmap.zip https://github.com/colmap/colmap/archive/refs/tags/3.7.zip && \
+    unzip colmap.zip && \
+    cd colmap-3.7 && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j 8 && \
+    make install && \
+    cd / && \
+    rm -rf colmap-3.7 && \
+    rm colmap.zip
 
 ARG BUNDLE_FUSION_FOLDER=bundle_fusion
 ENV BUNDLE_FUSION_PATH=/${BUNDLE_FUSION_FOLDER}

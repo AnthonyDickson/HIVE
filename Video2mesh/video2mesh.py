@@ -204,6 +204,8 @@ class Video2Mesh:
             ).convert()
         elif VTMDataset.is_valid_folder_structure(dataset_path):
             dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
+        elif not os.path.isdir(dataset_path):
+            raise RuntimeError(f"Could open the path {dataset_path}.")
         else:
             raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
 
