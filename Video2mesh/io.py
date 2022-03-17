@@ -1,35 +1,35 @@
-from collections import OrderedDict
-
-import cv2
 import datetime
-import imageio
 import json
-import numpy as np
 import os
-import psutil
 import re
 import shutil
 import struct
 import subprocess
-import torch
 import warnings
-from PIL import Image
 from argparse import Namespace
+from collections import OrderedDict
+from multiprocessing.pool import ThreadPool
+from pathlib import Path
+from typing import Union, Tuple, Optional, Callable, IO
+
+import cv2
+import imageio
+import numpy as np
+import psutil
+import torch
+from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
 from matplotlib import pyplot as plt
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from typing import Union, Tuple, Optional, Callable, IO
 
 from Video2mesh.geometry import pose_vec2mat, dilate_mask
 from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
-from Video2mesh.utils import Timer, log
+from Video2mesh.utils import log
 from thirdparty.AdaBins.infer import InferenceHelper
 from thirdparty.colmap.scripts.python.read_write_model import read_model
 
@@ -118,29 +118,6 @@ def save_raw_float32_image(file_name, image):
                 order="F",
         ):
             f.write(chunk.tobytes("C"))
-
-
-def load_camera_parameters(storage_options, timer=Timer()):
-    """
-    Load
-    :param storage_options:
-    :param timer:
-    :return:
-    """
-    # TODO: Complete docstring for this method.
-    camera_params = np.loadtxt(os.path.join(storage_options.base_path, "camera.txt"))
-    camera_trajectory = np.loadtxt(os.path.join(storage_options.base_path, "trajectory.txt"))
-
-    if camera_params.shape != (3, 3):
-        raise RuntimeError(f"Expected camera parameters (intrinsic) to be a (3, 3) matrix,"
-                           f" but got {camera_params.shape} instead.")
-
-    if camera_trajectory.shape[1] != 6:
-        raise RuntimeError(f"Expected camera trajectory to be a (N, 6) matrix,"
-                           f" but got {camera_trajectory.shape} instead.")
-
-    timer.split("load camera parameters")
-    return camera_params, camera_trajectory
 
 
 class BatchPredictor(DefaultPredictor):
@@ -285,8 +262,6 @@ class COLMAPProcessor:
 
         if colmap_process.returncode != 0:
             raise RuntimeError(f"COLMAP exited with code {colmap_process.returncode}")
-
-        # TODO: Save pose data to disk.
 
     def get_command(self, return_as_string=False):
         """
@@ -822,8 +797,7 @@ class VTMDataset(DatasetBase):
 
         self.metadata = DatasetMetadata.load(self.path_to_metadata)
 
-        self.camera_matrix = np.loadtxt(self.path_to_camera_matrix)
-        self.camera_trajectory = np.loadtxt(self.path_to_camera_trajectory)
+        self.camera_matrix, self.camera_trajectory = self._load_camera_parameters()
 
         self.rgb_dataset = ImageFolderDataset(self.path_to_rgb_frames)
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
@@ -842,6 +816,14 @@ class VTMDataset(DatasetBase):
     @property
     def path_to_camera_trajectory(self):
         return os.path.join(self.base_path, self.camera_trajectory_filename)
+
+    @property
+    def path_to_estimated_camera_matrix(self):
+        return os.path.join(self.base_path, self.estimated_camera_matrix_filename)
+
+    @property
+    def path_to_estimated_camera_trajectory(self):
+        return os.path.join(self.base_path, self.estimated_camera_trajectory_filename)
 
     @property
     def path_to_rgb_frames(self):
@@ -1143,8 +1125,7 @@ class VTMDataset(DatasetBase):
             imageio.imwrite(os.path.join(image_dir_out, f"{i:06d}.png"), pred_depth_mm)
 
     def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
-        self.camera_matrix = np.loadtxt(self.path_to_camera_matrix)
-        self.camera_trajectory = np.loadtxt(self.path_to_camera_trajectory)
+        self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=True)
         self._using_estimated_camera_parameters = False
 
         return self
@@ -1160,11 +1141,51 @@ class VTMDataset(DatasetBase):
         if not processor.probably_has_results:
             processor.run()
 
-        self.camera_matrix, self.camera_trajectory = processor.load_camera_params()
-        self.camera_trajectory = self._adjust_colmap_poses(colmap_options)
+            camera_matrix, _ = processor.load_camera_params()
+            camera_trajectory = self._adjust_colmap_poses(colmap_options)
+
+            np.savetxt(self.path_to_estimated_camera_matrix, camera_matrix)
+            np.savetxt(self.path_to_estimated_camera_trajectory, camera_trajectory)
+
+        self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=False)
         self._using_estimated_camera_parameters = True
 
         return self
+
+    def _load_camera_parameters(self, load_ground_truth_data=True) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Load the ground truth camera matrix and trajectory from disk.
+
+        The camera matrix is expected to be saved as a 3x3 matrix in a file called "camera.txt".
+        The camera trajectory is expected to be saved as a Nx7 matrix in a file called "trajectory.txt", where N is the
+        number of frames in the sequence and each row is a quaternion rotation 'r' and translation vector 't'.
+
+        :param load_ground_truth_data: Whether to use the ground truth camera parameters or to use
+            estimated camera parameters (e.g. from COLMAP).
+        """
+        if load_ground_truth_data:
+            camera_matrix = np.loadtxt(self.path_to_camera_matrix)
+            camera_trajectory = np.loadtxt(self.path_to_camera_trajectory)
+        else:
+            if not os.path.isfile(self.path_to_estimated_camera_matrix) or \
+                    not os.path.isfile(self.path_to_estimated_camera_trajectory):
+                raise RuntimeError(f"Could not find either/both "
+                                   f"the camera matrix file at {self.estimated_camera_matrix_filename} and "
+                                   f"the camera trajectory file at {self.path_to_estimated_camera_trajectory}. "
+                                   f"Make sure you have run `VTMDataset(...).use_estimated_camera_params().")
+
+            camera_matrix = np.loadtxt(self.path_to_estimated_camera_matrix)
+            camera_trajectory = np.loadtxt(self.path_to_estimated_camera_trajectory)
+
+        if camera_matrix.shape != (3, 3):
+            raise RuntimeError(f"Expected camera matrix to be a 3x3 matrix,"
+                               f" but got {camera_matrix.shape} instead.")
+
+        if len(camera_trajectory.shape) != 2 or camera_trajectory.shape[1] != 7:
+            raise RuntimeError(f"Expected camera trajectory to be a Nx7 matrix,"
+                               f" but got {camera_trajectory.shape} instead.")
+
+        return camera_matrix, camera_trajectory
 
     def _get_colmap_processor(self, colmap_options: COLMAPOptions) -> COLMAPProcessor:
         processor = COLMAPProcessor(image_path=self.path_to_rgb_frames, workspace_path=self.path_to_colmap,
@@ -1179,8 +1200,8 @@ class VTMDataset(DatasetBase):
 
         t_cmp = colmap_trajectory[:, 4:].copy()
         t_cmp = t_cmp - t_cmp[0]
-        # TODO: Estimate appropriate scale and shift per dataset.
-        t_cmp /= 16
+        # #TODO: Estimate appropriate scale and shift per dataset.
+        # t_cmp /= 16
 
         t_cmp[:, 1], t_cmp[:, 2] = -t_cmp[:, 2].copy(), t_cmp[:, 1].copy()
 
@@ -1446,7 +1467,6 @@ class TUMAdaptor(DatasetAdaptor):
         return image_filenames_subset, depth_map_subset, trajectory_subset
 
     def convert(self) -> VTMDataset:
-        # TODO: Convert log to Timer.split
         log("Getting synced frame data...")
         image_filenames, depth_filenames, camera_trajectory = self._get_synced_frame_data()
 
