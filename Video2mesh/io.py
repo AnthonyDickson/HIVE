@@ -1065,8 +1065,7 @@ class VTMDataset(DatasetBase):
             log("Estimating depth maps...")
 
             if depth_estimation_model == DepthEstimationModel.ADABINS:
-                # TODO: Get the weights path from a config file pointing to the location in the Docker image.
-                adabins_inference = InferenceHelper(weights_path='/root/.cache/pretrained')
+                adabins_inference = InferenceHelper(weights_path=os.path.abspath(os.environ['WEIGHTS_PATH']))
                 adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
             elif depth_estimation_model == DepthEstimationModel.LERES:
                 self._estimate_depth_leres(estimated_depth_path)
