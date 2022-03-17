@@ -705,20 +705,48 @@ class DatasetBase:
 class DatasetMetadata:
     """Information about a dataset."""
 
-    def __init__(self, num_frames: int, fps: float, depth_scale: float, width: int, height: int,
-                 depth_mask_dilation_iterations: Optional[int] = None,
-                 depth_estimation_model: Optional[str] = None):
+    def __init__(self, num_frames: int, fps: float, width: int, height: int, depth_scale: float, max_depth=10.0,
+                 depth_mask_dilation_iterations: Optional[int] = None, depth_estimation_model: Optional[str] = None):
+        """
+        :param num_frames: The number of frames in the video sequence.
+        :param fps: The framerate at which the video was captured.
+        :param width: The width of a frame (pixels).
+        :param height: The height of a frame (pixels).
+        :param depth_scale: A scalar that when multiplied with depth map, will transform the depth values to meters.
+        :param max_depth: The maximum depth allowed in a depth map. Values exceeding this threshold will be set to zero.
+        :param depth_mask_dilation_iterations: The number of times to apply the dilation filter to the dynamic object
+            masks when creating the masked depth maps.
+        :param depth_estimation_model: The name of the depth estimation model used to create the estimated depth maps.
+        """
         self.num_frames = num_frames
         self.fps = fps
-        self.depth_scale = depth_scale
         self.width = width
         self.height = height
+        self.depth_scale = depth_scale
+        self.max_depth = max_depth
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.depth_estimation_model = depth_estimation_model
 
-        assert depth_estimation_model is None or depth_estimation_model in DepthEstimationModel.get_choices(), \
-            f"Invalid depth estimation model. Got {depth_estimation_model} but expected one of the following: " \
-            f"{list(DepthEstimationModel.get_choices().keys())}"
+        if not isinstance(num_frames, int) or num_frames < 1:
+            raise ValueError(f"Num frames must be a positive integer, got {num_frames}.")
+
+        if not isinstance(width, int) or width < 1:
+            raise ValueError(f"Width must be a positive integer, got {width}.")
+
+        if not isinstance(height, int) or height < 1:
+            raise ValueError(f"Height must be a positive integer, got {height}.")
+
+        if not isinstance(depth_scale, (float, int)) or not np.isfinite(depth_scale) or depth_scale <= 0.0:
+            raise ValueError(f"Depth scale must be a positive, finite number, but got {depth_scale}.")
+
+        if not isinstance(depth_mask_dilation_iterations, int) or depth_mask_dilation_iterations < 0:
+            raise ValueError(f"Depth mask dilation iterations must be a non-negative integer, "
+                             f"but got {depth_mask_dilation_iterations}.")
+
+        if depth_estimation_model is not None and depth_estimation_model not in DepthEstimationModel.get_choices():
+            raise ValueError(f"Invalid depth estimation model. "
+                             f"Got {depth_estimation_model} but expected one of the following: "
+                             f"{list(DepthEstimationModel.get_choices().keys())}")
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
@@ -909,8 +937,7 @@ class VTMDataset(DatasetBase):
     def _get_depth_map_transform(self):
         def transform(depth_map):
             depth_map = self.depth_scaling_factor * depth_map.astype(np.float32)
-            # TODO: Make max depth configurable.
-            depth_map[depth_map > 10] = 0.0
+            depth_map[depth_map > self.metadata.max_depth] = 0.0
 
             return depth_map
 
@@ -1499,8 +1526,8 @@ class TUMAdaptor(DatasetAdaptor):
 
         log(f"Creating metadata for dataset.")
         # Depth scale here is it to 1 / 1000 because the depth maps will be converted to millimetres later on.
-        metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, depth_scale=1. / 1000.,
-                                   width=self.width, height=self.height)
+        metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, width=self.width, height=self.height,
+                                   depth_scale=1. / 1000.)
         metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
@@ -1768,8 +1795,8 @@ class StrayScannerAdaptor(DatasetAdaptor):
         # Need to swap height and width.
         width, height = height, width
 
-        metadata = DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, depth_scale=1. / 1000.,
-                                   width=width, height=height)
+        metadata = DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width,
+                                   height=height, depth_scale=1. / 1000.)
         metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
@@ -1996,13 +2023,8 @@ class UnrealAdaptor(DatasetAdaptor):
 
         log(f"Creating metadata for dataset.")
 
-        metadata = DatasetMetadata(
-            num_frames=dataset_metadata.num_frames,
-            fps=dataset_metadata.fps,
-            depth_scale=1. / 1000.,
-            width=dataset_metadata.width,
-            height=dataset_metadata.height
-        )
+        metadata = DatasetMetadata(num_frames=dataset_metadata.num_frames, fps=dataset_metadata.fps,
+                                   width=dataset_metadata.width, height=dataset_metadata.height, depth_scale=1. / 1000.)
         metadata.save(join(self.output_path, VTMDataset.metadata_filename))
 
         log(f"Creating camera matrix file.")

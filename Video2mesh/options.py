@@ -124,6 +124,14 @@ class DepthOptions(Options, ReprMixin):
             f"{[model.name for model in self.supported_depth_estimation_models]}, but got {depth_estimation_model.name} " \
             f"instead."
 
+        if not isinstance(max_depth, (int, float)) or not np.isfinite(max_depth) or max_depth <= 0.0:
+            raise ValueError(f"Max depth must a finite, positive number, but got {max_depth}.")
+
+        if max_depth != 10.0:
+            warnings.warn("The --max_depth option has no effect in this version.")
+            # TODO: Figure out a clean way to apply max depth and to ensure that results that used a different
+            #  max depth are overwritten.
+
         self.max_depth = max_depth
         self.depth_dtype = dtype
         self.depth_format = depth_format
