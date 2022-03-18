@@ -1063,7 +1063,8 @@ class VTMDataset(DatasetBase):
                               f"{depth_estimation_model.name.lower()}. The old depth maps will be replaced.")
 
             log("Estimating depth maps...")
-
+            # TODO: Use optional argument in DepthOptions to specify the weights path which falls back to the
+            #  environment variable if not specified.
             if depth_estimation_model == DepthEstimationModel.ADABINS:
                 adabins_inference = InferenceHelper(weights_path=os.path.abspath(os.environ['WEIGHTS_PATH']))
                 adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
@@ -1502,12 +1503,18 @@ class TUMAdaptor(DatasetAdaptor):
 
             num_frames = len(os.listdir(dataset.path_to_rgb_frames))
             num_depth_maps = len(os.listdir(dataset.path_to_depth_maps))
-            # TODO: Check if length of camera trajectories match up.
 
             if (not num_frames == len(image_filenames)) or (not num_depth_maps == len(depth_filenames)):
                 raise RuntimeError(f"Expected {len(image_filenames):03,d} frames, "
                                    f"found {num_frames:03,d} RGB frames and "
                                    f"{num_depth_maps:03,d} depth maps in {dataset.base_path}.")
+
+            expected_camera_trajectory_length = len(camera_trajectory)
+            camera_trajectory_length = len(dataset.camera_trajectory)
+
+            if camera_trajectory_length != expected_camera_trajectory_length:
+                raise RuntimeError(f"Expected a camera trajectory of length {expected_camera_trajectory_length}, "
+                                   f"but got {camera_trajectory_length}.")
 
             return dataset
 
@@ -1682,17 +1689,20 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
             expected_num_frames = video_metadata.num_frames
             expected_num_depth_maps = len(os.listdir(os.path.join(self.base_path, self.depth_folder)))
-            # expected_camera_trajectory_length = len(self._load_camera_trajectory())
+            expected_camera_trajectory_length = len(self._load_camera_trajectory())
 
             num_frames = len(os.listdir(dataset.path_to_rgb_frames))
             num_depth_maps = len(os.listdir(dataset.path_to_depth_maps))
-            # TODO: Check if length of camera trajectories match up.
-            # camera_trajectory_length = len(data.camera_trajectory)
+            camera_trajectory_length = len(dataset.camera_trajectory)
 
             if (not num_frames == expected_num_frames) or (not num_depth_maps == expected_num_depth_maps):
                 raise RuntimeError(f"Expected {expected_num_frames:03,d} frames, "
                                    f"found {num_frames:03,d} RGB frames and "
                                    f"{num_depth_maps:03,d} depth maps in {dataset.base_path}.")
+
+            if camera_trajectory_length != expected_camera_trajectory_length:
+                raise RuntimeError(f"Expected a camera trajectory of length {expected_camera_trajectory_length}, "
+                                   f"but got {camera_trajectory_length}.")
 
             return dataset
 
@@ -1742,12 +1752,12 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
             target_resolution = new_size
         elif isinstance(target_resolution, tuple):
-            # TODO: Change from assertions to raising exceptions.
-            assert len(target_resolution) == 2, \
-                f"The target resolution must be a 2-tuple, but got a {len(target_resolution)}-tuple."
-            assert isinstance(target_resolution[0], int) and isinstance(target_resolution[1], int), \
-                f"Expected target resolution to be a 2-tuple of integers, but got a tuple of" \
-                f" ({type(target_resolution[0])}, {type(target_resolution[1])})."
+            if len(target_resolution) != 2:
+                raise ValueError(f"The target resolution must be a 2-tuple, but got a {len(target_resolution)}-tuple.")
+
+            if not isinstance(target_resolution[0], int) or not isinstance(target_resolution[1], int):
+                raise ValueError(f"Expected target resolution to be a 2-tuple of integers, but got a tuple of"
+                                 f" ({type(target_resolution[0])}, {type(target_resolution[1])}).")
         elif target_resolution is None:
             target_resolution = source_hw
 
