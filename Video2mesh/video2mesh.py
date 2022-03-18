@@ -1,3 +1,4 @@
+import datetime
 import subprocess
 
 import argparse
@@ -90,7 +91,8 @@ class Video2Mesh:
         storage_options.base_path = dataset.base_path
         timer.split("configure dataset")
 
-        background_output_folder = f"{storage_options.output_folder}_bg"
+        foreground_output_folder = storage_options.output_folder
+        background_output_folder = f"{foreground_output_folder}_bg"
 
         centering_transform = self._get_centering_transform(dataset)
 
@@ -105,47 +107,121 @@ class Video2Mesh:
             foreground_scene.apply_transform(centering_transform)
             background_scene.apply_transform(centering_transform)
 
-            self.write_results(dataset.base_path, storage_options.output_folder, foreground_scene,
+            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
                                timer, storage_options.overwrite_ok)
             self.write_results(dataset.base_path, background_output_folder, background_scene, timer,
                                storage_options.overwrite_ok)
         else:
+            fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
+
+            background_scene = trimesh.scene.Scene(
+                camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
+            )
+
             if not self.include_background:
-                fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
-
-                bg_scene = trimesh.scene.Scene(
-                    camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
-                )
-
                 static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
                                                       options=self.static_mesh_options)
+                background_scene.add_geometry(static_mesh)
 
-                if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
-                    static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
+                self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene, timer,
+                                   storage_options.overwrite_ok)
 
-                    if self.estimate_camera_params and self.options.refine_colmap_poses:
-                        dataset.camera_trajectory = self._refine_colmap_poses()
+                # TODO: Change this so that the scene is transformed instead of the static mesh.
+                # if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+                #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
+                #
+                #     if self.estimate_camera_params and self.options.refine_colmap_poses:
+                #         dataset.camera_trajectory = self._refine_colmap_poses()
 
                 # TODO: Compress background mesh? PLY + Draco?
                 timer.split("create static mesh")
 
-                bg_scene.add_geometry(static_mesh)
-
-                self.write_results(dataset.base_path, background_output_folder, bg_scene, timer,
+                self.write_results(dataset.base_path, background_output_folder, background_scene, timer,
                                    storage_options.overwrite_ok)
 
-            scene = self.create_scene(dataset, timer,
-                                      include_background=self.include_background,
-                                      background_only=False)
+            foreground_scene = self.create_scene(dataset, timer,
+                                                 include_background=self.include_background,
+                                                 background_only=False)
 
-            scene.apply_transform(centering_transform)
+            self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene, timer,
+                               storage_options.overwrite_ok)
 
-            self.write_results(dataset.base_path, storage_options.output_folder, scene, timer,
+            foreground_scene.apply_transform(centering_transform)
+
+            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene, timer,
                                storage_options.overwrite_ok)
 
         self._export_video_webxr(dataset, background_output_folder)
-        # TODO: Summarise results - how many frames? mesh size (on disk, vertices/faces per frame and total)
         timer.stop()
+
+        self._print_summary(foreground_scene, background_scene, foreground_output_folder, background_output_folder,
+                            timer)
+
+    def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
+                       timer):
+        def get_folder_size(folder):
+            total_size = os.path.getsize(folder)
+
+            for item in os.listdir(folder):
+                item_path = os.path.join(folder, item)
+
+                if os.path.isfile(item_path):
+                    total_size += os.path.getsize(item_path)
+                elif os.path.isdir(item_path):
+                    total_size += get_folder_size(item_path)
+
+            return total_size
+
+        def format_bytes(num):
+            for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
+                if abs(num) < 1024.0:
+                    return f"{num:3.1f} {unit}B"
+
+                num /= 1024.0
+
+            return f"{num:3.1f} PiB"
+
+        def count_tris(scene: trimesh.Scene):
+            total = 0
+
+            for node_name in scene.graph.nodes_geometry:
+                # which geometry does this node refer to
+                _, geometry_name = scene.graph[node_name]
+
+                # get the actual potential mesh instance
+                geometry = scene.geometry[geometry_name]
+
+                if hasattr(geometry, 'triangles'):
+                    total += len(geometry.triangles)
+
+            return total
+
+        fg_file_size = get_folder_size(foreground_output_folder)
+        bg_file_size = get_folder_size(background_output_folder)
+        fg_file_size_per_frame = fg_file_size / self.num_frames
+        bg_file_size_per_frame = bg_file_size / self.num_frames
+        file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
+
+        fg_num_tris = count_tris(foreground_scene)
+        bg_num_tris = count_tris(background_scene)
+        fg_num_tris_per_frame = fg_num_tris / self.num_frames
+        bg_num_tris_per_frame = bg_num_tris / self.num_frames
+        num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
+
+        elapsed_time_seconds = timer.stop_time - timer.start_time
+        elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
+        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
+
+        log('#' + '=' * 78 + '#')
+        log('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
+        log('#' + '=' * 78 + '#')
+        log(f"Processed {self.num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
+        log(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        log(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
+        log(f"        Background mesh: {bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        log(f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame")
+        log(f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
+        log(f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
     def _get_centering_transform(self, dataset):
         camera_trajectory = dataset.camera_trajectory
@@ -806,6 +882,7 @@ class Video2Mesh:
         aligned_mesh = aligned_mesh.apply_transform(transform)
 
         return aligned_mesh
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
