@@ -891,16 +891,20 @@ class VTMDataset(DatasetBase):
         return pjoin(self.base_path, self.colmap_folder)
 
     @property
-    def num_frames(self):
+    def num_frames(self) -> int:
         return self.metadata.num_frames
 
     @property
-    def frame_width(self):
+    def frame_width(self) -> int:
         return self.metadata.width
 
     @property
-    def frame_height(self):
+    def frame_height(self) -> int:
         return self.metadata.height
+
+    @property
+    def fps(self) -> float:
+        return self.metadata.fps
 
     @property
     def mask_dataset(self):

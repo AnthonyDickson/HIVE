@@ -1,19 +1,21 @@
-import datetime
-import subprocess
-
 import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import warnings
+from multiprocessing.pool import ThreadPool
+from os.path import join as pjoin
+from pathlib import Path
+
 import numpy as np
 import openmesh as om
-import os
 import psutil
-import shutil
 import time
 import tqdm
 import trimesh
-import warnings
 from PIL import Image
-from multiprocessing.pool import ThreadPool
-from pathlib import Path
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from trimesh.exchange.export import export_mesh
@@ -21,14 +23,11 @@ from trimesh.exchange.ply import load_ply
 
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask, \
     point_cloud_from_rgbd
-from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig, \
-    COLMAPProcessor
+from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
-from Video2mesh.utils import Timer, validate_camera_parameter_shapes, validate_shape, log
+from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log
 from thirdparty.tsdf_fusion_python import fusion
-
-pjoin = os.path.join
 
 
 class Video2Mesh:
@@ -96,17 +95,11 @@ class Video2Mesh:
 
         centering_transform = self._get_centering_transform(dataset)
 
-        if self.include_background and self.static_background:
-            background_scene = self.create_scene(dataset, include_background=True, background_only=True)
-            foreground_scene = self.create_scene(dataset, include_background=False, background_only=False)
+        log("Creating background mesh(es)...")
 
-            foreground_scene.apply_transform(centering_transform)
-            background_scene.apply_transform(centering_transform)
-
-            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
-                               storage_options.overwrite_ok)
-            self.write_results(dataset.base_path, background_output_folder, background_scene,
-                               storage_options.overwrite_ok)
+        if self.include_background:
+            background_scene = self.create_scene(dataset, include_background=True, background_only=True,
+                                                 static_background=self.static_background)
         else:
             fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
 
@@ -114,37 +107,36 @@ class Video2Mesh:
                 camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
             )
 
-            if not self.include_background:
-                static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
-                                                      options=self.static_mesh_options)
-                background_scene.add_geometry(static_mesh)
+            static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
+                                                  options=self.static_mesh_options)
+            background_scene.add_geometry(static_mesh)
 
-                self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene,
-                                   storage_options.overwrite_ok)
+        self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene,
+                           storage_options.overwrite_ok)
 
-                # TODO: Change this so that the scene is transformed instead of the static mesh.
-                # if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
-                #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
-                #
-                #     if self.estimate_camera_params and self.options.refine_colmap_poses:
-                #         dataset.camera_trajectory = self._refine_colmap_poses()
+        log("Creating foreground mesh(es)...")
+        foreground_scene = self.create_scene(dataset)
 
-                # TODO: Compress background mesh? PLY + Draco?
-                log("Created static mesh")
+        self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene,
+                           storage_options.overwrite_ok)
 
-                self.write_results(dataset.base_path, background_output_folder, background_scene,
-                                   storage_options.overwrite_ok)
+        log("Aligning foreground and background scenes...")
+        foreground_scene.apply_transform(centering_transform)
 
-            foreground_scene = self.create_scene(dataset, include_background=self.include_background,
-                                                 background_only=False)
+        # TODO: Change this so that the scene is transformed instead of the static mesh.
+        # if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+        #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
+        #
+        #     if self.estimate_camera_params and self.options.refine_colmap_poses:
+        #         dataset.camera_trajectory = self._refine_colmap_poses()
 
-            self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene,
-                               storage_options.overwrite_ok)
+        # TODO: Compress background mesh? PLY + Draco?
+        background_scene.apply_transform(centering_transform)
 
-            foreground_scene.apply_transform(centering_transform)
-
-            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
-                               storage_options.overwrite_ok)
+        self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
+                           storage_options.overwrite_ok)
+        self.write_results(dataset.base_path, background_output_folder, background_scene,
+                           storage_options.overwrite_ok)
 
         elapsed_time_seconds = time.time() - start_time
 
@@ -153,7 +145,12 @@ class Video2Mesh:
                             pjoin(dataset.base_path, background_output_folder),
                             elapsed_time_seconds)
 
-        self._export_video_webxr(dataset, background_output_folder)
+        webxr_metadata = dict(
+            fps=dataset.fps,
+            use_vertex_colour_for_bg=not self.include_background
+        )
+
+        self._export_video_webxr(dataset, background_output_folder, webxr_metadata)
 
     def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
                        elapsed_time_seconds):
@@ -232,12 +229,17 @@ class Video2Mesh:
 
         return centering_transform
 
-    def _export_video_webxr(self, dataset, background_output_folder):
+    def _export_video_webxr(self, dataset, background_output_folder, metadata: dict):
         storage_options = self.storage_options
 
         dataset_name = Path(dataset.base_path).name
         webxr_output_path = pjoin(self.options.webxr_path, dataset_name)
         os.makedirs(webxr_output_path, exist_ok=storage_options.overwrite_ok)
+
+        metadata_path = pjoin(dataset.base_path, 'webxr_metadata.json')
+
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
 
         def copy_video_files(video_folder):
             scene3d_path = pjoin(dataset.base_path, video_folder)
@@ -248,6 +250,7 @@ class Video2Mesh:
 
         copy_video_files(storage_options.output_folder)
         copy_video_files(background_output_folder)
+        shutil.copy(metadata_path, pjoin(webxr_output_path, 'metadata.json'))
 
         log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={dataset_name}")
 
@@ -319,17 +322,19 @@ class Video2Mesh:
 
         return refined_trajectory
 
-    def create_scene(self, dataset: VTMDataset, include_background=False, background_only=False) -> trimesh.Scene:
+    def create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
+                     static_background=False) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
         :param dataset: The set of RGB frames and depth maps to use as input.
         :param include_background: Whether to include the background mesh for each frame.
         :param background_only: Whether to exclude dynamic foreground objects.
+        :param static_background: Whether to only use the first frame for the background.
 
         :return: The Trimesh scene object.
         """
-        if background_only:
+        if static_background:
             num_frames = 1
         elif self.num_frames == -1:
             num_frames = dataset.num_frames
@@ -385,7 +390,8 @@ class Video2Mesh:
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
 
                 if len(vertices) < 9:
-                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1}due to insufficient number of vertices ({len(vertices)}).")
+                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1} "
+                                  f"due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
                 points2d, depth_proj = world2image(vertices, camera_matrix, R, t)
@@ -484,7 +490,7 @@ class Video2Mesh:
             bundling_config.save(bundling_config_output_path)
 
             cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
-                       dataset_path, dataset.masked_depth_folder]
+                   dataset_path, dataset.masked_depth_folder]
             output_folder = pjoin(dataset.base_path, 'bundle_fusion')
             log_path = pjoin(output_folder, 'log.txt')
 
