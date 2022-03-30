@@ -9,13 +9,16 @@ RUN apt update && \
     libboost-regex-dev libboost-system-dev libboost-test-dev libeigen3-dev libsuitesparse-dev libfreeimage-dev  \
     libgoogle-glog-dev libgflags-dev libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev libcgal-qt5-dev \
     # I think these are for FFMPEG.
-    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgtk2.0-dev pkg-config \
+    ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgtk2.0-dev pkg-config \
     # Packages for Ceres Solver
     libatlas-base-dev libsuitesparse-dev libeigen3-dev  \
     # BundleFusion
     libncurses5-dev libncursesw5-dev && \
-    apt-get -y autoremove && apt-get -y clean && apt-get -y autoclean && \
+    apt -y autoremove && \
+    apt -y clean && \
+    apt -y autoclean && \
     rm -rf /var/lib/apt/lists/*
+
 # COLMAP
 ## Ceres solver
 RUN cd / && \
@@ -73,25 +76,24 @@ RUN git clone https://github.com/eight0153/BundleFusion_Ubuntu_Pangolin.git ${BU
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir torch==1.10.2+cu113 torchvision==0.11.3+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
-RUN pip install --no-cache-dir detectron2 -f \
-  https://dl.fbaipublicfiles.com/detectron2/wheels/cu113/torch1.10/index.html
-
-WORKDIR /app
-
-# Download instance segmentation weights and weights for depth estimation model (NYU only) so
-# they do not need to be downloaded each time you run the container.
-ADD scripts scripts
-
-ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
-RUN python3 scripts/download_detectron2_weights.py && \
-    # AdaBins Weights
-    python3 scripts/download_adabins_basemodel.py &&  \
-    mkdir -p ${COLMAP_VOCAB_PATH} && \
-    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
 
 ENV WEIGHTS_PATH=/root/.cache/pretrained
-COPY weights/AdaBins_nyu.pt ${WEIGHTS_PATH}/AdaBins_nyu.pt
+ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
+
+COPY scripts/download_weights.py download_weights.py
+# The first line downloads the weights for the MC depth estimation model, the AdaBins base model and Detectron2.
+RUN python3 download_weights.py && \
+    # Weights for the AdaBins decoder portion of the model.
+    gdown https://drive.google.com/uc?id=1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF -O ${WEIGHTS_PATH}/AdaBins_nyu.pt && \
+    # FlowNet2 weights
+    gdown https://drive.google.com/uc?id=1hF8vS6YeHkx3j2pfCeQqqZGwA_PJq_Da -O ${WEIGHTS_PATH}/flownet2.pth && \
+    # COLMAP vocab file.
+    mkdir -p ${COLMAP_VOCAB_PATH} && \
+    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \
+    rm download_weights.py
+
+# Weights for LeReS depth estimation model.
 COPY weights/res101.pth ${WEIGHTS_PATH}/res101.pth
 
+WORKDIR /app
 ENTRYPOINT ["python3"]

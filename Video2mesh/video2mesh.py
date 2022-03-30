@@ -151,11 +151,13 @@ class Video2Mesh:
             self.write_results(dataset.base_path, foreground_output_folder, foreground_scene, timer,
                                storage_options.overwrite_ok)
 
+        self._print_summary(foreground_scene, background_scene,
+                            pjoin(dataset.base_path, foreground_output_folder),
+                            pjoin(dataset.base_path, background_output_folder),
+                            timer)
+
         self._export_video_webxr(dataset, background_output_folder)
         timer.stop()
-
-        self._print_summary(foreground_scene, background_scene, foreground_output_folder, background_output_folder,
-                            timer)
 
     def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
                        timer):
@@ -884,10 +886,10 @@ class Video2Mesh:
         return aligned_mesh
 
 
-if __name__ == '__main__':
+def main():
+    global storage_options, colmap_options
     parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
                                                                   "camera trajectory annotations.")
-
     Video2MeshOptions.add_args(parser)
     StorageOptions.add_args(parser)
     DepthOptions.add_args(parser)
@@ -918,3 +920,7 @@ if __name__ == '__main__':
                          colmap_options=colmap_options,
                          static_mesh_options=static_mesh_options)
     program.run()
+
+
+if __name__ == '__main__':
+    main()

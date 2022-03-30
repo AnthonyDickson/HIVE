@@ -9,6 +9,7 @@ import warnings
 from argparse import Namespace
 from collections import OrderedDict
 from multiprocessing.pool import ThreadPool
+from os.path import join as pjoin
 from pathlib import Path
 from typing import Union, Tuple, Optional, Callable, IO
 
@@ -26,12 +27,19 @@ from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from tqdm import tqdm
 
 from Video2mesh.geometry import pose_vec2mat, dilate_mask
-from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
+from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions, StaticMeshOptions
 from Video2mesh.utils import log
 from thirdparty.AdaBins.infer import InferenceHelper
 from thirdparty.colmap.scripts.python.read_write_model import read_model
+from thirdparty.consistent_depth.depth_fine_tuning import DepthFineTuner
+from thirdparty.consistent_depth.loaders.video_dataset import VideoFrameDataset
+from thirdparty.consistent_depth.monodepth.depth_model_registry import get_depth_model
+from thirdparty.consistent_depth.params import Video3dParamsParser
+from thirdparty.consistent_depth.process import DatasetProcessor
+from thirdparty.consistent_depth.utils.torch_helpers import to_device
 
 File = Union[str, Path]
 Size = Tuple[int, int]
@@ -149,9 +157,9 @@ class BatchPredictor(DefaultPredictor):
 
 
 def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
-                 overwrite_ok=False, for_colmap=False):
+                 overwrite_ok=False, for_colmap=False, filename_fmt: Optional[Callable[[int], str]] = None):
     """
-    Create instance segmentation masks for the given RGB video sequence and save the masks to disk..
+    Create instance segmentation masks for the given RGB video sequence and save the masks to disk.
 
     :param rgb_loader: The PyTorch DataLoader that loads the RGB frames (no data augmentations applied).
     :param mask_folder: The path to save the masks to.
@@ -159,6 +167,8 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     :param for_colmap: Whether the masks are intended for use with COLMAP or 3D video generation.
         Masks will be black and white with the background coloured white and using the
         corresponding input image's filename.
+    :param filename_fmt: (optional) a function that generates a frame filename from the frame index,
+        e.g. 123 -> '000123.png'.
     """
     print(f"Creating masks...")
 
@@ -202,12 +212,14 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
                 for j, mask in enumerate(people_masks.cpu().numpy()):
                     combined_masks[mask] = j + 1
 
-            if for_colmap:
+            if filename_fmt:
+                output_filename = filename_fmt(i)
+            elif for_colmap:
                 output_filename = f"{rgb_loader.dataset.image_filenames[i]}.png"
             else:
                 output_filename = f"{i:06d}.png"
 
-            Image.fromarray(combined_masks).convert('L').save(os.path.join(mask_folder, output_filename))
+            Image.fromarray(combined_masks).convert('L').save(pjoin(mask_folder, output_filename))
 
             i += 1
 
@@ -230,15 +242,15 @@ class COLMAPProcessor:
 
     @property
     def mask_path(self):
-        return os.path.join(self.workspace_path, self.mask_folder)
+        return pjoin(self.workspace_path, self.mask_folder)
 
     @property
     def result_path(self):
-        return os.path.join(self.workspace_path, 'sparse')
+        return pjoin(self.workspace_path, 'sparse')
 
     @property
     def probably_has_results(self):
-        recon_result_path = os.path.join(self.result_path, '0')
+        recon_result_path = pjoin(self.result_path, '0')
         min_files_for_recon = 4
 
         return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
@@ -296,7 +308,7 @@ class COLMAPProcessor:
     def _load_model(self):
         num_models = len(os.listdir(self.result_path))
         assert num_models == 1, f"COLMAP reconstructed {num_models} models when 1 was expected."
-        sparse_recon_path = os.path.join(self.result_path, '0')
+        sparse_recon_path = pjoin(self.result_path, '0')
 
         log(f"Reading COLMAP model from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
@@ -369,7 +381,7 @@ class COLMAPProcessor:
 
         camera_matrix, camera_trajectory = self.load_camera_params()
 
-        source_image_shape = cv2.imread(os.path.join(self.image_path, images[1].name)).shape[:2]
+        source_image_shape = cv2.imread(pjoin(self.image_path, images[1].name)).shape[:2]
         depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
 
         for index_zero_based in range(len(images)):
@@ -416,6 +428,10 @@ class NumpyDataset(Dataset):
 
 class ImageFolderDataset(Dataset):
     def __init__(self, base_dir, transform=None):
+        """
+        :param base_dir: The path to the folder containing images.
+        :param transform: (optional) a transform to apply each image. The transform must accept a numpy array as input.
+        """
         assert os.path.isdir(base_dir), f"Could not find the folder: {base_dir}"
 
         self.base_dir = base_dir
@@ -425,7 +441,7 @@ class ImageFolderDataset(Dataset):
         assert len(filenames) > 0, f"No files found in the folder: {base_dir}"
 
         self.image_filenames = filenames
-        self.image_paths = [os.path.join(base_dir, filename) for filename in filenames]
+        self.image_paths = [pjoin(base_dir, filename) for filename in filenames]
 
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
@@ -680,7 +696,7 @@ class DatasetBase:
             raise InvalidDatasetFormatError(f"The folder {base_path} does not exist!")
 
         for filename in os.listdir(base_path):
-            file_path = os.path.join(base_path, filename)
+            file_path = pjoin(base_path, filename)
 
             if os.path.isfile(file_path):
                 files_to_find.discard(filename)
@@ -810,6 +826,7 @@ class VTMDataset(DatasetBase):
     estimated_depth_folder = "estimated_depth"
     mask_folder = "mask"
     colmap_folder = "colmap"
+    cvde_folder = "cvde"
 
     required_folders = [rgb_folder, depth_folder]
 
@@ -835,43 +852,43 @@ class VTMDataset(DatasetBase):
 
     @property
     def path_to_metadata(self):
-        return os.path.join(self.base_path, self.metadata_filename)
+        return pjoin(self.base_path, self.metadata_filename)
 
     @property
     def path_to_camera_matrix(self):
-        return os.path.join(self.base_path, self.camera_matrix_filename)
+        return pjoin(self.base_path, self.camera_matrix_filename)
 
     @property
     def path_to_camera_trajectory(self):
-        return os.path.join(self.base_path, self.camera_trajectory_filename)
+        return pjoin(self.base_path, self.camera_trajectory_filename)
 
     @property
     def path_to_estimated_camera_matrix(self):
-        return os.path.join(self.base_path, self.estimated_camera_matrix_filename)
+        return pjoin(self.base_path, self.estimated_camera_matrix_filename)
 
     @property
     def path_to_estimated_camera_trajectory(self):
-        return os.path.join(self.base_path, self.estimated_camera_trajectory_filename)
+        return pjoin(self.base_path, self.estimated_camera_trajectory_filename)
 
     @property
     def path_to_rgb_frames(self):
-        return os.path.join(self.base_path, self.rgb_folder)
+        return pjoin(self.base_path, self.rgb_folder)
 
     @property
     def path_to_depth_maps(self):
-        return os.path.join(self.base_path, self.depth_folder)
+        return pjoin(self.base_path, self.depth_folder)
 
     @property
     def path_to_estimated_depth_maps(self):
-        return os.path.join(self.base_path, self.estimated_depth_folder)
+        return pjoin(self.base_path, self.estimated_depth_folder)
 
     @property
     def path_to_masks(self):
-        return os.path.join(self.base_path, self.mask_folder)
+        return pjoin(self.base_path, self.mask_folder)
 
     @property
     def path_to_colmap(self):
-        return os.path.join(self.base_path, self.colmap_folder)
+        return pjoin(self.base_path, self.colmap_folder)
 
     @property
     def num_frames(self):
@@ -916,19 +933,19 @@ class VTMDataset(DatasetBase):
             return self.metadata.depth_scale
 
     @property
-    def fx(self):
+    def fx(self) -> float:
         return self.camera_matrix[0, 0]
 
     @property
-    def fy(self):
+    def fy(self) -> float:
         return self.camera_matrix[1, 1]
 
     @property
-    def cx(self):
+    def cx(self) -> float:
         return self.camera_matrix[0, 2]
 
     @property
-    def cy(self):
+    def cy(self) -> float:
         return self.camera_matrix[1, 2]
 
     def __len__(self):
@@ -971,7 +988,7 @@ class VTMDataset(DatasetBase):
         start = datetime.datetime.now()
 
         masked_depth_folder = self.masked_depth_folder
-        masked_depth_path = os.path.join(self.base_path, masked_depth_folder)
+        masked_depth_path = pjoin(self.base_path, masked_depth_folder)
 
         if os.path.isdir(masked_depth_path) and len(os.listdir(masked_depth_path)) == len(self):
             is_mask_dilation_iterations_same = self.metadata.depth_mask_dilation_iterations == dilation_options.num_iterations
@@ -1001,7 +1018,7 @@ class VTMDataset(DatasetBase):
             depth_map[binary_mask] = 0.0
             depth_map = depth_map / self.depth_scaling_factor  # undo depth scaling done during loading.
             depth_map = depth_map.astype(np.uint16)
-            output_path = os.path.join(masked_depth_path, f"{i:06d}.png")
+            output_path = pjoin(masked_depth_path, f"{i:06d}.png")
             imageio.imwrite(output_path, depth_map)
 
             log(f"Writing masked depth to {output_path}")
@@ -1031,8 +1048,20 @@ class VTMDataset(DatasetBase):
         depth_estimation_model = depth_options.depth_estimation_model
 
         uses_same_model = self.metadata.depth_estimation_model == depth_estimation_model.name.lower()
+        cvde_metadata_path = pjoin(self.base_path, 'cvde', 'metadata.json')
 
-        if os.path.isdir(estimated_depth_path) and uses_same_model:
+        if os.path.isfile(cvde_metadata_path):
+            with open(cvde_metadata_path) as f:
+                metadata = json.load(f)
+
+            sampling_framerate = metadata['sampling_framerate']
+            same_frame_step = sampling_framerate == depth_options.sampling_framerate
+        else:
+            same_frame_step = False
+
+        same_settings = depth_estimation_model != DepthEstimationModel.CVDE or same_frame_step
+
+        if os.path.isdir(estimated_depth_path) and uses_same_model and same_settings:
             depth_dataset = ImageFolderDataset(estimated_depth_path, transform=self._get_depth_map_transform())
             num_estimated_depth_maps = len(depth_dataset)
             num_frames = self.num_frames
@@ -1070,6 +1099,8 @@ class VTMDataset(DatasetBase):
                 adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
             elif depth_estimation_model == DepthEstimationModel.LERES:
                 self._estimate_depth_leres(estimated_depth_path)
+            elif depth_estimation_model == DepthEstimationModel.CVDE:
+                self._estimate_depth_cvde(estimated_depth_path, sampling_framerate=depth_options.sampling_framerate)
             else:
                 raise RuntimeError(f"Unsupported depth estimation model '{depth_estimation_model.name}'.")
 
@@ -1090,7 +1121,7 @@ class VTMDataset(DatasetBase):
         args = Namespace()
         args.image_path = self.path_to_rgb_frames
         args.output_path = estimated_depth_path
-        args.load_ckpt = os.path.join(os.environ['WEIGHTS_PATH'], 'res101.pth')
+        args.load_ckpt = pjoin(os.environ['WEIGHTS_PATH'], 'res101.pth')
         args.backbone = 'resnext101'
 
         # create depth model
@@ -1107,7 +1138,7 @@ class VTMDataset(DatasetBase):
         images_folder = args.image_path
         imgs_list = os.listdir(images_folder)
         imgs_list.sort()
-        imgs_path = [os.path.join(images_folder, i) for i in imgs_list if i != 'outputs']
+        imgs_path = [pjoin(images_folder, i) for i in imgs_list if i != 'outputs']
         image_dir_out = args.output_path
         os.makedirs(image_dir_out, exist_ok=True)
 
@@ -1149,7 +1180,131 @@ class VTMDataset(DatasetBase):
             pred_depth_mm = (1000 * pred_depth_ori).astype(
                 np.uint16)  # Convert to mm as per KinectFusion style datasets.
 
-            imageio.imwrite(os.path.join(image_dir_out, f"{i:06d}.png"), pred_depth_mm)
+            imageio.imwrite(pjoin(image_dir_out, f"{i:06d}.png"), pred_depth_mm)
+
+    def _estimate_depth_cvde(self, path_to_estimated_depth, sampling_framerate=3):
+        # Create folder to hold results
+        results_path = pjoin(self.base_path, self.cvde_folder)
+        os.makedirs(results_path, exist_ok=self.overwrite_ok)
+
+        # TODO: Change COLMAP folder to the dataset's COLMAP folder
+        # Set frame sampling interval and save to disk somewhere.
+        fps = int(self.metadata.fps)
+        frame_step = fps // sampling_framerate
+
+        ## TODO: Clean up code and logic for overwriting old CVDE results.
+        frame_step_json_path = pjoin(results_path, "metadata.json")
+        invalidate_cache = False
+
+        if os.path.isfile(frame_step_json_path):
+            with open(frame_step_json_path, 'r') as f:
+                metadata = json.load(f)
+
+            cache_sampling_framerate = metadata['sampling_framerate']
+
+            if cache_sampling_framerate != sampling_framerate:
+                warnings.warn(
+                    f"CVDE was run on frame data with a frame step of {cache_sampling_framerate} but {frame_step} "
+                    f"was specified. Cached files will be overwritten.")
+                invalidate_cache = True
+        else:
+            invalidate_cache = True
+
+        if invalidate_cache:
+            warnings.warn(f"CVDE was run with different settings. Cached files will be deleted.")
+            shutil.rmtree(results_path)
+            os.makedirs(results_path)
+
+        # Create video of 'keyframes'.
+        video_filename = "video.mp4"
+        video_path = pjoin(results_path, video_filename)
+
+        if not os.path.isfile(video_path) or invalidate_cache:
+            ffmpeg_cmd = ['ffmpeg', '-r', str(fps), '-i', pjoin(self.path_to_rgb_frames, '%06d.png'),
+                          '-vcodec', 'libx264', '-pix_fmt', 'yuv420p',
+                          '-vf', f"\"select=\'not(mod(n,{frame_step}))\',setpts=N/{fps}/TB\"",
+                          '-y',
+                          video_path]
+            log(' '.join(ffmpeg_cmd))
+            #  Have to pass command as single string and use shell=True to avoid issues with quote escaping.
+            subprocess.run(' '.join(ffmpeg_cmd), shell=True).check_returncode()
+        else:
+            log(f"Found video file at {video_path}")
+
+        # Extract frames
+        parser = Video3dParamsParser()
+        args = [
+            '--video_file', video_path,
+            '--path', results_path,
+            '--camera_model', "PINHOLE",
+            '--camera_params', f"{self.fx}, {self.fy}, {self.cx}, {self.cy}",
+            '--batch_size', str(2),
+            '--num_epochs', str(40),
+            '--make_video',
+            '--op', 'extract_frames'
+        ]
+        params = parser.parse(args)
+
+        dp = DatasetProcessor()
+        dp.process(params)
+
+        # Binary masks
+        mask_folder = pjoin(results_path, 'mask')
+        frames_folder = pjoin(results_path, 'color_full')
+        rgb_loader = DataLoader(ImageFolderDataset(frames_folder), shuffle=False, batch_size=8)
+        create_masks(rgb_loader, mask_folder, overwrite_ok=self.overwrite_ok, for_colmap=True,
+                     filename_fmt='frame_{:06d}.png.png'.format)
+
+        # Run main algorithm
+        depth_fine_tuner = DepthFineTuner(dp.out_dir, range(self.num_frames), params)
+        weights_folder = pjoin(depth_fine_tuner.out_dir, 'checkpoints')
+
+        probably_has_trained_model = os.path.isdir(weights_folder) and len(os.listdir(weights_folder)) == params.num_epochs
+
+        if not probably_has_trained_model:
+            args[-1] = 'all'
+            params = parser.parse(args)
+            dp.process(params)
+        else:
+            log(f"Found previously trained model in {weights_folder}.")
+
+        # Save estimated depth as 16-bit png
+        dataset = VideoFrameDataset(pjoin(self.base_path, self.rgb_folder, '{:06d}.png'), range(self.num_frames))
+        data_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
+
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
+
+        os.makedirs(path_to_estimated_depth, exist_ok=self.overwrite_ok)
+
+        depth_map_index = 0
+
+        weights_folder = pjoin(depth_fine_tuner.out_dir, 'checkpoints')
+        weights_path = pjoin(weights_folder, sorted(os.listdir(weights_folder))[-1])
+        model = get_depth_model(params.model_type)(model_path_override=weights_path)
+        model.eval()
+
+        with tqdm(total=len(dataset)) as progress_bar:
+            for data in data_loader:
+                data = to_device(data)
+                stacked_images, metadata = data
+
+                depth_maps = model.forward(stacked_images, metadata)
+
+                depth_map = depth_maps.detach().cpu().numpy().squeeze()
+                depth_map = 1000.0 * depth_map
+                depth_map = depth_map.astype(np.uint16)
+
+                output_filename = f"{depth_map_index:06d}.png"
+                imageio.imwrite(pjoin(path_to_estimated_depth, output_filename), depth_map)
+
+                depth_map_index += 1
+                progress_bar.update(1)
+
+        # TODO: (optional) Interpolate pose data
+        # TODO: (optional) Refine BundleFusion pose data.
+        with open(frame_step_json_path, 'w') as f:
+            json.dump(dict(sampling_framerate=sampling_framerate), f)
 
     def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
         self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=True)
@@ -1406,9 +1561,9 @@ class TUMAdaptor(DatasetAdaptor):
         super().__init__(base_path=base_path, output_path=output_path, overwrite_ok=overwrite_ok)
 
         self.base_path = Path(base_path)
-        self.pose_path = Path(os.path.join(base_path, str(Path(self.pose_path))))
-        self.rgb_files_path = Path(os.path.join(base_path, str(Path(self.rgb_files_path))))
-        self.depth_map_files_path = Path(os.path.join(base_path, str(Path(self.depth_map_files_path))))
+        self.pose_path = Path(pjoin(base_path, str(Path(self.pose_path))))
+        self.rgb_files_path = Path(pjoin(base_path, str(Path(self.rgb_files_path))))
+        self.depth_map_files_path = Path(pjoin(base_path, str(Path(self.depth_map_files_path))))
 
         self.is_16_bit = is_16_bit
         # The depth maps need to be divided by 5000 for the 16-bit PNG files
@@ -1520,30 +1675,28 @@ class TUMAdaptor(DatasetAdaptor):
 
         os.makedirs(self.output_path, exist_ok=self.overwrite_ok)
 
-        join = os.path.join
-
-        source_image_folder = join(self.base_path, self.rgb_folder)
-        output_image_folder = join(self.output_path, VTMDataset.rgb_folder)
+        source_image_folder = pjoin(self.base_path, self.rgb_folder)
+        output_image_folder = pjoin(self.output_path, VTMDataset.rgb_folder)
         os.makedirs(output_image_folder, exist_ok=self.overwrite_ok)
 
-        source_depth_folder = join(self.base_path, self.depth_folder)
-        output_depth_folder = join(self.output_path, VTMDataset.depth_folder)
+        source_depth_folder = pjoin(self.base_path, self.depth_folder)
+        output_depth_folder = pjoin(self.output_path, VTMDataset.depth_folder)
         os.makedirs(output_depth_folder, exist_ok=self.overwrite_ok)
 
         log(f"Creating metadata for dataset.")
         # Depth scale here is it to 1 / 1000 because the depth maps will be converted to millimetres later on.
         metadata = DatasetMetadata(num_frames=len(image_filenames), fps=self.fps, width=self.width, height=self.height,
                                    depth_scale=1. / 1000.)
-        metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
+        metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
         log(f"Creating camera matrix file.")
-        camera_matrix_path = os.path.join(self.output_path, VTMDataset.camera_matrix_filename)
+        camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_matrix_path, self.intrinsic_matrix)
 
         log(f"Converting camera trajectory.")
-        camera_trajectory_path = join(self.output_path, VTMDataset.camera_trajectory_filename)
+        camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_trajectory_path, camera_trajectory)
 
@@ -1551,8 +1704,9 @@ class TUMAdaptor(DatasetAdaptor):
 
         log(f"Copying RGB frames.")
         image_file_ext = Path(image_filenames[0]).suffix
-        image_copy_jobs = [(join(source_image_folder, filename), join(output_image_folder, f"{i:06d}{image_file_ext}"))
-                           for i, filename in enumerate(image_filenames)]
+        image_copy_jobs = [
+            (pjoin(source_image_folder, filename), pjoin(output_image_folder, f"{i:06d}{image_file_ext}"))
+            for i, filename in enumerate(image_filenames)]
         pool.starmap(shutil.copy, image_copy_jobs)
 
         log(f"Copying depth maps.")
@@ -1564,7 +1718,7 @@ class TUMAdaptor(DatasetAdaptor):
             imageio.imwrite(output_path, depth_map)
 
         depth_map_ext = Path(depth_filenames[0]).suffix
-        depth_copy_jobs = [(join(source_depth_folder, filename), join(output_depth_folder, f"{i:06d}{depth_map_ext}"))
+        depth_copy_jobs = [(pjoin(source_depth_folder, filename), pjoin(output_depth_folder, f"{i:06d}{depth_map_ext}"))
                            for i, filename in enumerate(depth_filenames)]
         pool.starmap(convert_depth_to_mm, depth_copy_jobs)
 
@@ -1596,7 +1750,7 @@ class Video2ImageFolder:
 
         for i, frame in enumerate(frames):
             filename = f"{i:06d}{output_ext}"
-            frame_output_path = os.path.join(output_path, filename)
+            frame_output_path = pjoin(output_path, filename)
 
             if transform:
                 frame = transform(frame)
@@ -1688,7 +1842,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
             dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
             expected_num_frames = video_metadata.num_frames
-            expected_num_depth_maps = len(os.listdir(os.path.join(self.base_path, self.depth_folder)))
+            expected_num_depth_maps = len(os.listdir(pjoin(self.base_path, self.depth_folder)))
             expected_camera_trajectory_length = len(self._load_camera_trajectory())
 
             num_frames = len(os.listdir(dataset.path_to_rgb_frames))
@@ -1777,7 +1931,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
         Get metadata about the source video.
         :return: A VideoMetadata object.
         """
-        video_path = os.path.join(self.base_path, self.video_filename)
+        video_path = pjoin(self.base_path, self.video_filename)
         video = cv2.VideoCapture(video_path)
 
         if not video.isOpened():
@@ -1806,7 +1960,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
         metadata = DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width,
                                    height=height, depth_scale=1. / 1000.)
-        metadata_path = os.path.join(self.output_path, VTMDataset.metadata_filename)
+        metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
     def _convert_camera_trajectory(self):
@@ -1815,7 +1969,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
          dataset folder.
         """
         camera_trajectory = self._load_camera_trajectory()
-        camera_trajectory_path = os.path.join(self.output_path, VTMDataset.camera_trajectory_filename)
+        camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_trajectory_path, camera_trajectory)
 
@@ -1828,7 +1982,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
         """
         camera_matrix = self._load_camera_matrix(scale_x=target_resolution[1] / source_hw[1],
                                                  scale_y=target_resolution[0] / source_hw[0])
-        camera_matrix_path = os.path.join(self.output_path, VTMDataset.camera_matrix_filename)
+        camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_matrix_path, camera_matrix)
 
@@ -1840,7 +1994,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
         :param scale_y: The scale factor to apply to the y component of the focal length and principal point.
         :return: The 3x3 camera matrix.
         """
-        intrinsics_path = os.path.join(self.base_path, self.camera_matrix_filename)
+        intrinsics_path = pjoin(self.base_path, self.camera_matrix_filename)
         camera_matrix = np.loadtxt(intrinsics_path, delimiter=',')
 
         camera_matrix[0, 0] *= scale_x
@@ -1862,7 +2016,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
         :return: The Nx6 matrix where each row contains the rotation in axis-angle format and the translation vector.
         """
         # Code adapted from https://github.com/kekeblom/StrayVisualizer/blob/df5f39c750e8eec62b130dc9c8a91bdbcff1d952/stray_visualize.py#L43
-        trajectory_path = os.path.join(self.base_path, self.camera_trajectory_filename)
+        trajectory_path = pjoin(self.base_path, self.camera_trajectory_filename)
         # The first row is the header row, so skip
         trajectory_raw = np.loadtxt(trajectory_path, delimiter=',', skiprows=1)
 
@@ -1894,8 +2048,8 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
             return frame
 
-        video_path = os.path.join(self.base_path, self.video_filename)
-        output_images_path = os.path.join(self.output_path, VTMDataset.rgb_folder)
+        video_path = pjoin(self.base_path, self.video_filename)
+        output_images_path = pjoin(self.output_path, VTMDataset.rgb_folder)
         Video2ImageFolder.convert(video_path, output_images_path, overwrite_ok=self.overwrite_ok,
                                   transform=image_transform)
 
@@ -1909,21 +2063,21 @@ class StrayScannerAdaptor(DatasetAdaptor):
         # OpenCV's resize takes in a tuple in WH format (width, height), however `target_resolution` is in HW.
         target_resolution_cv = tuple(reversed(target_resolution))
 
-        source_depth_path = os.path.join(self.base_path, self.depth_folder)
-        output_depth_path = os.path.join(self.output_path, VTMDataset.depth_folder)
-        confidence_path = os.path.join(self.base_path, self.confidence_map_folder)
+        source_depth_path = pjoin(self.base_path, self.depth_folder)
+        output_depth_path = pjoin(self.output_path, VTMDataset.depth_folder)
+        confidence_path = pjoin(self.base_path, self.confidence_map_folder)
 
         os.makedirs(output_depth_path, exist_ok=self.overwrite_ok)
 
         def convert_depth_map(i, filename):
-            depth_map_path = os.path.join(source_depth_path, filename)
+            depth_map_path = pjoin(source_depth_path, filename)
             depth_map = np.load(depth_map_path)
 
             if depth_map.dtype != np.uint16:
                 raise RuntimeError(f"Expected 16-bit depth maps, got {depth_map.dtype}.")
 
             confidence_map_filename = f"{Path(filename).stem}.png"
-            confidence_map_path = os.path.join(confidence_path, confidence_map_filename)
+            confidence_map_path = pjoin(confidence_path, confidence_map_filename)
             confidence_map = cv2.imread(confidence_map_path, cv2.IMREAD_GRAYSCALE)
 
             depth_map[confidence_map < filter_level] = 0
@@ -1933,7 +2087,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
             # Need to adjust camera matrix and RGB-D data so that it is the right way up.
             depth_map = cv2.rotate(depth_map, cv2.ROTATE_90_CLOCKWISE)
 
-            output_depth_map_path = os.path.join(output_depth_path, f"{i:06d}.png")
+            output_depth_map_path = pjoin(output_depth_path, f"{i:06d}.png")
             cv2.imwrite(output_depth_map_path, depth_map)
 
         pool = ThreadPool(psutil.cpu_count(logical=False))
@@ -2000,7 +2154,7 @@ class UnrealAdaptor(DatasetAdaptor):
     required_folders = [rgb_folder, depth_folder]
 
     def convert(self) -> VTMDataset:
-        join = os.path.join
+        join = pjoin
 
         image_filenames = os.listdir(join(self.base_path, self.rgb_folder))
         depth_filenames = os.listdir(join(self.base_path, self.depth_folder))

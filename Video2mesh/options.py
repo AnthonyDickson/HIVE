@@ -86,12 +86,14 @@ class DepthFormat(enum.Enum):
 class DepthEstimationModel(enum.Enum):
     ADABINS = enum.auto()
     LERES = enum.auto()
+    CVDE = enum.auto()
 
     @classmethod
     def get_choices(cls):
         return {
             'adabins': cls.ADABINS,
-            'leres': cls.LERES
+            'leres': cls.LERES,
+            'cvde': cls.CVDE
         }
 
     @classmethod
@@ -107,15 +109,17 @@ class DepthEstimationModel(enum.Enum):
 class DepthOptions(Options, ReprMixin):
     """Options for depth maps."""
 
-    supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES]
+    supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES,
+                                         DepthEstimationModel.CVDE]
 
     def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE,
-                 depth_estimation_model=DepthEstimationModel.ADABINS):
+                 depth_estimation_model=DepthEstimationModel.ADABINS, sampling_framerate=10):
         """
         :param max_depth: The maximum depth value in the depth maps.
         :param dtype: The type of the depth values.
         :param depth_format: How depth values are measured in the depth maps.
         :param depth_estimation_model: The model to use to estimate depth maps.
+        :param sampling_framerate: The number of frames to sample every second for the CVDE depth estimation method.
         """
         assert dtype is np.uint8 or dtype is np.uint16, 'Only 8-bit and 16-bit depth maps are supported.'
 
@@ -132,10 +136,14 @@ class DepthOptions(Options, ReprMixin):
             # TODO: Figure out a clean way to apply max depth and to ensure that results that used a different
             #  max depth are overwritten.
 
+        if not isinstance(sampling_framerate, int) or sampling_framerate < 1:
+            raise ValueError(f"Sampling framerate must be a positive integer, but got {sampling_framerate}.")
+
         self.max_depth = max_depth
         self.depth_dtype = dtype
         self.depth_format = depth_format
         self.depth_estimation_model = depth_estimation_model
+        self.sampling_framerate = sampling_framerate
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -150,6 +158,9 @@ class DepthOptions(Options, ReprMixin):
                            help="The model to use for estimating depth maps.",
                            choices=[model.name.lower() for model in DepthOptions.supported_depth_estimation_models],
                            default=DepthEstimationModel.ADABINS.name.lower())
+        group.add_argument('--sampling_framerate', type=int,
+                           help='The number of frames to sample every second for the CVDE depth estimation method.',
+                           default=10)
 
     @staticmethod
     def from_args(args) -> 'DepthOptions':
@@ -173,7 +184,7 @@ class DepthOptions(Options, ReprMixin):
                                f"expected 'depth_to_point' or 'depth_to_plane'")
 
         return DepthOptions(max_depth, dtype, depth_format,
-                            DepthEstimationModel.from_string(args.depth_estimation_model))
+                            DepthEstimationModel.from_string(args.depth_estimation_model), args.sampling_framerate)
 
 
 class COLMAPOptions(Options, ReprMixin):

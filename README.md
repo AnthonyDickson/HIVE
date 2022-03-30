@@ -13,49 +13,47 @@ git submodule update --init --recursive
 ```
 ## Setting Up Python
 Start by choosing on of the following methods for setting up the Python environment (Docker is the recommended approach):
-1. Conda
-
-    You can install all the required Python dependencies with [Conda](https://docs.conda.io/en/latest/miniconda.html):
-    ```shell
-    conda env create -f environment.yml
-    conda activate video2mesh
-    ```
-
-2. PIP - CPU Only
+1. PIP - CUDA (11.3)
     ```shell
     pip install -r requirement.txt
-    pip install torch==1.10.0+cpu torchvision==0.11.1+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
-    pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cpu/torch1.10/index.html
     ```
 
-3. PIP - CUDA (11.3)
-    ```shell
-    pip install -r requirement.txt
-    pip install torch==1.10.0+cu113 torchvision==0.11.1+cu113 -f https://download.pytorch.org/whl/cpu/torch_stable.html
-    pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cuda113/torch1.10/index.html
-    ```
-
-4. Docker - CUDA (11.3)
+2. Docker - CUDA (11.3)
 
    Either:
-5. Pull (download) a pre-built image (~11.3 GB): 
-   ```shell
-   docker pull eight0153/video2mesh:cu116
-   ```
-6. Build the Docker Image:
-    
-   ```shell
-   docker build -t eight0153/video2mesh:cu116 .
-   ```
+   1. Pull (download) a pre-built image (~11.3 GB): 
+      ```shell
+      docker pull eight0153/video2mesh:cu116
+      ```
+   2. Build the Docker Image:
+      1. 
+          ```shell
+          docker build -t eight0153/video2mesh:cu116 .
+          ```
         
-   **Note:** For M1 Macs you should specify amd64 as the platform:
-   ```shell
-   docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cu116 .
-   ```
-   It is important to do this as not all the required packages have arm64 pre-built binaries available.
+          **Note:** For M1 Macs you should specify amd64 as the platform:
+          ```shell
+          docker buildx build --platform linux/amd64 -t eight0153/video2mesh:cu116 .
+          ```
+         
+         It is important to do this as not all the required packages have arm64 pre-built binaries available.
+
+      2. There are some custom CUDA kernels that require GPU access to be built. These can be installed via the follow command: 
+          ```shell
+          docker run --rm --entrypoint bash -v C:/dev/video2mesh:/app -it eight0153/video2mesh:cu116 -c "cd thirdparty/consistent_depth/third_party/flownet2/ && chmod +x install.sh && ./install.sh && bash"
+          ```
+      
+      3. Once this command has finished and the container is **still running**, run the following command to update the Docker image with the newly installed Python packages: 
+          ```shell
+          IMAGE_NAME=eight0153/video2mesh:cu116
+          CONTAINER_ID=$(docker ps | grep ${IMAGE_NAME} | awk '{ print $1 }')
+          docker commit $CONTAINER_ID $IMAGE_NAME;
+          ```
+         
+      4. You can now exit the Docker container started in step b.
 
 **Note**: If you either set up the environment or build the Docker image locally, you will need to 
-download the weights for the depth estimation models from [Google Drive](https://drive.google.com/file/d/1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF/view?usp=sharing) and [CloudStor](https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31), and place them in the folder `weights/`. 
+download the weights for one of the depth estimation models from [CloudStor](https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31), and place them in the folder `weights/`. 
 
 ## Setting Up C++ Environment
 If you use the Docker image, you do not need to do anything for this step.
