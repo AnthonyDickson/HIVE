@@ -87,11 +87,15 @@ class Video2Mesh:
         storage_options = self.storage_options
 
         dataset = self._get_dataset()
+        # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
 
         foreground_output_folder = storage_options.output_folder
         background_output_folder = f"{foreground_output_folder}_bg"
+
+        mesh_export_path = pjoin(dataset.base_path, 'mesh')
+        os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform(dataset)
 
@@ -109,15 +113,15 @@ class Video2Mesh:
 
             static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
                                                   options=self.static_mesh_options)
-            background_scene.add_geometry(static_mesh)
+            background_scene.add_geometry(static_mesh, node_name="000000")
 
-        self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene,
+        self.write_results(mesh_export_path, f"{background_output_folder}_unaligned", background_scene,
                            storage_options.overwrite_ok)
 
         log("Creating foreground mesh(es)...")
         foreground_scene = self.create_scene(dataset)
 
-        self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene,
+        self.write_results(mesh_export_path, f"{foreground_output_folder}_unaligned", foreground_scene,
                            storage_options.overwrite_ok)
 
         log("Aligning foreground and background scenes...")
@@ -133,16 +137,16 @@ class Video2Mesh:
         # TODO: Compress background mesh? PLY + Draco?
         background_scene.apply_transform(centering_transform)
 
-        self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
+        self.write_results(mesh_export_path, foreground_output_folder, foreground_scene,
                            storage_options.overwrite_ok)
-        self.write_results(dataset.base_path, background_output_folder, background_scene,
+        self.write_results(mesh_export_path, background_output_folder, background_scene,
                            storage_options.overwrite_ok)
 
         elapsed_time_seconds = time.time() - start_time
 
         self._print_summary(foreground_scene, background_scene,
-                            pjoin(dataset.base_path, foreground_output_folder),
-                            pjoin(dataset.base_path, background_output_folder),
+                            pjoin(mesh_export_path, foreground_output_folder),
+                            pjoin(mesh_export_path, background_output_folder),
                             elapsed_time_seconds)
 
         webxr_metadata = dict(
@@ -150,7 +154,8 @@ class Video2Mesh:
             use_vertex_colour_for_bg=not self.include_background
         )
 
-        self._export_video_webxr(dataset, background_output_folder, webxr_metadata)
+        self._export_video_webxr(mesh_export_path, background_output_folder, webxr_metadata,
+                                 export_name=Path(dataset.base_path).name)
 
     def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
                        elapsed_time_seconds):
@@ -229,20 +234,19 @@ class Video2Mesh:
 
         return centering_transform
 
-    def _export_video_webxr(self, dataset, background_output_folder, metadata: dict):
+    def _export_video_webxr(self, mesh_path: str, background_output_folder: str, metadata: dict, export_name: str):
         storage_options = self.storage_options
 
-        dataset_name = Path(dataset.base_path).name
-        webxr_output_path = pjoin(self.options.webxr_path, dataset_name)
+        webxr_output_path = pjoin(self.options.webxr_path, export_name)
         os.makedirs(webxr_output_path, exist_ok=storage_options.overwrite_ok)
 
-        metadata_path = pjoin(dataset.base_path, 'webxr_metadata.json')
+        metadata_path = pjoin(mesh_path, 'webxr_metadata.json')
 
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f)
 
         def copy_video_files(video_folder):
-            scene3d_path = pjoin(dataset.base_path, video_folder)
+            scene3d_path = pjoin(mesh_path, video_folder)
             scene3d_output_path = pjoin(webxr_output_path, video_folder)
 
             os.makedirs(scene3d_output_path, exist_ok=storage_options.overwrite_ok)
@@ -252,7 +256,7 @@ class Video2Mesh:
         copy_video_files(background_output_folder)
         shutil.copy(metadata_path, pjoin(webxr_output_path, 'metadata.json'))
 
-        log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={dataset_name}")
+        log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
     def _get_dataset(self):
         dataset_path = self.storage_options.base_path
@@ -460,6 +464,9 @@ class Video2Mesh:
             dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
             dataset_path = os.path.abspath(dataset.base_path)
 
+            bundle_fusion_output_path = pjoin(dataset_path, 'bundle_fusion')
+            os.makedirs(bundle_fusion_output_path, exist_ok=dataset.overwrite_ok)
+
             log("Configuring BundleFusion...")
             bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
             default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
@@ -470,11 +477,9 @@ class Video2Mesh:
             config['s_cameraIntrinsicFy'] = int(dataset.fy)
             config['s_cameraIntrinsicCx'] = int(dataset.cx)
             config['s_cameraIntrinsicCy'] = int(dataset.cy)
+            config['s_generateMeshDir'] = bundle_fusion_output_path
 
-            bundle_fusion_output_dir = pjoin(dataset_path, 'bundle_fusion')
-            config['s_generateMeshDir'] = bundle_fusion_output_dir
-
-            config_output_path = pjoin(dataset_path, 'bundleFusionConfig.txt')
+            config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionConfig.txt')
             config.save(config_output_path)
 
             bundle_fusion_bin = os.environ['BUNDLE_FUSION_BIN']
@@ -485,14 +490,12 @@ class Video2Mesh:
             # the `+ submap_size` is to avoid 'off-by-one' like errors.
             #
             bundling_config['s_maxNumImages'] = (num_frames + submap_size) // submap_size
-
-            bundling_config_output_path = pjoin(dataset_path, 'bundleFusionBundlingConfig.txt')
+            bundling_config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionBundlingConfig.txt')
             bundling_config.save(bundling_config_output_path)
 
             cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
                    dataset_path, dataset.masked_depth_folder]
-            output_folder = pjoin(dataset.base_path, 'bundle_fusion')
-            log_path = pjoin(output_folder, 'log.txt')
+            log_path = pjoin(bundle_fusion_output_path, 'log.txt')
 
             log("Running BundleFusion...")
             with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
@@ -509,7 +512,7 @@ class Video2Mesh:
                                    f"check the logs for what went wrong ({os.path.abspath(log_path)}).")
 
             # Read ply file into trimesh object
-            mesh_path = pjoin(bundle_fusion_output_dir, 'mesh.ply')
+            mesh_path = pjoin(bundle_fusion_output_path, 'mesh.ply')
 
             with open(mesh_path, 'rb') as mesh_file:
                 mesh_data = load_ply(mesh_file)
