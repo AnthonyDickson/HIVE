@@ -91,9 +91,6 @@ class Video2Mesh:
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
 
-        foreground_output_folder = storage_options.output_folder
-        background_output_folder = f"{foreground_output_folder}_bg"
-
         mesh_export_path = pjoin(dataset.base_path, 'mesh')
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
@@ -115,14 +112,12 @@ class Video2Mesh:
                                                   options=self.static_mesh_options)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
-        self.write_results(mesh_export_path, f"{background_output_folder}_unaligned", background_scene,
-                           storage_options.overwrite_ok)
+        self.write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
 
         log("Creating foreground mesh(es)...")
         foreground_scene = self.create_scene(dataset)
 
-        self.write_results(mesh_export_path, f"{foreground_output_folder}_unaligned", foreground_scene,
-                           storage_options.overwrite_ok)
+        self.write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
 
         log("Aligning foreground and background scenes...")
         foreground_scene.apply_transform(centering_transform)
@@ -137,16 +132,13 @@ class Video2Mesh:
         # TODO: Compress background mesh? PLY + Draco?
         background_scene.apply_transform(centering_transform)
 
-        self.write_results(mesh_export_path, foreground_output_folder, foreground_scene,
-                           storage_options.overwrite_ok)
-        self.write_results(mesh_export_path, background_output_folder, background_scene,
-                           storage_options.overwrite_ok)
+        foreground_scene_path = self.write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
+        background_scene_path = self.write_results(mesh_export_path, scene_name="bg", scene=background_scene)
 
         elapsed_time_seconds = time.time() - start_time
 
         self._print_summary(foreground_scene, background_scene,
-                            pjoin(mesh_export_path, foreground_output_folder),
-                            pjoin(mesh_export_path, background_output_folder),
+                            foreground_scene_path, background_scene_path,
                             elapsed_time_seconds)
 
         webxr_metadata = dict(
@@ -154,24 +146,11 @@ class Video2Mesh:
             use_vertex_colour_for_bg=not self.include_background
         )
 
-        self._export_video_webxr(mesh_export_path, background_output_folder, webxr_metadata,
-                                 export_name=Path(dataset.base_path).name)
+        self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
+                                 metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
 
-    def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
+    def _print_summary(self, foreground_scene, background_scene, foreground_scene_path, background_scene_path,
                        elapsed_time_seconds):
-        def get_folder_size(folder):
-            total_size = os.path.getsize(folder)
-
-            for item in os.listdir(folder):
-                item_path = os.path.join(folder, item)
-
-                if os.path.isfile(item_path):
-                    total_size += os.path.getsize(item_path)
-                elif os.path.isdir(item_path):
-                    total_size += get_folder_size(item_path)
-
-            return total_size
-
         def format_bytes(num):
             for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
                 if abs(num) < 1024.0:
@@ -196,8 +175,8 @@ class Video2Mesh:
 
             return total
 
-        fg_file_size = get_folder_size(foreground_output_folder)
-        bg_file_size = get_folder_size(background_output_folder)
+        fg_file_size = os.path.getsize(foreground_scene_path)
+        bg_file_size = os.path.getsize(background_scene_path)
         fg_file_size_per_frame = fg_file_size / self.num_frames
         bg_file_size_per_frame = bg_file_size / self.num_frames
         file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
@@ -234,27 +213,24 @@ class Video2Mesh:
 
         return centering_transform
 
-    def _export_video_webxr(self, mesh_path: str, background_output_folder: str, metadata: dict, export_name: str):
+    def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict, export_name: str):
         storage_options = self.storage_options
 
         webxr_output_path = pjoin(self.options.webxr_path, export_name)
         os.makedirs(webxr_output_path, exist_ok=storage_options.overwrite_ok)
 
-        metadata_path = pjoin(mesh_path, 'webxr_metadata.json')
+        metadata_filename = 'metadata.json'
+        metadata_path = pjoin(mesh_path, metadata_filename)
 
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f)
 
-        def copy_video_files(video_folder):
-            scene3d_path = pjoin(mesh_path, video_folder)
-            scene3d_output_path = pjoin(webxr_output_path, video_folder)
+        def export_file(filename):
+            shutil.copy(pjoin(mesh_path, filename), pjoin(webxr_output_path, filename))
 
-            os.makedirs(scene3d_output_path, exist_ok=storage_options.overwrite_ok)
-            shutil.copytree(scene3d_path, scene3d_output_path, dirs_exist_ok=storage_options.overwrite_ok)
-
-        copy_video_files(storage_options.output_folder)
-        copy_video_files(background_output_folder)
-        shutil.copy(metadata_path, pjoin(webxr_output_path, 'metadata.json'))
+        export_file(metadata_filename)
+        export_file(f"{fg_scene_name}.glb")
+        export_file(f"{bg_scene_name}.glb")
 
         log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
@@ -807,36 +783,21 @@ class Video2Mesh:
         return atlas, final_uvs
 
     @staticmethod
-    def write_results(base_folder, output_dir, scene, replace_old_results_ok=False):
-        scene3d_path = pjoin(base_folder, output_dir)
-        old_results_path = f"{scene3d_path}.old"
+    def write_results(base_folder, scene_name, scene) -> str:
+        """
+        Write a scene to disk.
 
-        if replace_old_results_ok:
-            if os.path.exists(old_results_path):
-                shutil.rmtree(old_results_path)
+        :param base_folder: The folder to save the mesh to.
+        :param scene_name: The name of the scene. Will be used for the filename.
+        :param scene: The scene object to export.
 
-            if os.path.exists(scene3d_path):
-                shutil.move(scene3d_path, old_results_path)
+        :return: The path to the exported scene.
+        """
+        output_path = pjoin(base_folder, f'{scene_name}.glb')
+        trimesh.exchange.export.export_scene(scene, output_path)
+        log("Wrote mesh data to disk")
 
-        try:
-            os.makedirs(scene3d_path, exist_ok=False)
-            output_files = trimesh.exchange.gltf.export_gltf(scene, merge_buffers=True)
-
-            for filename in output_files:
-                with open(pjoin(scene3d_path, filename), 'wb') as f:
-                    f.write(output_files[filename])
-
-            log("Wrote mesh data to disk")
-        except:
-            if replace_old_results_ok:
-                if os.path.exists(scene3d_path):
-                    shutil.rmtree(scene3d_path)
-
-                if os.path.exists(old_results_path):
-                    shutil.move(old_results_path, scene3d_path)
-                log("Rolled back results after encountering fatal error")
-
-            raise
+        return output_path
 
     def align_bundle_fusion_reconstruction(self, dataset: VTMDataset, mesh: trimesh.Trimesh):
         # TODO: Check if the below transform is always the correct fix for reconstructions regardless of dataset.
