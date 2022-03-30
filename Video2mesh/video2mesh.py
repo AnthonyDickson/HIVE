@@ -8,6 +8,7 @@ import os
 import psutil
 import shutil
 import time
+import tqdm
 import trimesh
 import warnings
 from PIL import Image
@@ -82,14 +83,13 @@ class Video2Mesh:
         return self.options.estimate_camera_params
 
     def run(self):
-        timer = Timer()
-        timer.start()
+        start_time = time.time()
 
         storage_options = self.storage_options
 
         dataset = self._get_dataset()
         storage_options.base_path = dataset.base_path
-        timer.split("configure dataset")
+        log("Configured dataset")
 
         foreground_output_folder = storage_options.output_folder
         background_output_folder = f"{foreground_output_folder}_bg"
@@ -97,19 +97,15 @@ class Video2Mesh:
         centering_transform = self._get_centering_transform(dataset)
 
         if self.include_background and self.static_background:
-            background_scene = self.create_scene(dataset, timer,
-                                                 include_background=True,
-                                                 background_only=True)
-            foreground_scene = self.create_scene(dataset, timer,
-                                                 include_background=False,
-                                                 background_only=False)
+            background_scene = self.create_scene(dataset, include_background=True, background_only=True)
+            foreground_scene = self.create_scene(dataset, include_background=False, background_only=False)
 
             foreground_scene.apply_transform(centering_transform)
             background_scene.apply_transform(centering_transform)
 
             self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
-                               timer, storage_options.overwrite_ok)
-            self.write_results(dataset.base_path, background_output_folder, background_scene, timer,
+                               storage_options.overwrite_ok)
+            self.write_results(dataset.base_path, background_output_folder, background_scene,
                                storage_options.overwrite_ok)
         else:
             fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
@@ -123,7 +119,7 @@ class Video2Mesh:
                                                       options=self.static_mesh_options)
                 background_scene.add_geometry(static_mesh)
 
-                self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene, timer,
+                self.write_results(dataset.base_path, f"{background_output_folder}_unaligned", background_scene,
                                    storage_options.overwrite_ok)
 
                 # TODO: Change this so that the scene is transformed instead of the static mesh.
@@ -134,33 +130,33 @@ class Video2Mesh:
                 #         dataset.camera_trajectory = self._refine_colmap_poses()
 
                 # TODO: Compress background mesh? PLY + Draco?
-                timer.split("create static mesh")
+                log("Created static mesh")
 
-                self.write_results(dataset.base_path, background_output_folder, background_scene, timer,
+                self.write_results(dataset.base_path, background_output_folder, background_scene,
                                    storage_options.overwrite_ok)
 
-            foreground_scene = self.create_scene(dataset, timer,
-                                                 include_background=self.include_background,
+            foreground_scene = self.create_scene(dataset, include_background=self.include_background,
                                                  background_only=False)
 
-            self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene, timer,
+            self.write_results(dataset.base_path, f"{foreground_output_folder}_unaligned", foreground_scene,
                                storage_options.overwrite_ok)
 
             foreground_scene.apply_transform(centering_transform)
 
-            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene, timer,
+            self.write_results(dataset.base_path, foreground_output_folder, foreground_scene,
                                storage_options.overwrite_ok)
+
+        elapsed_time_seconds = time.time() - start_time
 
         self._print_summary(foreground_scene, background_scene,
                             pjoin(dataset.base_path, foreground_output_folder),
                             pjoin(dataset.base_path, background_output_folder),
-                            timer)
+                            elapsed_time_seconds)
 
         self._export_video_webxr(dataset, background_output_folder)
-        timer.stop()
 
     def _print_summary(self, foreground_scene, background_scene, foreground_output_folder, background_output_folder,
-                       timer):
+                       elapsed_time_seconds):
         def get_folder_size(folder):
             total_size = os.path.getsize(folder)
 
@@ -210,7 +206,6 @@ class Video2Mesh:
         bg_num_tris_per_frame = bg_num_tris / self.num_frames
         num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
 
-        elapsed_time_seconds = timer.stop_time - timer.start_time
         elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
         elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
 
@@ -221,7 +216,7 @@ class Video2Mesh:
         log(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         log(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
         log(f"        Background mesh: {bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
-        log(f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame")
+        log(f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
         log(f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
         log(f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
@@ -324,13 +319,11 @@ class Video2Mesh:
 
         return refined_trajectory
 
-    def create_scene(self, dataset: VTMDataset, timer: Timer, include_background=False,
-                     background_only=False) -> trimesh.Scene:
+    def create_scene(self, dataset: VTMDataset, include_background=False, background_only=False) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
         :param dataset: The set of RGB frames and depth maps to use as input.
-        :param timer: The timer object for debug output.
         :param include_background: Whether to include the background mesh for each frame.
         :param background_only: Whether to exclude dynamic foreground objects.
 
@@ -351,15 +344,12 @@ class Video2Mesh:
             camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
         )
 
-        # TODO: Simplify progress logging and dump more detailed logs to disk.
-
         def process_frame(i):
             rgb = dataset.rgb_dataset[i]
             depth = dataset.depth_dataset[i]
             mask_encoded = dataset.mask_dataset[i]
             pose = dataset.camera_trajectory[i]
 
-            timer.split(f"start mesh generation for frame {i:02d}")
             frame_vertices = np.zeros((0, 3))
             frame_faces = np.zeros((0, 3))
 
@@ -379,8 +369,6 @@ class Video2Mesh:
             mask_end_i = 1 if background_only else mask_encoded.max() + 1
 
             for object_id in range(mask_start_i, mask_end_i):
-                timer.split(f"\tMesh for object id #{object_id}")
-
                 mask = mask_encoded == object_id
 
                 is_object = object_id > 0
@@ -388,58 +376,42 @@ class Video2Mesh:
                 coverage_ratio = mask.mean()
 
                 if coverage_ratio < 0.01:
-                    timer.split(f"\t\tSkipping object #{object_id} due to insufficient coverage.")
+                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1} due to insufficient coverage.")
                     continue
 
                 if is_object:
                     mask = dilate_mask(mask, self.dilation_options)
-                    timer.split(f"\t\tdilate mask")
 
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
-                timer.split("\t\tcreate point cloud")
 
                 if len(vertices) < 9:
-                    timer.split(
-                        f"\t\tSkipping object #{object_id} due to insufficient number of vertices ({len(vertices)}).")
+                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1}due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
                 points2d, depth_proj = world2image(vertices, camera_matrix, R, t)
-                timer.split("\t\tproject 3D points to pixel coordinates")
-
                 faces = self.triangulate_faces(points2d)
-                timer.split("\t\ttriangulate mesh")
-
                 faces = self.filter_faces(points2d, depth_proj, faces, self.filtering_options)
-                timer.split("\t\tfilter faces")
-
                 vertices, faces = self.decimate_mesh(vertices, faces, is_object, self.decimation_options)
-                timer.split("\t\tdecimate mesh")
 
                 vertices, faces = self.cleanup_with_connected_components(
                     vertices, faces, is_object,
                     min_components=self.filtering_options.min_num_components
                 )
-                timer.split(f"\t\tCleanup mesh with connected component analysis")
 
                 texture, uv = self.get_mesh_texture_and_uv(vertices, rgb, camera_matrix, R, t)
                 texture_atlas.append(texture)
                 uv_atlas.append(uv)
-                timer.split("\t\tgenerate texture atlas and UVs")
 
                 frame_vertices = np.vstack((frame_vertices, vertices))
                 frame_faces = np.vstack((frame_faces, faces + vertex_count))
                 # Vertex count must be updated afterwards.
                 vertex_count += len(vertices)
 
-                timer.split("\t\tadd object mesh to frame mesh")
-
             if len(texture_atlas) == 0:
                 mesh = trimesh.Trimesh()
                 warnings.warn(f"Mesh for frame #{i + 1} is empty!")
             else:
                 packed_textures, packed_uv = self.pack_textures(texture_atlas, uv_atlas, n_rows=1)
-
-                timer.split("\tpack texture atlas")
 
                 mesh = trimesh.Trimesh(
                     frame_vertices,
@@ -454,8 +426,9 @@ class Video2Mesh:
 
             return mesh
 
+        log("Processing frame data...")
         pool = ThreadPool(processes=psutil.cpu_count(logical=False))
-        meshes = pool.map(process_frame, range(num_frames))
+        meshes = tqdm.tqdm(pool.imap(process_frame, range(num_frames)), total=num_frames)
 
         for i, mesh in enumerate(meshes):
             scene.add_geometry(mesh, node_name=f"{i:06d}")
@@ -477,9 +450,11 @@ class Video2Mesh:
             num_frames = dataset.num_frames
 
         if options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+            log("Creating masked depth maps for BundleFusion...")
             dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
             dataset_path = os.path.abspath(dataset.base_path)
 
+            log("Configuring BundleFusion...")
             bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
             default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
             config = BundleFusionConfig.load(default_config_path)
@@ -501,17 +476,31 @@ class Video2Mesh:
             bundling_config = BundleFusionConfig.load(bundling_config_path)
 
             submap_size = bundling_config['s_submapSize']
-            bundling_config['s_maxNumImages'] = (
-                                                        num_frames + submap_size) // submap_size  # the `+ submap_size` is to avoid 'off-by-one' like errors.
+            # the `+ submap_size` is to avoid 'off-by-one' like errors.
+            #
+            bundling_config['s_maxNumImages'] = (num_frames + submap_size) // submap_size
 
             bundling_config_output_path = pjoin(dataset_path, 'bundleFusionBundlingConfig.txt')
             bundling_config.save(bundling_config_output_path)
 
-            return_code = subprocess.call([bundle_fusion_bin, config_output_path, bundling_config_output_path,
-                                           dataset_path, dataset.masked_depth_folder])
+            cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
+                       dataset_path, dataset.masked_depth_folder]
+            output_folder = pjoin(dataset.base_path, 'bundle_fusion')
+            log_path = pjoin(output_folder, 'log.txt')
 
-            if return_code:
-                raise RuntimeError(f"BundleFusion returned a non-zero code, check the logs for what went wrong.")
+            log("Running BundleFusion...")
+            with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
+                    open(log_path, mode='w') as f, \
+                    tqdm.tqdm(total=num_frames) as progress_bar:
+                for line in p.stdout:
+                    f.write(line)
+
+                    if line.startswith("processing frame ") and int(line.split()[-1][:-3]) <= num_frames:
+                        progress_bar.update()
+
+            if p.returncode != 0:
+                raise RuntimeError(f"BundleFusion returned a non-zero code, "
+                                   f"check the logs for what went wrong ({os.path.abspath(log_path)}).")
 
             # Read ply file into trimesh object
             mesh_path = pjoin(bundle_fusion_output_dir, 'mesh.ply')
@@ -809,7 +798,7 @@ class Video2Mesh:
         return atlas, final_uvs
 
     @staticmethod
-    def write_results(base_folder, output_dir, scene, timer, replace_old_results_ok=False):
+    def write_results(base_folder, output_dir, scene, replace_old_results_ok=False):
         scene3d_path = pjoin(base_folder, output_dir)
         old_results_path = f"{scene3d_path}.old"
 
@@ -828,7 +817,7 @@ class Video2Mesh:
                 with open(pjoin(scene3d_path, filename), 'wb') as f:
                     f.write(output_files[filename])
 
-            timer.split("write mesh data to disk")
+            log("Wrote mesh data to disk")
         except:
             if replace_old_results_ok:
                 if os.path.exists(scene3d_path):
@@ -836,7 +825,7 @@ class Video2Mesh:
 
                 if os.path.exists(old_results_path):
                     shutil.move(old_results_path, scene3d_path)
-                timer.split("rolled back results after encountering fatal error")
+                log("Rolled back results after encountering fatal error")
 
             raise
 

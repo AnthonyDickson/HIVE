@@ -1,59 +1,8 @@
 import datetime
-
-import sys
-
-import time
 from typing import Optional
 
 import numpy as np
-
-
-class Timer:
-    def __init__(self):
-        self.start_time = time.time()
-        self.stop_time = time.time()
-
-        self.splits = [0.0]
-        self.split_names = ['start']
-
-    def start(self):
-        self.start_time = time.time()
-
-    def split(self, split_name: Optional[str] = None, verbose=True):
-        elapsed = time.time() - self.start_time
-        self.splits.append(elapsed)
-        self.split_names.append(split_name or '')
-
-        if verbose:
-            print(self.split_to_string(i=-1))
-
-        return elapsed
-
-    def split_to_string(self, i=-1):
-        elapsed = self.splits[i]
-        split_name = self.split_names[i]
-
-        elapsed_precision = 2 if elapsed > 1.0 else 3
-        split_string = f"{split_name.capitalize()}: {elapsed:,.{elapsed_precision}f}"
-
-        if len(self.splits) > 1 and i != 0:
-            prev_time = self.splits[i - 1]
-
-            delta = elapsed - prev_time
-            delta_precision = 2 if delta > 1.0 else 3
-
-            split_string = f"{split_string} (+{delta:,.{delta_precision}f})"
-
-        return split_string
-
-    def stop(self):
-        self.stop_time = self.start_time + self.split('stop')
-
-    def __enter__(self):
-        self.start()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
+import sys
 
 
 def validate_camera_parameter_shapes(K, R, t):

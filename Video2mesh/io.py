@@ -1021,9 +1021,12 @@ class VTMDataset(DatasetBase):
             output_path = pjoin(masked_depth_path, f"{i:06d}.png")
             imageio.imwrite(output_path, depth_map)
 
-            log(f"Writing masked depth to {output_path}")
+        def save_depth_wrapper(args):
+            save_depth(*args)
 
-        pool.starmap(save_depth, zip(range(len(self)), self.depth_dataset, self.mask_dataset))
+        log(f"Writing masked depth to {masked_depth_path}...")
+        args = list(zip(range(len(self)), self.depth_dataset, self.mask_dataset))
+        tqdm(pool.imap(save_depth_wrapper, args), total=len(args))
 
         self.metadata.depth_mask_dilation_iterations = dilation_options.num_iterations
         self.metadata.save(self.path_to_metadata)
@@ -1163,8 +1166,7 @@ class VTMDataset(DatasetBase):
 
             return img
 
-        for i, image_path in enumerate(imgs_path):
-            print(f"[{i:04d}/{len(imgs_path):04d}] {image_path}")
+        for i, image_path in tqdm(enumerate(imgs_path), total=len(imgs_path)):
             rgb = cv2.imread(image_path)
             rgb_c = rgb[:, :, ::-1].copy()
             A_resize = cv2.resize(rgb_c, (448, 448))
@@ -1299,7 +1301,7 @@ class VTMDataset(DatasetBase):
                 imageio.imwrite(pjoin(path_to_estimated_depth, output_filename), depth_map)
 
                 depth_map_index += 1
-                progress_bar.update(1)
+                progress_bar.update()
 
         # TODO: (optional) Interpolate pose data
         # TODO: (optional) Refine BundleFusion pose data.
