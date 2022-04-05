@@ -223,7 +223,7 @@ class Video2Mesh:
                     num_missing = (~complete_rows).sum()
                     percent_missing = 100 * (num_missing / len(complete_rows))
                     print(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
-                                  f" with NaN/inf values - these rows wil be excluded from the below stats.",
+                          f" with NaN/inf values - these rows wil be excluded from the below stats.",
                           file=sys.stderr)
 
                 if norm:
@@ -365,7 +365,10 @@ class Video2Mesh:
         log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
     def _get_dataset(self):
-        dataset_path = self.storage_options.base_path
+        storage_options = self.storage_options
+        colmap_options = self.colmap_options
+
+        dataset_path = storage_options.base_path
 
         if TUMAdaptor.is_valid_folder_structure(dataset_path):
             # TODO: Test TUMAdaptor
@@ -1017,7 +1020,6 @@ class Video2Mesh:
 
 
 def main():
-    global storage_options, colmap_options
     parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
                                                                   "camera trajectory annotations.")
     Video2MeshOptions.add_args(parser)
