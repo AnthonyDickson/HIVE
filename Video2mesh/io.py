@@ -170,7 +170,7 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     :param filename_fmt: (optional) a function that generates a frame filename from the frame index,
         e.g. 123 -> '000123.png'.
     """
-    print(f"Creating masks...")
+    log(f"Creating masks...")
 
     cfg = get_cfg()
 
@@ -184,7 +184,7 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     dataset_metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
     class_names = dataset_metadata.thing_classes
-    print(class_names)
+    log(class_names)
 
     person_label = class_names.index('person')
     predictor = BatchPredictor(cfg)
@@ -260,12 +260,12 @@ class COLMAPProcessor:
         os.makedirs(self.workspace_path, exist_ok=True)
 
         if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
-            print(f"Could not find masks in folder: {self.mask_path}.")
-            print(f"Creating masks for COLMAP...")
+            log(f"Could not find masks in folder: {self.mask_path}.")
+            log(f"Creating masks for COLMAP...")
             rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
             create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
         else:
-            print(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
+            log(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
         command = self.get_command()
         # TODO: Check that COLMAP is using GPU
@@ -336,7 +336,7 @@ class COLMAPProcessor:
         intrinsic[1, 1] = f
         intrinsic[0, 2] = cx
         intrinsic[1, 2] = cy
-        print("Read intrinsic parameters.")
+        log("Read intrinsic parameters.")
 
         extrinsic = []
 
@@ -372,7 +372,7 @@ class COLMAPProcessor:
 
         extrinsic = np.asarray(extrinsic).squeeze()
 
-        print(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+        log(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
 

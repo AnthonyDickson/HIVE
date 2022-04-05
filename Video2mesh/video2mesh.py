@@ -90,7 +90,7 @@ class Video2Mesh:
 
         storage_options = self.storage_options
 
-        dataset = self._get_dataset()
+        dataset = self.get_dataset()
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
@@ -103,32 +103,32 @@ class Video2Mesh:
         log("Creating background mesh(es)...")
 
         if self.include_background:
-            background_scene = self.create_scene(dataset, include_background=True, background_only=True,
-                                                 static_background=self.static_background)
+            background_scene = self._create_scene(dataset, include_background=True, background_only=True,
+                                                  static_background=self.static_background)
         else:
-            fx, fy, height, width = self.extract_camera_params(dataset.camera_matrix)
+            fx, fy, height, width = self._extract_camera_params(dataset.camera_matrix)
 
             background_scene = trimesh.scene.Scene(
                 camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
             )
 
-            static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
-                                                  options=self.static_mesh_options)
+            static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
+                                                   options=self.static_mesh_options)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
-        self.write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
+        self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
 
         self._print_trajectory_stats(dataset)
 
         if self.options.estimate_camera_params and \
                 self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION and \
                 self.options.refine_colmap_poses:
-            dataset.camera_trajectory = self._refine_colmap_poses(dataset)
+            dataset.camera_trajectory = self.refine_colmap_poses(dataset)
 
         log("Creating foreground mesh(es)...")
-        foreground_scene = self.create_scene(dataset)
+        foreground_scene = self._create_scene(dataset)
 
-        self.write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
+        self._write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
 
         log("Aligning foreground and background scenes...")
         foreground_scene.apply_transform(centering_transform)
@@ -143,8 +143,8 @@ class Video2Mesh:
         # TODO: Compress background mesh? PLY + Draco?
         background_scene.apply_transform(centering_transform)
 
-        foreground_scene_path = self.write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
-        background_scene_path = self.write_results(mesh_export_path, scene_name="bg", scene=background_scene)
+        foreground_scene_path = self._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
+        background_scene_path = self._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
 
         elapsed_time_seconds = time.time() - start_time
 
@@ -224,7 +224,7 @@ class Video2Mesh:
 
                     num_missing = (~complete_rows).sum()
                     percent_missing = 100 * (num_missing / len(complete_rows))
-                    print(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
+                    log(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
                           f" with NaN/inf values - these rows wil be excluded from the below stats.",
                           file=sys.stderr)
 
@@ -366,7 +366,7 @@ class Video2Mesh:
 
         log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
-    def _get_dataset(self):
+    def get_dataset(self):
         storage_options = self.storage_options
         colmap_options = self.colmap_options
 
@@ -412,7 +412,7 @@ class Video2Mesh:
 
         return dataset
 
-    def _refine_colmap_poses(self, dataset: VTMDataset):
+    def refine_colmap_poses(self, dataset: VTMDataset):
         """
         Refine the pose data estimated with COLMAP with additional data from BundleFusion.
 
@@ -478,8 +478,8 @@ class Video2Mesh:
 
         return scale_coeffs * cm_trajectory + shift_coeffs
 
-    def create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
-                     static_background=False) -> trimesh.Scene:
+    def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
+                      static_background=False) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
@@ -499,7 +499,7 @@ class Video2Mesh:
 
         camera_matrix = dataset.camera_matrix
 
-        fx, fy, height, width = self.extract_camera_params(camera_matrix)
+        fx, fy, height, width = self._extract_camera_params(camera_matrix)
 
         scene = trimesh.scene.Scene(
             camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
@@ -551,16 +551,16 @@ class Video2Mesh:
                     continue
 
                 points2d, depth_proj = world2image(vertices, camera_matrix, R, t)
-                faces = self.triangulate_faces(points2d)
-                faces = self.filter_faces(points2d, depth_proj, faces, self.filtering_options)
-                vertices, faces = self.decimate_mesh(vertices, faces, is_object, self.decimation_options)
+                faces = self._triangulate_faces(points2d)
+                faces = self._filter_faces(points2d, depth_proj, faces, self.filtering_options)
+                vertices, faces = self._decimate_mesh(vertices, faces, is_object, self.decimation_options)
 
-                vertices, faces = self.cleanup_with_connected_components(
+                vertices, faces = self._cleanup_with_connected_components(
                     vertices, faces, is_object,
                     min_components=self.filtering_options.min_num_components
                 )
 
-                texture, uv = self.get_mesh_texture_and_uv(vertices, rgb, camera_matrix, R, t)
+                texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, R, t)
                 texture_atlas.append(texture)
                 uv_atlas.append(uv)
 
@@ -573,7 +573,7 @@ class Video2Mesh:
                 mesh = trimesh.Trimesh()
                 warnings.warn(f"Mesh for frame #{i + 1} is empty!")
             else:
-                packed_textures, packed_uv = self.pack_textures(texture_atlas, uv_atlas, n_rows=1)
+                packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
 
                 mesh = trimesh.Trimesh(
                     frame_vertices,
@@ -598,7 +598,7 @@ class Video2Mesh:
         return scene
 
     @staticmethod
-    def create_static_mesh(dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
+    def _create_static_mesh(dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
         """
         Create a static mesh of the scene.
 
@@ -739,7 +739,7 @@ class Video2Mesh:
         return mesh
 
     @staticmethod
-    def extract_camera_params(camera_intrinsics):
+    def _extract_camera_params(camera_intrinsics):
         cx = camera_intrinsics[0, 2]
         cy = camera_intrinsics[1, 2]
         width = int(2 * cx)
@@ -750,7 +750,7 @@ class Video2Mesh:
         return fx, fy, height, width
 
     @staticmethod
-    def triangulate_faces(points):
+    def _triangulate_faces(points):
         validate_shape(points, 'points', expected_shape=(None, 2))
 
         tri = Delaunay(points)
@@ -763,7 +763,7 @@ class Video2Mesh:
         return faces
 
     @staticmethod
-    def filter_faces(points2d, depth, faces, options: MeshFilteringOptions):
+    def _filter_faces(points2d, depth, faces, options: MeshFilteringOptions):
         """
         Filter faces that connect distance vertices.
 
@@ -790,7 +790,7 @@ class Video2Mesh:
         return faces
 
     @staticmethod
-    def decimate_mesh(vertices, faces, is_object, options: MeshDecimationOptions):
+    def _decimate_mesh(vertices, faces, is_object, options: MeshDecimationOptions):
         """
         Decimate (simplify) a mesh.
 
@@ -831,7 +831,7 @@ class Video2Mesh:
         return vertices, faces
 
     @staticmethod
-    def cleanup_with_connected_components(vertices, faces, is_object=True, min_components=5):
+    def _cleanup_with_connected_components(vertices, faces, is_object=True, min_components=5):
         """
         Cleanup a mesh through analysis of the connected components.
         This gets rid of most floating bits of mesh.
@@ -871,7 +871,7 @@ class Video2Mesh:
         return vertices, faces
 
     @staticmethod
-    def get_mesh_texture_and_uv(vertices, image, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+    def _get_mesh_texture_and_uv(vertices, image, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
         """
         Get the cropped texture and UV coordinates for a given set of vertices.
 
@@ -899,7 +899,7 @@ class Video2Mesh:
         return texture, uv
 
     @staticmethod
-    def pack_textures(textures_atlas, uvs_atlas, n_rows=1):
+    def _pack_textures(textures_atlas, uvs_atlas, n_rows=1):
         """I don't understand exactly how this function works...
         ask the original authors of this code: https://github.com/krematas/soccerontable/issues/new"""
         n_columns = len(textures_atlas) // n_rows + 1
@@ -959,7 +959,7 @@ class Video2Mesh:
         return atlas, final_uvs
 
     @staticmethod
-    def write_results(base_folder, scene_name, scene) -> str:
+    def _write_results(base_folder, scene_name, scene) -> str:
         """
         Write a scene to disk.
 
@@ -975,7 +975,7 @@ class Video2Mesh:
 
         return output_path
 
-    def align_bundle_fusion_reconstruction(self, dataset: VTMDataset, mesh: trimesh.Trimesh):
+    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, mesh: trimesh.Trimesh):
         # TODO: Check if the below transform is always the correct fix for reconstructions regardless of dataset.
         rgb = dataset.rgb_dataset[0][:, :, :3]
         depth_map = dataset.depth_dataset[0]
@@ -1034,7 +1034,7 @@ def main():
     StaticMeshOptions.add_args(parser)
 
     args = parser.parse_args()
-    print(args)
+    log(args)
 
     video2mesh_options = Video2MeshOptions.from_args(args)
     storage_options = StorageOptions.from_args(args)

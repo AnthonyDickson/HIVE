@@ -238,7 +238,7 @@ def main():
         log(f"Copying output to results folder...")
 
         with open(os.devnull, 'w') as f, redirect_stdout(f):
-            dataset = program._get_dataset()
+            dataset = program.get_dataset()
 
         output_matrix_path = pjoin(config_folder, dataset.camera_matrix_filename)
         output_trajectory_path = pjoin(config_folder, dataset.camera_trajectory_filename)
@@ -257,9 +257,10 @@ def main():
             shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_matrix_filename),
                         output_matrix_path)
 
-            trajectory = program._refine_colmap_poses(dataset)
+            trajectory = program.refine_colmap_poses(dataset)
             np.savetxt(output_trajectory_path, trajectory)
 
+        shutil.copy(dataset.path_to_metadata, pjoin(config_folder, dataset.metadata_filename))
         shutil.copytree(pjoin(dataset.base_path, program.mesh_folder), pjoin(config_folder, program.mesh_folder))
 
 
