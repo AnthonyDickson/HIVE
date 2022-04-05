@@ -50,5 +50,5 @@ def num2str(num: Optional[int]):
     return '?' if num is None else str(num)
 
 
-def log(message, prefix='', end='\n', file=sys.stdout):
+def log(message, prefix='', end='\n', file=None):
     print(f"{prefix}[{datetime.datetime.now().time()}] {message}", file=file, end=end)
