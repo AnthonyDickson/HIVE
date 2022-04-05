@@ -755,7 +755,8 @@ class DatasetMetadata:
         if not isinstance(depth_scale, (float, int)) or not np.isfinite(depth_scale) or depth_scale <= 0.0:
             raise ValueError(f"Depth scale must be a positive, finite number, but got {depth_scale}.")
 
-        if not isinstance(depth_mask_dilation_iterations, int) or depth_mask_dilation_iterations < 0:
+        if depth_mask_dilation_iterations is not None and \
+                (not isinstance(depth_mask_dilation_iterations, int) or depth_mask_dilation_iterations < 0):
             raise ValueError(f"Depth mask dilation iterations must be a non-negative integer, "
                              f"but got {depth_mask_dilation_iterations}.")
 
