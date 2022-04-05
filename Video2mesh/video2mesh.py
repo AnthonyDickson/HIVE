@@ -35,6 +35,8 @@ from thirdparty.tsdf_fusion_python import fusion
 class Video2Mesh:
     """Converts a 2D video to a 3D video."""
 
+    mesh_folder = "mesh"
+
     def __init__(self, options: Video2MeshOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
@@ -93,7 +95,7 @@ class Video2Mesh:
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
 
-        mesh_export_path = pjoin(dataset.base_path, 'mesh')
+        mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform(dataset)
