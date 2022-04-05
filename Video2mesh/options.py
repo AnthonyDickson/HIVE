@@ -113,7 +113,7 @@ class DepthOptions(Options, ReprMixin):
                                          DepthEstimationModel.CVDE]
 
     def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE,
-                 depth_estimation_model=DepthEstimationModel.ADABINS, sampling_framerate=10):
+                 depth_estimation_model=DepthEstimationModel.ADABINS, sampling_framerate=-1):
         """
         :param max_depth: The maximum depth value in the depth maps.
         :param dtype: The type of the depth values.
@@ -136,8 +136,8 @@ class DepthOptions(Options, ReprMixin):
             # TODO: Figure out a clean way to apply max depth and to ensure that results that used a different
             #  max depth are overwritten.
 
-        if not isinstance(sampling_framerate, int) or sampling_framerate < 1:
-            raise ValueError(f"Sampling framerate must be a positive integer, but got {sampling_framerate}.")
+        if not isinstance(sampling_framerate, int) or (sampling_framerate < 1 and sampling_framerate != -1):
+            raise ValueError(f"Sampling framerate must be a positive integer or -1, but got {sampling_framerate}.")
 
         self.max_depth = max_depth
         self.depth_dtype = dtype
@@ -159,8 +159,9 @@ class DepthOptions(Options, ReprMixin):
                            choices=[model.name.lower() for model in DepthOptions.supported_depth_estimation_models],
                            default=DepthEstimationModel.ADABINS.name.lower())
         group.add_argument('--sampling_framerate', type=int,
-                           help='The number of frames to sample every second for the CVDE depth estimation method.',
-                           default=10)
+                           help='The number of frames to sample every second for the CVDE depth estimation method. '
+                                'Defaults to every frame (this may be very slow depending on the number of frames!)',
+                           default=-1)
 
     @staticmethod
     def from_args(args) -> 'DepthOptions':

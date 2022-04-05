@@ -1107,7 +1107,12 @@ class VTMDataset(DatasetBase):
             elif depth_estimation_model == DepthEstimationModel.LERES:
                 self._estimate_depth_leres(estimated_depth_path)
             elif depth_estimation_model == DepthEstimationModel.CVDE:
-                self._estimate_depth_cvde(estimated_depth_path, sampling_framerate=depth_options.sampling_framerate)
+                sampling_framerate = depth_options.sampling_framerate
+
+                if sampling_framerate == -1:
+                    sampling_framerate = self.fps
+
+                self._estimate_depth_cvde(estimated_depth_path, sampling_framerate=sampling_framerate)
             else:
                 raise RuntimeError(f"Unsupported depth estimation model '{depth_estimation_model.name}'.")
 
@@ -1239,16 +1244,21 @@ class VTMDataset(DatasetBase):
 
         # Extract frames
         parser = Video3dParamsParser()
-        args = [
+        base_args = [
             '--video_file', video_path,
             '--path', results_path,
             '--camera_model', "PINHOLE",
             '--camera_params', f"{self.fx}, {self.fy}, {self.cx}, {self.cy}",
             '--batch_size', str(2),
             '--num_epochs', str(40),
-            '--make_video',
-            '--op', 'extract_frames'
+            '--make_video'
         ]
+
+        if sampling_framerate == self.metadata.fps:
+            base_args += ['--colmap_path', self.path_to_colmap]
+
+        args = base_args + ['--op', 'extract_frames']
+
         params = parser.parse(args)
 
         dp = DatasetProcessor()
@@ -1268,7 +1278,7 @@ class VTMDataset(DatasetBase):
         probably_has_trained_model = os.path.isdir(weights_folder) and len(os.listdir(weights_folder)) == params.num_epochs
 
         if not probably_has_trained_model:
-            args[-1] = 'all'
+            args = base_args + ['--op', 'all']
             params = parser.parse(args)
             dp.process(params)
         else:
@@ -1404,7 +1414,7 @@ class VTMDataset(DatasetBase):
         if colmap_options.use_raw_pose:
             R_cmp[:, 0] *= -1.
 
-        refined_trajectory = np.eye(4)
+        refined_trajectory = np.zeros(shape=(len(R_cmp), R_cmp.shape[1] + t_cmp.shape[1]))
 
         refined_trajectory[:, :4] = R_cmp
         refined_trajectory[:, 4:] = t_cmp

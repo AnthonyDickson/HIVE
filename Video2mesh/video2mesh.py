@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import warnings
 from multiprocessing.pool import ThreadPool
 from os.path import join as pjoin
@@ -16,6 +17,7 @@ import time
 import tqdm
 import trimesh
 from PIL import Image
+from numpy.polynomial import Polynomial
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from trimesh.exchange.export import export_mesh
@@ -114,6 +116,13 @@ class Video2Mesh:
 
         self.write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
 
+        self._print_trajectory_stats(dataset)
+
+        if self.options.estimate_camera_params and \
+                self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION and \
+                self.options.refine_colmap_poses:
+            dataset.camera_trajectory = self._refine_colmap_poses(dataset)
+
         log("Creating foreground mesh(es)...")
         foreground_scene = self.create_scene(dataset)
 
@@ -148,6 +157,126 @@ class Video2Mesh:
 
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
+
+    def _print_trajectory_stats(self, dataset):
+        if self.options.estimate_camera_params and \
+                self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+            raw_bf_trajectory = np.loadtxt(pjoin(dataset.base_path, 'bundle_fusion', 'trajectory.txt'))
+
+            pose_mats = raw_bf_trajectory.reshape((-1, 4, 4))
+            rot_mats = pose_mats[:, :3, :3]
+            # Nx4 matrix where each row is a quaternion
+            R = Rotation.from_matrix(rot_mats).as_quat()
+            # For whatever reason, this gets the rotations to match up with the ground truth.
+            R *= [1, -1, 1, 1]
+            # Nx3 matrix where each row is a translation row vector
+            T = pose_mats[:, :3, 3]
+            # For whatever reason, this gets the position vectors to match up with the ground truth.
+            T *= [-1, 1, -1]
+
+            gt_trajectory = dataset._load_camera_parameters(load_ground_truth_data=True)[1]
+            cm_trajectory = dataset.camera_trajectory.copy()
+            bf_trajectory = np.hstack((R, T))
+
+            def normalise_traj(traj):
+                R = Rotation.from_quat(traj[:, :4])
+                R = (R[0].inv() * R).as_quat()
+                T = traj[:, 4:] - traj[0, 4:]
+                return np.hstack((R, T))
+
+            gt_trajectory = normalise_traj(gt_trajectory)
+            cm_trajectory = normalise_traj(cm_trajectory)
+            # The bf_trajectory is already normalised
+
+            scale_coeffs = [1, 1, 1]
+            shift_coeffs = [0, 0, 0]
+            row_mask = np.all(np.isfinite(bf_trajectory), axis=1)
+
+            for i in range(3):
+                axis = 4 + i
+                trunc_cm_trajectory = cm_trajectory[:len(bf_trajectory)][row_mask, axis].ravel()
+                trunc_bf_trajectory = bf_trajectory[row_mask, axis].ravel()
+                a, b = Polynomial.fit(trunc_cm_trajectory, trunc_bf_trajectory, 1)
+                scale_coeffs[i] = a
+                shift_coeffs[i] = b
+
+            log(f"Scale + Shift Coefficients: {scale_coeffs}, {shift_coeffs}")
+            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] - cm_trajectory[:, 4:])))
+            log(f"Error Before: {rmse:.2f}")
+            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] -
+                                             (scale_coeffs * cm_trajectory[:, 4:] + shift_coeffs))))
+            log(f"Error After: {rmse:.2f}")
+
+            def print_traj_stats(traj, name=None, norm=False, rotation=False):
+                if rotation:
+                    T_gt = gt_trajectory[:len(traj), :4].copy()
+                    T = traj[:, :4].copy()
+                else:
+                    T_gt = gt_trajectory[:len(traj), 4:].copy()
+                    T = traj[:, 4:].copy()
+
+                if not np.all(np.isfinite(T)):
+                    complete_rows = np.all(np.isfinite(T), axis=1)
+                    T_gt = T_gt[complete_rows]
+                    T = T[complete_rows]
+
+                    num_missing = (~complete_rows).sum()
+                    percent_missing = 100 * (num_missing / len(complete_rows))
+                    print(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
+                                  f" with NaN/inf values - these rows wil be excluded from the below stats.",
+                          file=sys.stderr)
+
+                if norm:
+                    if rotation:
+                        T = Rotation.from_quat(T)
+                        T = T * T[0].inv()
+                        T = T.as_quat()
+
+                        T_gt = Rotation.from_quat(T_gt)
+                        T_gt = T_gt * T_gt[0].inv()
+                        T_gt = T_gt.as_quat()
+                    else:
+                        T = (T - T.mean(axis=0)) / T.std(axis=0)
+                        T = T - T[0]
+
+                        T_gt = (T_gt - T_gt.mean(axis=0)) / T_gt.std(axis=0)
+                        T_gt = T_gt - T_gt[0]
+
+                if name:
+                    print(name)
+
+                rmse = np.sqrt(np.mean(np.square(T - T_gt), axis=0))
+
+                with np.printoptions(precision=3, suppress=True):
+                    print(f"T_0: {T[0]}")
+                    print(f"T_n: {T[-1]}")
+                    print(f"Min: {T.min(axis=0)}")
+                    print(f"Max: {T.max(axis=0)}")
+                    print(f"Range: {abs(T.max(axis=0) - T.min(axis=0))}")
+                    print(f"Error: {rmse}")
+                    print(f"Rel Error: {rmse / abs(T.max(axis=0) - T.min(axis=0))}")
+
+            for is_rotation in [False, True]:
+                if is_rotation:
+                    print("#=========================#")
+                    print("# Stats for Rotation Data #")
+                    print("#=========================#")
+                else:
+                    print("#============================#")
+                    print("# Stats for Translation Data #")
+                    print("#============================#")
+
+                print("Raw (No Normalisation)")
+                print_traj_stats(gt_trajectory[:self.num_frames], "Ground Truth", rotation=is_rotation)
+                print_traj_stats(cm_trajectory[:self.num_frames], "COLMAP", rotation=is_rotation)
+                print_traj_stats(bf_trajectory[:self.num_frames], "BundleFusion", rotation=is_rotation)
+                print()
+
+                print("Normalised")
+                print_traj_stats(gt_trajectory[:self.num_frames], "Ground Truth", rotation=is_rotation, norm=True)
+                print_traj_stats(cm_trajectory[:self.num_frames], "COLMAP", rotation=is_rotation, norm=True)
+                print_traj_stats(bf_trajectory[:self.num_frames], "BundleFusion", rotation=is_rotation, norm=True)
+                print()
 
     def _print_summary(self, foreground_scene, background_scene, foreground_scene_path, background_scene_path,
                        elapsed_time_seconds):
@@ -213,7 +342,8 @@ class Video2Mesh:
 
         return centering_transform
 
-    def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict, export_name: str):
+    def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
+                            export_name: str):
         storage_options = self.storage_options
 
         webxr_output_path = pjoin(self.options.webxr_path, export_name)
@@ -277,30 +407,71 @@ class Video2Mesh:
 
         return dataset
 
-    def _refine_colmap_poses(self):
+    def _refine_colmap_poses(self, dataset: VTMDataset):
         """
         Refine the pose data estimated with COLMAP with additional data from BundleFusion.
 
+        :param dataset: The dataset with the COLMAP and BundleFusion data.
         :return: The refined camera trajectory data.
         """
-        raise NotImplementedError
+        log("Refine COLMAP pose data.")
+        bundle_fusion_folder = pjoin(dataset.base_path, 'bundle_fusion')
+        bundle_fusion_trajectory_path = pjoin(bundle_fusion_folder, 'trajectory.txt')
 
-        refined_trajectory = np.eye(4)
+        if not os.path.isdir(bundle_fusion_folder):
+            raise RuntimeError(f"Could not open folder {bundle_fusion_folder}. "
+                               f"Have you set `--mesh_reconstruction_method bundle_fusion?")
 
-        dataset_path = self.storage_options.base_path
-        bundle_fusion_output_dir = pjoin(dataset_path, 'bundle_fusion')
-        trajectory_path = pjoin(bundle_fusion_output_dir, 'trajectory.txt')
-        bf_trajectory = np.loadtxt(trajectory_path)
+        if not os.path.isfile(bundle_fusion_trajectory_path):
+            raise RuntimeError(
+                f"Could not open the file {bundle_fusion_trajectory_path}. Have you run BundleFusion yet?")
 
-        rows_with_data = np.any(np.isfinite(bf_trajectory), axis=1)
-        # TODO: Scale COLMAP pose data with BundleFusion pose data. Could use sklearn's polyfit.
+        raw_bf_trajectory = np.loadtxt(bundle_fusion_trajectory_path)
 
-        bf_trajectory = bf_trajectory.reshape((-1, 4, 4))
-        rot_as_quat = Rotation.from_matrix(bf_trajectory[:, :3, :3]).as_quat()
+        pose_mats = raw_bf_trajectory.reshape((-1, 4, 4))
+        rot_mats = pose_mats[:, :3, :3]
+        # Nx4 matrix where each row is a quaternion
+        R = Rotation.from_matrix(rot_mats).as_quat()
+        # For whatever reason, this gets the rotations to match up with the ground truth.
+        R *= [1, -1, 1, 1]
+        # Nx3 matrix where each row is a translation row vector
+        T = pose_mats[:, :3, 3]
+        # For whatever reason, this gets the position vectors to match up with the ground truth.
+        T *= [-1, 1, -1]
 
-        # TODO: Interpolate missing poses
+        cm_trajectory = dataset.camera_trajectory.copy()
+        bf_trajectory = np.hstack((R, T))
 
-        return refined_trajectory
+        def normalise_traj(traj):
+            R = Rotation.from_quat(traj[:, :4])
+            R = (R[0].inv() * R).as_quat()
+            T = traj[:, 4:] - traj[0, 4:]
+            return np.hstack((R, T))
+
+        cm_trajectory = normalise_traj(cm_trajectory)
+
+        scale_coeffs = np.ones(shape=7)
+        shift_coeffs = np.zeros(shape=7)
+        row_mask = np.all(np.isfinite(bf_trajectory), axis=1)
+
+        for axis in range(4, 7):
+            trunc_cm_trajectory = cm_trajectory[:len(bf_trajectory)][row_mask, axis].ravel()
+            trunc_bf_trajectory = bf_trajectory[row_mask, axis].ravel()
+            a, b = Polynomial.fit(trunc_cm_trajectory, trunc_bf_trajectory, 1)
+            scale_coeffs[axis] = a
+            shift_coeffs[axis] = b
+
+        if True:
+            gt_trajectory = dataset._load_camera_parameters(load_ground_truth_data=True)[1]
+            gt_trajectory = normalise_traj(gt_trajectory)
+            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] - cm_trajectory[:, 4:])))
+            log(f"Error Before: {rmse:.2f}")
+
+            rmse = np.sqrt(
+                np.mean(np.square(gt_trajectory[:, 4:] - (scale_coeffs * cm_trajectory + shift_coeffs)[:, 4:])))
+            log(f"Error After: {rmse:.2f}")
+
+        return scale_coeffs * cm_trajectory + shift_coeffs
 
     def create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
                      static_background=False) -> trimesh.Scene:
@@ -464,7 +635,7 @@ class Video2Mesh:
 
             submap_size = bundling_config['s_submapSize']
             # the `+ submap_size` is to avoid 'off-by-one' like errors.
-            #
+
             bundling_config['s_maxNumImages'] = (num_frames + submap_size) // submap_size
             bundling_config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionBundlingConfig.txt')
             bundling_config.save(bundling_config_output_path)
