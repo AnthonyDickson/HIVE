@@ -16,7 +16,7 @@ class ReprMixin:
         return repr(self)
 
 
-class Options:
+class Options(ReprMixin):
     """
     Interface for objects that store options that can be initialised either programmatically or
     via command-line arguments.
@@ -42,17 +42,15 @@ class Options:
         raise NotImplementedError
 
 
-class StorageOptions(Options, ReprMixin):
+class StorageOptions(Options):
     """Options regarding storage of inputs and outputs."""
 
-    def __init__(self, base_path, output_folder='scene3d', overwrite_ok=False):
+    def __init__(self, base_path, overwrite_ok=False):
         """
         :param base_path: Path to the folder containing the RGB and depth image folders.'
-        :param output_folder: Name of the folder to save the results to (will be inside the folder `base_path`).
         :param overwrite_ok: Whether it is okay to replace old results.
         """
         self.base_path = base_path
-        self.output_folder = output_folder
         self.overwrite_ok = overwrite_ok
 
     @staticmethod
@@ -62,20 +60,12 @@ class StorageOptions(Options, ReprMixin):
         group.add_argument('--base_path', type=str,
                            help='Path to the folder containing the RGB and depth image folders.',
                            required=True)
-        group.add_argument('--output_folder', type=str,
-                           help='Name of the folder to save the results to (will be inside the folder `base_path`).',
-                           default='scene3d')
-
         group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
                            action='store_true')
 
     @staticmethod
     def from_args(args) -> 'StorageOptions':
-        return StorageOptions(
-            base_path=args.base_path,
-            output_folder=args.output_folder,
-            overwrite_ok=args.overwrite_ok
-        )
+        return StorageOptions(base_path=args.base_path, overwrite_ok=args.overwrite_ok)
 
 
 class DepthFormat(enum.Enum):
@@ -106,7 +96,7 @@ class DepthEstimationModel(enum.Enum):
             raise RuntimeError(f"No model called {name}, valid choices are: {list(choices.keys())}")
 
 
-class DepthOptions(Options, ReprMixin):
+class DepthOptions(Options):
     """Options for depth maps."""
 
     supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES,
@@ -188,7 +178,7 @@ class DepthOptions(Options, ReprMixin):
                             DepthEstimationModel.from_string(args.depth_estimation_model), args.sampling_framerate)
 
 
-class COLMAPOptions(Options, ReprMixin):
+class COLMAPOptions(Options):
     quality_choices = ('low', 'medium', 'high', 'extreme')
 
     def __init__(self, is_single_camera=True, dense=False, quality='high', use_raw_pose=False,
@@ -233,7 +223,7 @@ class COLMAPOptions(Options, ReprMixin):
         )
 
 
-class MeshDecimationOptions(Options, ReprMixin):
+class MeshDecimationOptions(Options):
     """Options for mesh decimation."""
 
     def __init__(self, num_vertices_background=2 ** 14, num_vertices_object=2 ** 10, max_error=0.001):
@@ -266,7 +256,7 @@ class MeshDecimationOptions(Options, ReprMixin):
         )
 
 
-class MaskDilationOptions(Options, ReprMixin):
+class MaskDilationOptions(Options):
     """Options for the function `dilate_mask`."""
 
     def __init__(self, num_iterations=3, dilation_filter=cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))):
@@ -292,7 +282,7 @@ class MaskDilationOptions(Options, ReprMixin):
         return MaskDilationOptions(num_iterations=args.dilate_mask_iter)
 
 
-class MeshFilteringOptions(Options, ReprMixin):
+class MeshFilteringOptions(Options):
     """Options for filtering mesh faces."""
 
     def __init__(self, max_pixel_distance=2, max_depth_distance=0.02, min_num_components=5):
@@ -465,6 +455,11 @@ class Video2MeshOptions(Options):
         group.add_argument('--estimate_camera_params', action='store_true',
                            help='Flag to indicate that camera intrinsic and extrinsic parameters estimated with COLMAP '
                                 'should be used instead of the ground truth parameters (if they exist).')
+        group.add_argument('--refine_colmap_poses',
+                           help="Whether to refine estimated pose data from COLMAP with pose data from BundleFusion. "
+                                "Note that this argument is only valid if the flag '--estimate_camera_params' is used "
+                                "and BundleFusion is the specified mesh reconstruction method.",
+                           action='store_true')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
                            default='thirdparty/webxr3dvideo/docs')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
@@ -479,6 +474,7 @@ class Video2MeshOptions(Options):
             num_frames=args.num_frames,
             estimate_depth=args.estimate_depth,
             estimate_camera_params=args.estimate_camera_params,
+            refine_colmap_poses=args.refine_colmap_poses,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url
         )
