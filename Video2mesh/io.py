@@ -1247,7 +1247,7 @@ class VTMDataset(DatasetBase):
             '--camera_model', "PINHOLE",
             '--camera_params', f"{self.fx}, {self.fy}, {self.cx}, {self.cy}",
             '--batch_size', str(2),
-            '--num_epochs', str(40),
+            '--num_epochs', str(20),
             '--make_video'
         ]
 
