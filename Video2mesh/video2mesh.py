@@ -4,15 +4,13 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import warnings
-from multiprocessing.pool import ThreadPool
 from os.path import join as pjoin
 from pathlib import Path
 
 import numpy as np
 import openmesh as om
-import psutil
+import sys
 import time
 import tqdm
 import trimesh
@@ -28,7 +26,7 @@ from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2imag
 from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
-from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log
+from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
 from thirdparty.tsdf_fusion_python import fusion
 
 
@@ -36,6 +34,7 @@ class Video2Mesh:
     """Converts a 2D video to a 3D video."""
 
     mesh_folder = "mesh"
+    bundle_fusion_folder = "bundle_fusion"
 
     def __init__(self, options: Video2MeshOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
@@ -225,8 +224,8 @@ class Video2Mesh:
                     num_missing = (~complete_rows).sum()
                     percent_missing = 100 * (num_missing / len(complete_rows))
                     log(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
-                          f" with NaN/inf values - these rows wil be excluded from the below stats.",
-                          file=sys.stderr)
+                        f" with NaN/inf values - these rows wil be excluded from the below stats.",
+                        file=sys.stderr)
 
                 if norm:
                     if rotation:
@@ -589,16 +588,15 @@ class Video2Mesh:
             return mesh
 
         log("Processing frame data...")
-        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
-        meshes = tqdm.tqdm(pool.imap(process_frame, range(num_frames)), total=num_frames)
+        meshes = tqdm_imap(process_frame, range(num_frames))
 
         for i, mesh in enumerate(meshes):
             scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene
 
-    @staticmethod
-    def _create_static_mesh(dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
+    @classmethod
+    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
         """
         Create a static mesh of the scene.
 
@@ -616,7 +614,7 @@ class Video2Mesh:
             dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
             dataset_path = os.path.abspath(dataset.base_path)
 
-            bundle_fusion_output_path = pjoin(dataset_path, 'bundle_fusion')
+            bundle_fusion_output_path = pjoin(dataset_path, cls.bundle_fusion_folder)
             os.makedirs(bundle_fusion_output_path, exist_ok=dataset.overwrite_ok)
 
             log("Configuring BundleFusion...")
@@ -649,7 +647,8 @@ class Video2Mesh:
                    dataset_path, dataset.masked_depth_folder]
             log_path = pjoin(bundle_fusion_output_path, 'log.txt')
 
-            log("Running BundleFusion...")
+            log(f"Running BundleFusion with command '{' '.join(cmd)}'")
+
             with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
                     open(log_path, mode='w') as f, \
                     tqdm.tqdm(total=num_frames) as progress_bar:
@@ -658,6 +657,11 @@ class Video2Mesh:
 
                     if line.startswith("processing frame ") and int(line.split()[-1][:-3]) <= num_frames:
                         progress_bar.update()
+                    elif line.lower().startswith("exiting early"):
+                        progress_bar.close()
+                        log("BundleFusion exited early, check the logs for more details. "
+                            "BundleFusion was likely unable to integrate all of the input frames.")
+                        break
 
             if p.returncode != 0:
                 raise RuntimeError(f"BundleFusion returned a non-zero code, "

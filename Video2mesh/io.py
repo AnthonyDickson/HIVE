@@ -30,8 +30,8 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from Video2mesh.geometry import pose_vec2mat, dilate_mask
-from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions, StaticMeshOptions
-from Video2mesh.utils import log
+from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
+from Video2mesh.utils import log, tqdm_imap
 from thirdparty.AdaBins.infer import InferenceHelper
 from thirdparty.colmap.scripts.python.read_write_model import read_model
 from thirdparty.consistent_depth.depth_fine_tuning import DepthFineTuner
@@ -1011,10 +1011,6 @@ class VTMDataset(DatasetBase):
         log(f"Creating masked depth maps at {masked_depth_path}")
 
         os.makedirs(masked_depth_path, exist_ok=True)
-        log("Create output folder")
-
-        pool = ThreadPool(processes=psutil.cpu_count(logical=False))
-        log("Create thread pool")
 
         def save_depth(i, depth_map, mask):
             binary_mask = mask > 0.0
@@ -1031,7 +1027,7 @@ class VTMDataset(DatasetBase):
 
         log(f"Writing masked depth to {masked_depth_path}...")
         args = list(zip(range(len(self)), self.depth_dataset, self.mask_dataset))
-        tqdm(pool.imap(save_depth_wrapper, args), total=len(args))
+        tqdm_imap(save_depth_wrapper, args)
 
         self.metadata.depth_mask_dilation_iterations = dilation_options.num_iterations
         self.metadata.save(self.path_to_metadata)
@@ -1276,7 +1272,8 @@ class VTMDataset(DatasetBase):
         depth_fine_tuner = DepthFineTuner(dp.out_dir, range(self.num_frames), params)
         weights_folder = pjoin(depth_fine_tuner.out_dir, 'checkpoints')
 
-        probably_has_trained_model = os.path.isdir(weights_folder) and len(os.listdir(weights_folder)) == params.num_epochs
+        probably_has_trained_model = os.path.isdir(weights_folder) and \
+                                     len(os.listdir(weights_folder)) == params.num_epochs
 
         if not probably_has_trained_model:
             args = base_args + ['--op', 'all']

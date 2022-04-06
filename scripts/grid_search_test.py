@@ -4,13 +4,12 @@ import json
 import os
 import shutil
 import traceback
-
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from os.path import join as pjoin
 
 import itertools
 import numpy as np
+import sys
 
 from Video2mesh.options import Video2MeshOptions, StorageOptions, DepthOptions, MeshFilteringOptions, \
     MaskDilationOptions, MeshDecimationOptions, COLMAPOptions, StaticMeshOptions
@@ -259,6 +258,14 @@ def main():
 
             trajectory = program.refine_colmap_poses(dataset)
             np.savetxt(output_trajectory_path, trajectory)
+
+        if reconstruction_method == MeshReconstructionType.BUNDLE_FUSION:
+            bundle_fusion_path = pjoin(dataset.base_path, program.bundle_fusion_folder)
+
+            shutil.copy(pjoin(bundle_fusion_path, 'log.txt'),
+                        pjoin(config_folder, 'bundle_fusion_log.txt'))
+            shutil.copy(pjoin(bundle_fusion_path, 'trajectory.txt'),
+                        pjoin(config_folder, 'bundle_fusion_trajectory.txt'))
 
         shutil.copy(dataset.path_to_metadata, pjoin(config_folder, dataset.metadata_filename))
         shutil.copytree(pjoin(dataset.base_path, program.mesh_folder), pjoin(config_folder, program.mesh_folder))

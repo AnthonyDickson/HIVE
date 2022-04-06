@@ -1,8 +1,10 @@
 import datetime
+from multiprocessing.pool import ThreadPool
 from typing import Optional
 
 import numpy as np
-import sys
+import psutil
+from tqdm import tqdm
 
 
 def validate_camera_parameter_shapes(K, R, t):
@@ -52,3 +54,27 @@ def num2str(num: Optional[int]):
 
 def log(message, prefix='', end='\n', file=None):
     print(f"{prefix}[{datetime.datetime.now().time()}] {message}", file=file, end=end)
+
+
+def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
+    """
+    Process args in parallel with a progress bar.
+
+    :param func: The function to apply to the given arguments.
+    :param args: List of arguments to proces.
+    :param num_processes: (optional) Number of processes to spawn.
+    :return: A list of the values returned by `func`.
+    """
+    pool = ThreadPool(processes=num_processes or psutil.cpu_count(logical=False))
+
+    results = []
+
+    # Not sure why, but the below line does not work as expected.
+    # It does not block, and you need to call pool.stop() -> pool.join() to force Python to wait until all jobs are
+    # completed. However, this introduces a new problem where the progress bar gets stuck at 0.
+    # There's something about looping over the tqdm wrapped iterable (perhaps the call to next(...)) that fixes this.
+    # tqdm(pool.imap(save_depth_wrapper, args), total=len(args))
+    for return_value in tqdm(pool.imap(func, args), total=len(args)):
+        results.append(return_value)
+
+    return results
