@@ -1271,11 +1271,10 @@ class VTMDataset(DatasetBase):
         # Run main algorithm
         depth_fine_tuner = DepthFineTuner(dp.out_dir, range(self.num_frames), params)
         weights_folder = pjoin(depth_fine_tuner.out_dir, 'checkpoints')
+        weights_path = pjoin(weights_folder, f"{params.num_epochs:04d}.pth")
+        has_trained_model = os.path.isdir(weights_folder) and os.path.isfile(weights_path)
 
-        probably_has_trained_model = os.path.isdir(weights_folder) and \
-                                     len(os.listdir(weights_folder)) == params.num_epochs
-
-        if not probably_has_trained_model:
+        if not has_trained_model:
             args = base_args + ['--op', 'all']
             params = parser.parse(args)
             dp.process(params)
@@ -1293,8 +1292,6 @@ class VTMDataset(DatasetBase):
 
         depth_map_index = 0
 
-        weights_folder = pjoin(depth_fine_tuner.out_dir, 'checkpoints')
-        weights_path = pjoin(weights_folder, sorted(os.listdir(weights_folder))[-1])
         model = get_depth_model(params.model_type)(model_path_override=weights_path)
         model.eval()
 
@@ -1334,14 +1331,17 @@ class VTMDataset(DatasetBase):
         # TODO: Sample subset of frames to speed up this step.
         processor = self._get_colmap_processor(colmap_options)
 
-        if not processor.probably_has_results:
-            processor.run()
-
+        def save_colmap_camera_parameters():
             camera_matrix, _ = processor.load_camera_params()
             camera_trajectory = self._adjust_colmap_poses(colmap_options)
 
             np.savetxt(self.path_to_estimated_camera_matrix, camera_matrix)
             np.savetxt(self.path_to_estimated_camera_trajectory, camera_trajectory)
+
+        if not processor.probably_has_results:
+            processor.run()
+
+        save_colmap_camera_parameters()
 
         self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=False)
         self._using_estimated_camera_parameters = True

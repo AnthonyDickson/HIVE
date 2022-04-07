@@ -134,60 +134,12 @@ def main():
 
     for (dataset, camera_param_source, depth_map_source, reconstruction_method) in \
             itertools.product(datasets, camera_param_sources, depth_map_sources, reconstruction_methods):
-        dataset_path = pjoin(args.data_path, dataset)
+        if camera_param_source == CameraParamsType.COLMAP_BUNDLE_FUSION and \
+                reconstruction_method != MeshReconstructionType.BUNDLE_FUSION:
+            # Skip invalid configs
+            continue
 
-        if not os.path.isdir(dataset_path):
-            raise RuntimeError(f"Could not find the folder {dataset_path}.")
-
-        config = get_default_config()
-        config['num_frames'] = 150
-        config['base_path'] = dataset_path
-
-        if camera_param_source == CameraParamsType.GROUND_TRUTH:
-            config['estimate_camera_params'] = False
-        elif camera_param_source == CameraParamsType.COLMAP:
-            config['estimate_camera_params'] = True
-        elif camera_param_source == CameraParamsType.COLMAP_BUNDLE_FUSION:
-            if reconstruction_method != MeshReconstructionType.BUNDLE_FUSION:
-                raise RuntimeError(
-                    f"Invalid configuration. The camera param source {camera_param_source.name} must be used with the "
-                    f"mesh reconstruction method {MeshReconstructionType.BUNDLE_FUSION.name}, "
-                    f"but got {reconstruction_method.name} instead."
-                )
-
-            config['estimate_camera_params'] = True
-            config['refine_colmap_poses'] = True
-        else:
-            raise RuntimeError(f"Unsupported camera param source {camera_param_source.name}.")
-
-        if depth_map_source == DepthMapSource.GROUND_TRUTH:
-            config['estimate_depth'] = False
-        elif depth_map_source == DepthMapSource.ADABINS:
-            config['estimate_depth'] = True
-            config['depth_estimation_model'] = 'adabins'
-        elif depth_map_source == DepthMapSource.CVDE:
-            config['estimate_depth'] = True
-            config['depth_estimation_model'] = 'cvde'
-            config['sampling_framerate'] = 6
-        else:
-            raise RuntimeError(f"Unsupported depth map source {depth_map_source.name}.")
-
-        if reconstruction_method == MeshReconstructionType.DEPTH_STATIC:
-            config['include_background'] = True
-            config['static_background'] = True
-        elif reconstruction_method == MeshReconstructionType.DEPTH:
-            config['include_background'] = True
-            config['static_background'] = False
-        elif reconstruction_method == MeshReconstructionType.TSDF_FUSION:
-            config['include_background'] = False
-            config['static_background'] = False
-            config['mesh_reconstruction_method'] = 'tsdf_fusion'
-        elif reconstruction_method == MeshReconstructionType.BUNDLE_FUSION:
-            config['include_background'] = False
-            config['static_background'] = False
-            config['mesh_reconstruction_method'] = 'bundle_fusion'
-        else:
-            raise RuntimeError(f"Unsupported reconstruction method {reconstruction_method.name}.")
+        config = create_config(args, camera_param_source, dataset, depth_map_source, reconstruction_method)
 
         config_name = f"{dataset}-{camera_param_source.name}-{depth_map_source.name}-{reconstruction_method.name}"
         config_folder = pjoin(results_folder, config_name)
@@ -235,40 +187,144 @@ def main():
                 continue
 
         log(f"Copying output to results folder...")
+        copy_artefacts(config_folder, program, camera_param_source, reconstruction_method)
 
-        with open(os.devnull, 'w') as f, redirect_stdout(f):
-            dataset = program.get_dataset()
+    create_summary(results_folder, configs)
 
-        output_matrix_path = pjoin(config_folder, dataset.camera_matrix_filename)
-        output_trajectory_path = pjoin(config_folder, dataset.camera_trajectory_filename)
 
-        if camera_param_source == CameraParamsType.GROUND_TRUTH:
-            shutil.copy(pjoin(dataset.base_path, dataset.camera_matrix_filename),
-                        output_matrix_path)
-            shutil.copy(pjoin(dataset.base_path, dataset.camera_trajectory_filename),
-                        output_trajectory_path)
-        elif camera_param_source == CameraParamsType.COLMAP:
-            shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_matrix_filename),
-                        output_matrix_path)
-            shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_trajectory_filename),
-                        output_trajectory_path)
-        elif camera_param_source == CameraParamsType.COLMAP_BUNDLE_FUSION:
-            shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_matrix_filename),
-                        output_matrix_path)
+def create_config(args, camera_param_source, dataset, depth_map_source, reconstruction_method):
+    dataset_path = pjoin(args.data_path, dataset)
 
-            trajectory = program.refine_colmap_poses(dataset)
-            np.savetxt(output_trajectory_path, trajectory)
+    if not os.path.isdir(dataset_path):
+        raise RuntimeError(f"Could not find the folder {dataset_path}.")
 
-        if reconstruction_method == MeshReconstructionType.BUNDLE_FUSION:
-            bundle_fusion_path = pjoin(dataset.base_path, program.bundle_fusion_folder)
+    config = get_default_config()
+    config['num_frames'] = 150
+    config['base_path'] = dataset_path
 
-            shutil.copy(pjoin(bundle_fusion_path, 'log.txt'),
-                        pjoin(config_folder, 'bundle_fusion_log.txt'))
-            shutil.copy(pjoin(bundle_fusion_path, 'trajectory.txt'),
-                        pjoin(config_folder, 'bundle_fusion_trajectory.txt'))
+    if camera_param_source == CameraParamsType.GROUND_TRUTH:
+        config['estimate_camera_params'] = False
+    elif camera_param_source == CameraParamsType.COLMAP:
+        config['estimate_camera_params'] = True
+    elif camera_param_source == CameraParamsType.COLMAP_BUNDLE_FUSION:
+        if reconstruction_method != MeshReconstructionType.BUNDLE_FUSION:
+            raise RuntimeError(
+                f"Invalid configuration. The camera param source {camera_param_source.name} must be used with the "
+                f"mesh reconstruction method {MeshReconstructionType.BUNDLE_FUSION.name}, "
+                f"but got {reconstruction_method.name} instead."
+            )
 
-        shutil.copy(dataset.path_to_metadata, pjoin(config_folder, dataset.metadata_filename))
-        shutil.copytree(pjoin(dataset.base_path, program.mesh_folder), pjoin(config_folder, program.mesh_folder))
+        config['estimate_camera_params'] = True
+        config['refine_colmap_poses'] = True
+    else:
+        raise RuntimeError(f"Unsupported camera param source {camera_param_source.name}.")
+    if depth_map_source == DepthMapSource.GROUND_TRUTH:
+        config['estimate_depth'] = False
+    elif depth_map_source == DepthMapSource.ADABINS:
+        config['estimate_depth'] = True
+        config['depth_estimation_model'] = 'adabins'
+    elif depth_map_source == DepthMapSource.CVDE:
+        config['estimate_depth'] = True
+        config['depth_estimation_model'] = 'cvde'
+        config['sampling_framerate'] = 6
+    else:
+        raise RuntimeError(f"Unsupported depth map source {depth_map_source.name}.")
+
+    if reconstruction_method == MeshReconstructionType.DEPTH_STATIC:
+        config['include_background'] = True
+        config['static_background'] = True
+    elif reconstruction_method == MeshReconstructionType.DEPTH:
+        config['include_background'] = True
+        config['static_background'] = False
+    elif reconstruction_method == MeshReconstructionType.TSDF_FUSION:
+        config['include_background'] = False
+        config['static_background'] = False
+        config['mesh_reconstruction_method'] = 'tsdf_fusion'
+    elif reconstruction_method == MeshReconstructionType.BUNDLE_FUSION:
+        config['include_background'] = False
+        config['static_background'] = False
+        config['mesh_reconstruction_method'] = 'bundle_fusion'
+    else:
+        raise RuntimeError(f"Unsupported reconstruction method {reconstruction_method.name}.")
+
+    return config
+
+
+def copy_artefacts(config_folder, program, camera_param_source, reconstruction_method):
+    with open(os.devnull, 'w') as f, redirect_stdout(f):
+        dataset = program.get_dataset()
+
+    output_matrix_path = pjoin(config_folder, dataset.camera_matrix_filename)
+    output_trajectory_path = pjoin(config_folder, dataset.camera_trajectory_filename)
+
+    if camera_param_source == CameraParamsType.GROUND_TRUTH:
+        shutil.copy(pjoin(dataset.base_path, dataset.camera_matrix_filename),
+                    output_matrix_path)
+        shutil.copy(pjoin(dataset.base_path, dataset.camera_trajectory_filename),
+                    output_trajectory_path)
+    elif camera_param_source == CameraParamsType.COLMAP:
+        shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_matrix_filename),
+                    output_matrix_path)
+        shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_trajectory_filename),
+                    output_trajectory_path)
+    elif camera_param_source == CameraParamsType.COLMAP_BUNDLE_FUSION:
+        shutil.copy(pjoin(dataset.base_path, dataset.estimated_camera_matrix_filename),
+                    output_matrix_path)
+
+        trajectory = program.refine_colmap_poses(dataset)
+        np.savetxt(output_trajectory_path, trajectory)
+
+    if reconstruction_method == MeshReconstructionType.BUNDLE_FUSION:
+        bundle_fusion_path = pjoin(dataset.base_path, program.bundle_fusion_folder)
+
+        shutil.copy(pjoin(bundle_fusion_path, 'log.txt'),
+                    pjoin(config_folder, 'bundle_fusion_log.txt'))
+        shutil.copy(pjoin(bundle_fusion_path, 'trajectory.txt'),
+                    pjoin(config_folder, 'bundle_fusion_trajectory.txt'))
+
+    shutil.copy(dataset.path_to_metadata, pjoin(config_folder, dataset.metadata_filename))
+    shutil.copytree(pjoin(dataset.base_path, program.mesh_folder), pjoin(config_folder, program.mesh_folder))
+
+
+def create_summary(results_folder, configs):
+    num_completed = 0
+
+    def is_bundle_fusion_complete(path):
+        bf_cam_traj_file = os.path.join(path, 'bundle_fusion_camera_trajectory.txt')
+
+        if os.path.isfile(bf_cam_traj_file):
+            gt_cam_traj_file = os.path.join(path, 'camera_trajectory.txt')
+
+            if not os.path.isfile(gt_cam_traj_file):
+                return False
+
+            with open(bf_cam_traj_file, 'r') as f:
+                num_lines_bf_traj = len(f.readlines())
+
+            with open(gt_cam_traj_file, 'r') as f:
+                num_lines_gt_traj = len(f.readlines())
+
+            return num_lines_bf_traj == num_lines_gt_traj
+
+        return True
+
+    summary_csv_path = os.path.join(results_folder, 'summary.csv')
+
+    with open(summary_csv_path, 'w') as f:
+        f.write(f"dataset,camera_param_source,depth_map_source,reconstruction_method,completed")
+        for config_name in configs.keys():
+            folder = os.path.join(results_folder, config_name)
+            num_files = len(os.listdir(folder))
+            complete = num_files > 2 and is_bundle_fusion_complete(folder)
+
+            # dataset, camera_param_source, depth_map_source, reconstruction_method = config_name.split('-')
+            f.write(','.join(config_name.split('-') + [str(complete)]))
+
+            if complete:
+                num_completed += 1
+
+    log(f"Wrote summary of which configs ran successfully to {summary_csv_path}")
+    log(f"{num_completed}/{len(configs)} runs completed ({num_completed / len(configs) * 100:.2f}%)")
 
 
 if __name__ == '__main__':

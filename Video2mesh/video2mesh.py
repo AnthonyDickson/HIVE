@@ -657,11 +657,6 @@ class Video2Mesh:
 
                     if line.startswith("processing frame ") and int(line.split()[-1][:-3]) <= num_frames:
                         progress_bar.update()
-                    elif line.lower().startswith("exiting early"):
-                        progress_bar.close()
-                        log("BundleFusion exited early, check the logs for more details. "
-                            "BundleFusion was likely unable to integrate all of the input frames.")
-                        break
 
             if p.returncode != 0:
                 raise RuntimeError(f"BundleFusion returned a non-zero code, "
