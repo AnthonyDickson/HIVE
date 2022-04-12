@@ -1,6 +1,8 @@
 import warnings
 
 import argparse
+from typing import Optional
+
 import cv2
 import enum
 import numpy as np
@@ -343,8 +345,8 @@ class StaticMeshOptions(Options):
     supported_reconstruction_methods = [MeshReconstructionMethod.TSDF_FUSION,
                                         MeshReconstructionMethod.BUNDLE_FUSION]
 
-    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
-                 depth_mask_dilation_iterations=32, sdf_volume_size=3.0, sdf_voxel_size=0.02):
+    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDF_FUSION, depth_mask_dilation_iterations=32,
+                 sdf_volume_size=3.0, sdf_voxel_size=0.02, sdf_num_voxels: Optional[int] = None):
         """
         :param reconstruction_method: The method to use for reconstructing the static mesh.
         :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
@@ -352,6 +354,9 @@ class StaticMeshOptions(Options):
         :param sdf_volume_size: The size of the SDF volume in cubic meters. This option has no effect for the
             reconstruction method `TSDF_FUSION` as it automatically infers the volume size from the input data.
         :param sdf_voxel_size: The size of a voxel in the SDF volume in cubic meters.
+        :param sdf_num_voxels: (optional) The desired number of voxels in the resulting voxel volume.
+            This option only has an effect for the reconstruction method `TSDF_FUSION`.
+            If specified, the `sdf_voxel_size` option will be ignored.
         """
         assert reconstruction_method in StaticMeshOptions.supported_reconstruction_methods, \
             f"Reconstruction method must be one of the following: " \
@@ -361,11 +366,14 @@ class StaticMeshOptions(Options):
             f"The depth mask dilation iterations must be a positive integer."
         assert sdf_volume_size > 0.0, f"Volume size must be a positive number, instead got {sdf_volume_size}"
         assert sdf_voxel_size > 0.0, f"Voxel size must be a positive number, instead got {sdf_voxel_size}"
+        assert sdf_num_voxels is None or (isinstance(sdf_num_voxels, int) and sdf_num_voxels > 0), \
+            f"Number of voxels number must be a positive integer or None, instead got {sdf_num_voxels}"
 
         self.reconstruction_method = reconstruction_method
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.sdf_volume_size = sdf_volume_size
         self.sdf_voxel_size = sdf_voxel_size
+        self.sdf_num_voxels = sdf_num_voxels
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -384,6 +392,10 @@ class StaticMeshOptions(Options):
                                 "size from the input data.", default=3.0)
         group.add_argument('--sdf_voxel_size', type=float,
                            help="The size of a voxel in the SDF volume in cubic meters.", default=0.02)
+        group.add_argument('--sdf_num_voxels', type=int,
+                           help="The desired number of voxels in the resulting voxel volume. "
+                                "This option only has an effect for the reconstruction method `TSDF_FUSION`. "
+                                "If specified, the `--sdf_voxel_size` option will be ignored.")
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'StaticMeshOptions':
@@ -391,7 +403,8 @@ class StaticMeshOptions(Options):
             reconstruction_method=MeshReconstructionMethod.from_string(args.mesh_reconstruction_method),
             depth_mask_dilation_iterations=args.depth_mask_dilation_iterations,
             sdf_volume_size=args.sdf_volume_size,
-            sdf_voxel_size=args.sdf_voxel_size
+            sdf_voxel_size=args.sdf_voxel_size,
+            sdf_num_voxels=args.sdf_num_voxels
         )
 
 

@@ -135,12 +135,13 @@ class Video2Mesh:
         # TODO: Change this so that the scene is transformed instead of the static mesh.
         # if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
         #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
-        #
-        #     if self.estimate_camera_params and self.options.refine_colmap_poses:
-        #         dataset.camera_trajectory = self._refine_colmap_poses()
 
-        # TODO: Compress background mesh? PLY + Draco?
         background_scene.apply_transform(centering_transform)
+
+        scene_centroid = self._get_centroid(foreground_scene, background_scene)
+
+        foreground_scene.apply_translation(-scene_centroid)
+        background_scene.apply_translation(-scene_centroid)
 
         foreground_scene_path = self._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
         background_scene_path = self._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
@@ -158,6 +159,22 @@ class Video2Mesh:
 
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
+
+    def _get_centroid(self, foreground_scene, background_scene):
+        """
+        Get the centroid of two scenes.
+
+        :return: The centre for each of the X, Y, and Z axes in a list.
+        """
+        fg_bounds = foreground_scene.bounds
+        bg_bounds = background_scene.bounds
+
+        scene_centroid = np.mean([
+            np.mean(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
+            np.mean(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
+        ], axis=0)
+
+        return scene_centroid
 
     def _print_trajectory_stats(self, dataset):
         if self.options.estimate_camera_params and \
@@ -701,12 +718,19 @@ class Video2Mesh:
             # ======================================================================================================== #
             # Integrate
             # ======================================================================================================== #
+            if options.sdf_num_voxels:
+                # actual_num_voxels = np.ceil(np.product((vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_voxel_size))
+                voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_num_voxels) ** (1 / 3)
+            else:
+                voxel_size = options.sdf_voxel_size
+
             # Initialize voxel volume
             log("Initializing voxel volume...")
-            tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=options.sdf_voxel_size)
+            tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=voxel_size)
 
             # Loop through RGB-D images and fuse them together
             t0_elapse = time.time()
+
             for i in range(num_frames):
                 log("Fusing frame %d/%d" % (i + 1, (num_frames)))
 

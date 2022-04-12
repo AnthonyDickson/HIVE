@@ -49,6 +49,7 @@ def get_default_config() -> dict:
         'depth_mask_dilation_iterations': 32,
         'sdf_volume_size': 10.0,
         'sdf_voxel_size': 0.02,
+        'sdf_num_voxels': 2**26,  # approx. 67M voxels, 10MB mesh file
         # COLMAP Options
         'multiple_cameras': False,
         'dense': False,
@@ -289,7 +290,7 @@ def copy_artefacts(config_folder, program, camera_param_source, reconstruction_m
 def create_summary(results_folder, configs):
     num_completed = 0
 
-    def is_bundle_fusion_complete(path):
+    def is_bundle_fusion_complete(path, num_frames):
         bf_cam_traj_file = os.path.join(path, 'bundle_fusion_camera_trajectory.txt')
 
         if os.path.isfile(bf_cam_traj_file):
@@ -304,21 +305,24 @@ def create_summary(results_folder, configs):
             with open(gt_cam_traj_file, 'r') as f:
                 num_lines_gt_traj = len(f.readlines())
 
-            return num_lines_bf_traj == num_lines_gt_traj
+            return num_lines_bf_traj == (num_lines_gt_traj if num_frames == -1 else num_frames)
 
         return True
 
     summary_csv_path = os.path.join(results_folder, 'summary.csv')
 
     with open(summary_csv_path, 'w') as f:
-        f.write(f"dataset,camera_param_source,depth_map_source,reconstruction_method,completed")
+        f.write(f"dataset,camera_param_source,depth_map_source,reconstruction_method,completed\n")
         for config_name in configs.keys():
             folder = os.path.join(results_folder, config_name)
-            num_files = len(os.listdir(folder))
-            complete = num_files > 2 and is_bundle_fusion_complete(folder)
+
+            has_mesh_folder = os.path.isdir(pjoin(folder, 'mesh'))
+            num_frames = int(configs[config_name]['num_frames'])
+
+            complete = has_mesh_folder and is_bundle_fusion_complete(folder, num_frames)
 
             # dataset, camera_param_source, depth_map_source, reconstruction_method = config_name.split('-')
-            f.write(','.join(config_name.split('-') + [str(complete)]))
+            f.write(','.join(config_name.split('-') + [str(complete)]) + '\n')
 
             if complete:
                 num_completed += 1
