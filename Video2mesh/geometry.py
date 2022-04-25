@@ -142,3 +142,100 @@ def dilate_mask(mask, dilation_options: MaskDilationOptions):
     mask = mask.astype(bool)
 
     return mask
+
+
+class Quaternion:
+    """Implements basic quaterion-quaternion and quaternion-vector operations."""
+    def __init__(self, values: np.ndarray):
+        """
+
+        :param values: The 4xN matrix of quaternions where each row is the x, y, z, and w components.
+        """
+        if len(values.shape) != 2 or values.shape[0] != 4:
+            raise ValueError(f"Invalid shape. Expected shape (4, N) but got {values.shape}.")
+
+        self.values = values
+
+    @property
+    def x(self):
+        return self.values[0]
+
+    @property
+    def y(self):
+        return self.values[1]
+
+    @property
+    def z(self):
+        return self.values[2]
+
+    @property
+    def w(self):
+        return self.values[3]
+
+    def __mul__(self, other):
+        if isinstance(other, Quaternion):
+            return Quaternion.multiply(self, other)
+        else:
+            raise TypeError(f"Cannot multiply a {self.__class__.__name__} with a {type(other)}")
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def conjugate(self) -> 'Quaternion':
+        """Get the conjugate of a quaternion (-x, -y, -z, w)."""
+        return Quaternion(np.array([-self.x, -self.y, -self.z, self.w]))
+
+    def inverse(self) -> 'Quaternion':
+        """
+        Get the inverse rotation (i.e. the conjugate).
+        Alias for `.conjugate()`.
+        :return: The inverse rotation quaternion.
+        """
+        return self.conjugate()
+
+    def normalize(self, tolerance=0.00001) -> 'Quaternion':
+        """
+        Normalise a quaternion.
+        :param tolerance:
+        :return: A unit quaternion.
+        """
+        values = self.values
+        norm = np.linalg.norm(values, ord=2, axis=0)
+
+        values = np.where(np.abs(norm - 1.0) > tolerance, values / norm, values)
+
+        return Quaternion(values)
+
+    @staticmethod
+    def multiply(q1: 'Quaternion', q2: 'Quaternion') -> 'Quaternion':
+        """
+        Multiply two quaternions together.
+
+        :param q1: The first quaternion to multiply.
+        :param q2: The second quaternion to multiply.
+        :return: The result of multiplying the two quaternions.
+        """
+        x1, y1, z1, w1 = q1.values
+        x2, y2, z2, w2 = q2.values
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 + y1 * w2 + z1 * x2 - x1 * z2
+        z = w1 * z2 + z1 * w2 + x1 * y2 - y1 * x2
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+
+        return Quaternion(np.array([x, y, z, w]))
+
+    def apply(self, v: np.ndarray) -> np.ndarray:
+        """
+        Apply the rotation to a vector.
+
+        :param v: The vector to rotate.
+        :return: The rotated vector.
+        """
+        assert len(v.shape) == 2 and v.shape[0] == 3
+
+        q = Quaternion(np.vstack((v, np.zeros(v.shape[1], dtype=v.dtype))))
+
+        return (self * q * self.conjugate()).values[:3, :]
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({repr(self.values)})"

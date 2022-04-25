@@ -7,13 +7,10 @@
     <mapping directory="$PROJECT_DIR$/thirdparty/colmap" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/monodepth/mannequin_challenge" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/monodepth/midas_v2" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/monodepth/monodepth2" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/OpticalFlowToolkit" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/colmap" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/colmap/doc/_build/html" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/flownet2" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/thirdparty/swin" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/tsdf_fusion_python" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/webxr3dvideo" vcs="Git" />
   </component>

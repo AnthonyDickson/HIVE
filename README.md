@@ -90,16 +90,25 @@ The Docker containers will, by default, bring up the python interpreter.
 All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
-docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu116 
+docker run --rm -gpus all -v $(pwd):/app -t eight0153/video2mesh:cu116 
 ```
 For example, if you wanted to run the CUDA enabled container: 
 ```shell
-docker run --rm -gpus all -v $(pwd)/data:/app/data -v $(pwd)/Video2mesh:/app/Video2mesh -t eight0153/video2mesh:cu116 -c "import torch; print(torch.cuda.is_available())"
+docker run --rm -gpus all -v $(pwd):/app -t eight0153/video2mesh:cu116 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ### Viewing the 3D Video
 Refer to the [WebXR repo](https://github.com/eight0153/webxr3dvideo).
 
+### Unit Tests
+You can run the unittest suite with the following :
+```shell
+python -m unittest discover $(pwd)/tests $(pwd)
+```
+or in Docker:
+```shell
+docker run --rm -gpus all -v $(pwd):/app -t eight0153/video2mesh:cu116 -m unittest discover -s /app/tests -t /app
+```
 ## Input Data Format
 This program accepts datasets in three formats:
 - TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
