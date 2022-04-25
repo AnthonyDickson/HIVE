@@ -112,7 +112,11 @@ def main():
     os.makedirs(results_folder)
 
     log("Creating master configuration file...")
-    datasets = ['rgbd_dataset_freiburg3_walking_xyz', 'rgbd_dataset_freiburg3_sitting_static']
+    datasets = [
+                'rgbd_dataset_freiburg3_walking_halfsphere', 'rgbd_dataset_freiburg3_walking_rpy',
+                'rgbd_dataset_freiburg3_walking_xyz',
+                'rgbd_dataset_freiburg3_sitting_xyz', 'rgbd_dataset_freiburg3_sitting_rpy',
+                'rgbd_dataset_freiburg3_sitting_halfsphere']
     camera_param_sources = CameraParamsType.get_all()
     depth_map_sources = DepthMapSource.get_all()
     reconstruction_methods = MeshReconstructionType.get_all()

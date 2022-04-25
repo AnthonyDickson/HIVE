@@ -189,43 +189,42 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     person_label = class_names.index('person')
     predictor = BatchPredictor(cfg)
 
+    log(f"Creating segmentation masks...")
     os.makedirs(mask_folder, exist_ok=overwrite_ok)
     i = 0
 
-    for image_batch in rgb_loader:
-        outputs = predictor(image_batch.numpy())
+    with tqdm(total=len(rgb_loader.dataset)) as progress_bar:
+        for image_batch in rgb_loader:
+            outputs = predictor(image_batch.numpy())
 
-        for output in outputs:
-            matching_masks = output['instances'].get('pred_classes') == person_label
-            people_masks = output['instances'].get('pred_masks')[matching_masks]
+            for output in outputs:
+                matching_masks = output['instances'].get('pred_classes') == person_label
+                people_masks = output['instances'].get('pred_masks')[matching_masks]
 
-            if for_colmap:
-                combined_masks = 255 * np.ones_like(image_batch[0].numpy(), dtype=np.uint8)
-                combined_masks = combined_masks[:, :, 0]
+                if for_colmap:
+                    combined_masks = 255 * np.ones_like(image_batch[0].numpy(), dtype=np.uint8)
+                    combined_masks = combined_masks[:, :, 0]
 
-                for mask in people_masks.cpu().numpy():
-                    combined_masks[mask] = 0
-            else:
-                combined_masks = np.zeros_like(image_batch[0].numpy(), dtype=np.uint8)
-                combined_masks = combined_masks[:, :, 0]
+                    for mask in people_masks.cpu().numpy():
+                        combined_masks[mask] = 0
+                else:
+                    combined_masks = np.zeros_like(image_batch[0].numpy(), dtype=np.uint8)
+                    combined_masks = combined_masks[:, :, 0]
 
-                for j, mask in enumerate(people_masks.cpu().numpy()):
-                    combined_masks[mask] = j + 1
+                    for j, mask in enumerate(people_masks.cpu().numpy()):
+                        combined_masks[mask] = j + 1
 
-            if filename_fmt:
-                output_filename = filename_fmt(i)
-            elif for_colmap:
-                output_filename = f"{rgb_loader.dataset.image_filenames[i]}.png"
-            else:
-                output_filename = f"{i:06d}.png"
+                if filename_fmt:
+                    output_filename = filename_fmt(i)
+                elif for_colmap:
+                    output_filename = f"{rgb_loader.dataset.image_filenames[i]}.png"
+                else:
+                    output_filename = f"{i:06d}.png"
 
-            Image.fromarray(combined_masks).convert('L').save(pjoin(mask_folder, output_filename))
+                Image.fromarray(combined_masks).convert('L').save(pjoin(mask_folder, output_filename))
 
-            i += 1
-
-        log(f"[{i:03,d}/{len(rgb_loader.dataset):03,d}] Creating segmentation masks...", prefix='\r', end='')
-
-    print()
+                i += 1
+                progress_bar.update()
 
 
 class COLMAPProcessor:
@@ -1762,7 +1761,7 @@ class Video2ImageFolder:
 
         frames = Video2ImageFolder._get_video_frames(video_path)
 
-        for i, frame in enumerate(frames):
+        for i, frame in tqdm(enumerate(frames)):
             filename = f"{i:06d}{output_ext}"
             frame_output_path = pjoin(output_path, filename)
 
@@ -1786,21 +1785,13 @@ class Video2ImageFolder:
         if not video.isOpened():
             raise RuntimeError(f"Could not open RGB video file: {video_path}")
 
-        num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        i = 0
-
         while video.grab():
             has_frame, frame = video.retrieve()
             if has_frame:
                 yield frame
-
-                i += 1
-                log(f"[{i:03d}/{num_frames:03d}] Loading video...", prefix='\r', end='')
             else:
                 break
 
-        print()
         video.release()
 
 
@@ -2041,9 +2032,16 @@ class StrayScannerAdaptor(DatasetAdaptor):
             _, _, tx, ty, tz, qx, qy, qz, qw = line
             trajectory.append((qx, qy, qz, qw, tx, ty, tz))
 
-        trajectory = np.ascontiguousarray(trajectory)
+        trajectory = np.asarray(trajectory)
+        # Adjust trajectory s.t. first pose is the identity
+        rotation = Rotation.from_quat(trajectory[:, :4])
+        rotation = (rotation[0].inv() * rotation).as_quat()
+        translation = trajectory[:, 4:] - trajectory[0, 4:]
 
-        return trajectory
+        trajectory[:, :4] = rotation
+        trajectory[:, 4:] = translation
+
+        return np.ascontiguousarray(trajectory)
 
     def _convert_video(self, target_resolution):
         """
@@ -2085,14 +2083,14 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
         def convert_depth_map(i, filename):
             depth_map_path = pjoin(source_depth_path, filename)
-            depth_map = np.load(depth_map_path)
+            depth_map = imageio.imread(depth_map_path)
 
             if depth_map.dtype != np.uint16:
                 raise RuntimeError(f"Expected 16-bit depth maps, got {depth_map.dtype}.")
 
             confidence_map_filename = f"{Path(filename).stem}.png"
             confidence_map_path = pjoin(confidence_path, confidence_map_filename)
-            confidence_map = cv2.imread(confidence_map_path, cv2.IMREAD_GRAYSCALE)
+            confidence_map = imageio.imread(confidence_map_path)
 
             depth_map[confidence_map < filter_level] = 0
 
@@ -2104,8 +2102,10 @@ class StrayScannerAdaptor(DatasetAdaptor):
             output_depth_map_path = pjoin(output_depth_path, f"{i:06d}.png")
             cv2.imwrite(output_depth_map_path, depth_map)
 
-        pool = ThreadPool(psutil.cpu_count(logical=False))
-        pool.starmap(convert_depth_map, enumerate(sorted(os.listdir(source_depth_path))))
+        def convert_depth_map_helper(args):
+            return convert_depth_map(*args)
+
+        tqdm_imap(convert_depth_map_helper, list(enumerate(sorted(os.listdir(source_depth_path)))))
 
 
 class UnrealDatasetInfo:

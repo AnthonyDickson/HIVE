@@ -12,7 +12,7 @@ import numpy as np
 import openmesh as om
 import sys
 import time
-import tqdm
+from tqdm import tqdm
 import trimesh
 from PIL import Image
 from numpy.polynomial import Polynomial
@@ -137,6 +137,9 @@ class Video2Mesh:
         #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
 
         background_scene.apply_transform(centering_transform)
+
+        if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+            background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
         scene_centroid = self._get_centroid(foreground_scene, background_scene)
 
@@ -668,7 +671,7 @@ class Video2Mesh:
 
             with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
                     open(log_path, mode='w') as f, \
-                    tqdm.tqdm(total=num_frames) as progress_bar:
+                    tqdm(total=num_frames) as progress_bar:
                 for line in p.stdout:
                     f.write(line)
 
@@ -998,50 +1001,48 @@ class Video2Mesh:
 
         return output_path
 
-    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, mesh: trimesh.Trimesh):
-        # TODO: Check if the below transform is always the correct fix for reconstructions regardless of dataset.
-        rgb = dataset.rgb_dataset[0][:, :, :3]
-        depth_map = dataset.depth_dataset[0]
-        pose = dataset.camera_trajectory[0]
-        mask_encoded = dataset.mask_dataset[0]
-        binary_mask = mask_encoded == 0
+    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, scene: trimesh.Scene):
+        pcd_bounds = np.zeros((2, 3), dtype=float)
+        i = 0
 
-        pose_matrix = pose_vec2mat(pose)
-        pose_matrix = np.linalg.inv(pose_matrix)
-        R = pose_matrix[:3, :3]
-        t = pose_matrix[:3, 3:]
+        for depth_map, pose, mask_encoded in \
+                tqdm(zip(dataset.depth_dataset, dataset.camera_trajectory, dataset.mask_dataset),
+                     total=self.num_frames):
+            if i >= self.num_frames:
+                break
+            else:
+                i += 1
 
-        colours, points3d = point_cloud_from_rgbd(rgb=rgb, depth=depth_map, mask=binary_mask,
-                                                  K=dataset.camera_matrix, R=R, t=t)
-        points3d_homogenous = np.ones(shape=(points3d.shape[0], 4))
-        points3d_homogenous[:, :3] = points3d
+            binary_mask = mask_encoded == 0
 
-        centering_transform = self._get_centering_transform(dataset)
-        points3d = (centering_transform @ points3d_homogenous.T).T[:, :3]
+            pose_matrix = pose_vec2mat(pose)
+            pose_matrix = np.linalg.inv(pose_matrix)
+            R = pose_matrix[:3, :3]
+            t = pose_matrix[:3, 3:]
 
-        rotation_transform = np.eye(4)
-        rotation = Rotation.from_euler('xyz', [180, 180, 0], degrees=True).as_matrix()
-        rotation_transform[:3, :3] = rotation
+            points3d = point_cloud_from_depth(depth_map, binary_mask, dataset.camera_matrix, R, t)
 
-        translation_transform = np.eye(4)
-        translation_transform[:3, 3] = -mesh.centroid
+            # Expand bounds
+            pcd_bounds[0] = np.min(np.vstack((pcd_bounds[0], points3d.min(axis=0))), axis=0)
+            pcd_bounds[1] = np.max(np.vstack((pcd_bounds[1], points3d.max(axis=0))), axis=0)
 
-        scale_transform = np.eye(4)
-        scale_transform[0, 0] = -1.
+        pcd_centroid = pcd_bounds.mean(axis=0)
 
-        aligned_mesh = mesh.copy()
-        aligned_mesh = aligned_mesh.apply_transform(rotation_transform @ translation_transform @ scale_transform)
+        aligned_scene = scene.copy()
 
-        sample_points = 2 ** 15  # TODO: Make number of mesh/pcd samples configurable via cli.
-        bf_sampled_points, _ = trimesh.sample.sample_surface(mesh, count=sample_points)
+        mirror = np.eye(4)
+        mirror[0, 0] = -1  # BundleFusion reconstruction is flipped horizontally, this flips it back.
+        aligned_scene.apply_transform(mirror)
 
-        # TODO: Make number of ICP iterations and stopping threshold configurable via cli.
-        transform, _, cost = trimesh.registration.icp(bf_sampled_points, points3d[sample_points::len(
-            points3d) // sample_points], max_iterations=40, threshold=1e-10, scale=False, reflection=False)
+        transform = np.eye(4)
+        transform[:3, :3] = Rotation.from_euler('xyz', [105., 0., -5.], degrees=True).as_matrix()
+        transform[:3, 3] = scene.centroid - pcd_centroid
 
-        aligned_mesh = aligned_mesh.apply_transform(transform)
+        aligned_scene.apply_transform(transform)
+        # Needed to fix (vertical?) offset.
+        aligned_scene.apply_translation([1.25, 2.0, 1.0])
 
-        return aligned_mesh
+        return aligned_scene
 
 
 def main():
