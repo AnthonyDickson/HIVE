@@ -9,6 +9,7 @@ from typing import Tuple, List, Optional
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 from Video2mesh.io import VTMDataset
 from Video2mesh.options import COLMAPOptions
@@ -379,20 +380,78 @@ class FeatureExtractor:
         log(f"Found {len(chunks)} groups consecutive of frames.")
 
 
+class FixedParameters(torch.nn.Module):
+    """The parameters used in the optimisation process that do not change, e.g. matched feature points, depth."""
+
+    def __init__(self, camera_matrix: np.ndarray, feature_set: FeatureSet, dtype=torch.float32):
+        """
+        :param camera_matrix: The 3x3 camera intrinsics matrix.
+        :param feature_set: The paired set of image feature data (frame index, match coordinates, depth).
+        :param dtype: The data type to convert the parameters to.
+        """
+        super().__init__()
+
+        def to_tensor(x):
+            x = np.asarray(x)
+            x = torch.from_numpy(x)
+            x = x.to(dtype)
+
+            return torch.nn.Parameter(x, requires_grad=False)
+
+        self.camera_matrix = to_tensor(camera_matrix)
+
+        self.index_i = to_tensor(feature_set.frame_i.index)
+        self.points_i = to_tensor(feature_set.frame_i.points)
+        self.depth_i = to_tensor(feature_set.frame_i.depth)
+
+        self.index_j = to_tensor(feature_set.frame_j.index)
+        self.points_j = to_tensor(feature_set.frame_j.points)
+        self.depth_j = to_tensor(feature_set.frame_j.depth)
+
+
+class OptimisationParameters(torch.nn.Module):
+    """The parameters subject to optimisation (camera poses)."""
+
+    def __init__(self, initial_camera_poses: np.ndarray, dtype=torch.float32):
+        """
+        :param initial_camera_poses: The initial guess for the camera poses where each row is in the
+            format [r_x, r_y, r_z, r_w, t_x, t_y, t_z] where r is a quaternion and t is a 3D position vector.
+        :param dtype: The data type to convert the parameters to.
+        """
+        super().__init__()
+
+        r, t = initial_camera_poses[:, :4], initial_camera_poses[:, 4:]
+        self.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True).to(dtype)
+        self.translation_vectors = torch.nn.Parameter(t, requires_grad=True).to(dtype)
+
+    def __len__(self):
+        """
+        :return: The number of optimisation parameters.
+        """
+        return sum([p.nelement() for p in self.parameters()])
+
+    def to_trajectory(self) -> np.ndarray:
+        """Convert the optimisation parameters to a (N, 7) NumPy array."""
+        r = self.rotation_quaternions.detach().cpu().numpy()
+        t = self.translation_vectors.detach().cpu().numpy()
+
+        return np.hstack((r, t))
+
+
 class PoseOptimiser:
     def __init__(self, dataset: VTMDataset):
         self.dataset = dataset
 
     def run(self, frame_sampling=FrameSamplingMode.HIERARCHICAL, mask_features=True,
-            min_features_per_frame=20, max_features_per_frame=2048):
+            min_features_per_frame=20, max_features_per_frame: Optional[int] = 2048):
         frame_pairs = self.sample_frame_pairs(frame_sampling)
         feature_set = self.extract_feature_points(frame_pairs, min_features_per_frame, max_features_per_frame,
                                                   mask_features)
-        fixed_parameters = self.get_fixed_parameters(feature_set)
-        self.get_optimisation_parameters()
-        self.optimise_pose_data()
+        fixed_parameters = FixedParameters(self.dataset.camera_matrix.copy(), feature_set)
+        optimisation_parameters = OptimisationParameters(self.dataset.camera_trajectory.copy())
+        optimised_camera_trajectory = self.optimise_pose_data(fixed_parameters, optimisation_parameters)
 
-        return self.dataset.camera_matrix, self.dataset.camera_trajectory
+        return optimised_camera_trajectory
 
     def sample_frame_pairs(self, frame_sampling_mode: FrameSamplingMode) -> FramePairs:
         """
@@ -437,15 +496,12 @@ class PoseOptimiser:
 
         return feature_extractor.extract_feature_points()
 
-    def get_fixed_parameters(self, feature_set: FeatureSet):
-        # TODO: write the rest of this function :)
-        pass
+    def optimise_pose_data(self, fixed_parameters: FixedParameters,
+                           optimisation_parameters: OptimisationParameters) -> np.ndarray:
 
-    def get_optimisation_parameters(self):
-        pass
+        # TODO: The rest of the optimisation algorithm.
 
-    def optimise_pose_data(self):
-        pass
+        return optimisation_parameters.to_trajectory()
 
 
 def main():
@@ -462,7 +518,7 @@ def main():
     dataset.create_or_find_masks()
 
     optimiser = PoseOptimiser(dataset)
-    camera_matrix, camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=4096)
+    camera_matrix, camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=8192)
 
 
 if __name__ == '__main__':
