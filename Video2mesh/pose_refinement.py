@@ -10,12 +10,14 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from Video2mesh.io import VTMDataset
 from Video2mesh.options import COLMAPOptions
 from Video2mesh.utils import tqdm_imap, log
 
 
+# noinspection PyArgumentList
 class FrameSamplingMode(enum.Enum):
     # All unique pairs of frames
     EXHAUSTIVE = enum.auto()
@@ -268,7 +270,8 @@ class FeatureExtractor:
 
         return points_i, points_j, depth_i, depth_j, matches_mask
 
-    def _filter_matches_ransac(self, points_i, points_j, depth_i, depth_j, matches_mask):
+    def _filter_matches_ransac(self, points_i, points_j, depth_i, depth_j, matches_mask) -> \
+            Tuple[list, list, list, list, list]:
         """
         Filter candidate matches with RANSAC.
 
@@ -293,12 +296,12 @@ class FeatureExtractor:
         matches_mask = np.asarray(matches_mask)
         accepted_match_indices = np.argwhere((matches_mask == [1, 0]).all(axis=1))
         matches_mask[accepted_match_indices[is_outlier]] = [0, 0]
-        matches_mask = matches_mask.tolist()
+        matches_mask = list(matches_mask)
 
-        points_i = points_i[is_inlier].tolist()
-        points_j = points_j[is_inlier].tolist()
-        depth_i = depth_i[is_inlier].tolist()
-        depth_j = depth_j[is_inlier].tolist()
+        points_i = list(points_i[is_inlier])
+        points_j = list(points_j[is_inlier])
+        depth_i = list(depth_i[is_inlier])
+        depth_j = list(depth_j[is_inlier])
 
         return points_i, points_j, depth_i, depth_j, matches_mask
 
@@ -380,6 +383,15 @@ class FeatureExtractor:
         log(f"Found {len(chunks)} groups consecutive of frames.")
 
 
+class FeatureDataTorch(torch.nn.Module):
+    def __init__(self, index, points, depth):
+        super().__init__()
+
+        self.index = torch.nn.Parameter(index, requires_grad=False)
+        self.points = torch.nn.Parameter(points, requires_grad=False)
+        self.depth = torch.nn.Parameter(depth, requires_grad=False)
+
+
 class FixedParameters(torch.nn.Module):
     """The parameters used in the optimisation process that do not change, e.g. matched feature points, depth."""
 
@@ -391,22 +403,22 @@ class FixedParameters(torch.nn.Module):
         """
         super().__init__()
 
-        def to_tensor(x):
+        def to_tensor(x, data_type=dtype):
             x = np.asarray(x)
             x = torch.from_numpy(x)
-            x = x.to(dtype)
+            x = x.to(data_type)
 
-            return torch.nn.Parameter(x, requires_grad=False)
+            return x
+
+        def to_tensor_feature_data(feature_data: FeatureData) -> FeatureDataTorch:
+            return FeatureDataTorch(index=to_tensor(feature_data.index, data_type=torch.long),
+                                    points=to_tensor(feature_data.points),
+                                    depth=to_tensor(feature_data.depth))
 
         self.camera_matrix = to_tensor(camera_matrix)
 
-        self.index_i = to_tensor(feature_set.frame_i.index)
-        self.points_i = to_tensor(feature_set.frame_i.points)
-        self.depth_i = to_tensor(feature_set.frame_i.depth)
-
-        self.index_j = to_tensor(feature_set.frame_j.index)
-        self.points_j = to_tensor(feature_set.frame_j.points)
-        self.depth_j = to_tensor(feature_set.frame_j.depth)
+        self.frame_i = to_tensor_feature_data(feature_set.frame_i)
+        self.frame_j = to_tensor_feature_data(feature_set.frame_j)
 
 
 class OptimisationParameters(torch.nn.Module):
@@ -420,9 +432,13 @@ class OptimisationParameters(torch.nn.Module):
         """
         super().__init__()
 
+        def to_param(a):
+            a = torch.tensor(a, dtype=dtype)
+            return torch.nn.Parameter(a, requires_grad=True)
+
         r, t = initial_camera_poses[:, :4], initial_camera_poses[:, 4:]
-        self.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True).to(dtype)
-        self.translation_vectors = torch.nn.Parameter(t, requires_grad=True).to(dtype)
+        self.rotation_quaternions = to_param(r)
+        self.translation_vectors = to_param(t)
 
     def __len__(self):
         """
@@ -438,6 +454,141 @@ class OptimisationParameters(torch.nn.Module):
         return np.hstack((r, t))
 
 
+class EarlyStopping:
+    """A callback to keep track whether training has stagnated."""
+
+    def __init__(self, patience=10, min_difference=0.0):
+        """
+        :param patience: The number of steps where the loss has not decreased more than `min_difference` before the
+            flag `should_stop` is set.
+        :param min_difference: The smallest change between the current loss and the best loss in the previous `patience`
+            number of steps where training is not considered to have stagnated.
+        """
+        self.patience = patience
+        self.min_difference = min_difference
+
+        self.best_loss = float('inf')
+        self.calls_since_last_best = 0
+
+        self.should_stop = False
+
+    def step(self, loss) -> bool:
+        """
+        Update the `should_stop` flag based on the current loss.
+        :param loss: The loss for the current training step.
+        :return: Whether training should stop.
+        """
+        loss = loss.detach().item()
+
+        if loss < self.best_loss and abs(loss - self.best_loss) > self.min_difference:
+            self.best_loss = loss
+            self.calls_since_last_best = 0
+        else:
+            self.calls_since_last_best += 1
+
+        if self.calls_since_last_best > self.patience:
+            self.should_stop = True
+
+        return self.should_stop
+
+
+class Quaternion:
+    """Implements basic quaterion-quaternion and quaternion-vector operations."""
+
+    def __init__(self, values: torch.Tensor):
+        """
+        :param values: The 4xN matrix of quaternions where the rows are the x, y, z, and w components.
+        """
+        if len(values.shape) != 2 or values.shape[0] != 4:
+            raise ValueError(f"Invalid shape. Expected shape (4, N) but got {values.shape}.")
+
+        self.values = values
+
+    @property
+    def x(self):
+        return self.values[0]
+
+    @property
+    def y(self):
+        return self.values[1]
+
+    @property
+    def z(self):
+        return self.values[2]
+
+    @property
+    def w(self):
+        return self.values[3]
+
+    def __mul__(self, other):
+        if isinstance(other, Quaternion):
+            return Quaternion.multiply(self, other)
+        else:
+            raise TypeError(f"Cannot multiply a {self.__class__.__name__} with a {type(other)}")
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def conjugate(self) -> 'Quaternion':
+        """Get the conjugate of a quaternion (-x, -y, -z, w)."""
+        return Quaternion(torch.vstack((-self.x, -self.y, -self.z, self.w)))
+
+    def inverse(self) -> 'Quaternion':
+        """
+        Get the inverse rotation (i.e. the conjugate).
+        Alias for `.conjugate()`.
+        :return: The inverse rotation quaternion.
+        """
+        return self.conjugate()
+
+    def normalize(self, tolerance=0.00001) -> 'Quaternion':
+        """
+        Normalise a quaternion.
+        :param tolerance:
+        :return: A unit quaternion.
+        """
+        values = self.values
+        norm = torch.linalg.norm(values, ord=2, dim=0)
+        # noinspection PyTypeChecker
+        values = torch.where(torch.abs(norm - 1.0) > tolerance, values / norm, values)
+
+        return Quaternion(values)
+
+    @staticmethod
+    def multiply(q1: 'Quaternion', q2: 'Quaternion') -> 'Quaternion':
+        """
+        Multiply two quaternions together.
+
+        :param q1: The first quaternion to multiply.
+        :param q2: The second quaternion to multiply.
+        :return: The result of multiplying the two quaternions.
+        """
+        x1, y1, z1, w1 = q1.values
+        x2, y2, z2, w2 = q2.values
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 + y1 * w2 + z1 * x2 - x1 * z2
+        z = w1 * z2 + z1 * w2 + x1 * y2 - y1 * x2
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+
+        return Quaternion(torch.vstack((x, y, z, w)))
+
+    def apply(self, v: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the rotation to a vector.
+
+        :param v: The vector to rotate in (3, N) format.
+        :return: The rotated vector in (3, N) format.
+        """
+        assert len(v.shape) == 2 and v.shape[0] == 3
+
+        q = Quaternion(torch.vstack((v, torch.zeros(v.shape[1], dtype=v.dtype, device=v.device))))
+
+        return (self * q * self.conjugate()).values[:3, :]
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({repr(self.values)})"
+
+
 class PoseOptimiser:
     def __init__(self, dataset: VTMDataset):
         self.dataset = dataset
@@ -449,7 +600,8 @@ class PoseOptimiser:
                                                   mask_features)
         fixed_parameters = FixedParameters(self.dataset.camera_matrix.copy(), feature_set)
         optimisation_parameters = OptimisationParameters(self.dataset.camera_trajectory.copy())
-        optimised_camera_trajectory = self.optimise_pose_data(fixed_parameters, optimisation_parameters)
+        optimised_camera_trajectory = self.optimise_pose_data(fixed_parameters, optimisation_parameters,
+                                                              learning_rate=1e-2)
 
         return optimised_camera_trajectory
 
@@ -497,11 +649,76 @@ class PoseOptimiser:
         return feature_extractor.extract_feature_points()
 
     def optimise_pose_data(self, fixed_parameters: FixedParameters,
-                           optimisation_parameters: OptimisationParameters) -> np.ndarray:
+                           optimisation_parameters: OptimisationParameters,
+                           num_epochs=10000,
+                           learning_rate=1e-4, min_loss_delta=1e-4,
+                           lr_scheduler_patience=250, early_stopping_patience=500) -> np.ndarray:
+        fixed_parameters.cuda()
+        optimisation_parameters.cuda()
 
-        # TODO: The rest of the optimisation algorithm.
+        optimiser = torch.optim.Adam(optimisation_parameters.parameters(), lr=learning_rate)
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, patience=lr_scheduler_patience, mode='min',
+                                                                  threshold=min_loss_delta, threshold_mode='abs')
+        early_stopping = EarlyStopping(patience=early_stopping_patience, min_difference=min_loss_delta)
+
+        progress_bar = tqdm(range(num_epochs))
+
+        for _ in progress_bar:
+            optimiser.zero_grad()
+            residuals = self.calculate_residuals(fixed_parameters, optimisation_parameters)
+            # noinspection PyTypeChecker
+            loss = torch.mean(torch.log(1 + torch.linalg.norm(residuals, ord=2, dim=1)))
+            loss.backward()
+
+            optimiser.step()
+            lr_scheduler.step(loss)
+            early_stopping.step(loss)
+
+            loss_value = loss.detach().cpu().item()
+
+            lr = float('nan')
+
+            for param_group in optimiser.param_groups:
+                lr = param_group['lr']
+                break
+
+            progress_bar.set_postfix_str(f"Loss: {loss_value:<7.4f} - LR: {lr:,.2e}")
 
         return optimisation_parameters.to_trajectory()
+
+    def calculate_residuals(self, fixed_parameters: FixedParameters,
+                            optimisation_parameters: OptimisationParameters) -> torch.Tensor:
+        p = self.project_to_world_coords(fixed_parameters.frame_i,
+                                         fixed_parameters.camera_matrix,
+                                         optimisation_parameters)
+        q = self.project_to_world_coords(fixed_parameters.frame_j,
+                                         fixed_parameters.camera_matrix,
+                                         optimisation_parameters)
+
+        return p - q
+
+    def project_to_world_coords(self, frame_data: FeatureDataTorch, camera_matrix: torch.Tensor,
+                                pose_data: OptimisationParameters) -> torch.Tensor:
+        indices = frame_data.index
+        points = frame_data.points
+        depth = frame_data.depth
+
+        u, v = points.T
+        f_x, f_y, c_x, c_y = camera_matrix[0, 0], camera_matrix[1, 1], camera_matrix[0, 2], camera_matrix[1, 2]
+
+        points_camera_space = torch.vstack(
+            (
+                (u - c_x) * depth / f_x,
+                (v - c_y) * depth / f_y,
+                depth
+            )
+        )
+
+        r = pose_data.rotation_quaternions[indices].T
+        t = pose_data.translation_vectors[indices].T
+        points_world_space = Quaternion(r).normalize().conjugate().apply(points_camera_space - t)
+
+        return points_world_space
 
 
 def main():
@@ -518,7 +735,13 @@ def main():
     dataset.create_or_find_masks()
 
     optimiser = PoseOptimiser(dataset)
-    camera_matrix, camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=8192)
+    camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=8192)
+    # TODO: Complete docstrings.
+    # TODO: Cache image feature data and frame pairs used to generate the data
+    # TODO: Interpolate frames that were not optimised (i.e. weren't included in any frame pairs.
+    # TODO: Saved optimised trajectory
+    # TODO: Create mesh with TSDFFusion using the original trajectory
+    # TODO: Create mesh with TSDFFusion using the optimised trajectory
 
 
 if __name__ == '__main__':
