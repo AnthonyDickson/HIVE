@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import torch
 from scipy.spatial.transform import Rotation
 
 from Video2mesh.options import MaskDilationOptions
@@ -8,9 +9,9 @@ from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 def pose_vec2mat(pose):
     """
-    Convert a transformation 6-vector [r, t] to a (4, 4) homogenous transformation matrix.
+    Convert a transformation 7-vector [r, t] to a (4, 4) homogenous transformation matrix.
 
-    :param pose: The 6-vector to convert.
+    :param pose: The 7-vector to convert.
     :return: The (4, 4) homogeneous transformation matrix.
     """
     validate_shape(pose, 'pose', expected_shape=(7,))
@@ -59,8 +60,8 @@ def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scal
 
     return points
 
-def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
 
+def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
     points2d = np.array([U, V]).T
@@ -71,6 +72,7 @@ def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), 
     colour[:, 3] = 255
 
     return colour, points
+
 
 def world2image(points, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0, dtype=np.int32):
     """
@@ -146,10 +148,10 @@ def dilate_mask(mask, dilation_options: MaskDilationOptions):
 
 class Quaternion:
     """Implements basic quaterion-quaternion and quaternion-vector operations."""
-    def __init__(self, values: np.ndarray):
-        """
 
-        :param values: The 4xN matrix of quaternions where each row is the x, y, z, and w components.
+    def __init__(self, values: torch.Tensor):
+        """
+        :param values: The 4xN matrix of quaternions where the rows are the x, y, z, and w components.
         """
         if len(values.shape) != 2 or values.shape[0] != 4:
             raise ValueError(f"Invalid shape. Expected shape (4, N) but got {values.shape}.")
@@ -183,7 +185,7 @@ class Quaternion:
 
     def conjugate(self) -> 'Quaternion':
         """Get the conjugate of a quaternion (-x, -y, -z, w)."""
-        return Quaternion(np.array([-self.x, -self.y, -self.z, self.w]))
+        return Quaternion(torch.vstack((-self.x, -self.y, -self.z, self.w)))
 
     def inverse(self) -> 'Quaternion':
         """
@@ -193,16 +195,16 @@ class Quaternion:
         """
         return self.conjugate()
 
-    def normalize(self, tolerance=0.00001) -> 'Quaternion':
+    def normalise(self, tolerance=0.00001) -> 'Quaternion':
         """
         Normalise a quaternion.
         :param tolerance:
         :return: A unit quaternion.
         """
         values = self.values
-        norm = np.linalg.norm(values, ord=2, axis=0)
-
-        values = np.where(np.abs(norm - 1.0) > tolerance, values / norm, values)
+        norm = torch.linalg.norm(values, ord=2, dim=0)
+        # noinspection PyTypeChecker
+        values = torch.where(torch.abs(norm - 1.0) > tolerance, values / norm, values)
 
         return Quaternion(values)
 
@@ -222,18 +224,18 @@ class Quaternion:
         z = w1 * z2 + z1 * w2 + x1 * y2 - y1 * x2
         w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
 
-        return Quaternion(np.array([x, y, z, w]))
+        return Quaternion(torch.vstack((x, y, z, w)))
 
-    def apply(self, v: np.ndarray) -> np.ndarray:
+    def apply(self, v: torch.Tensor) -> torch.Tensor:
         """
         Apply the rotation to a vector.
 
-        :param v: The vector to rotate.
-        :return: The rotated vector.
+        :param v: The vector to rotate in (3, N) format.
+        :return: The rotated vector in (3, N) format.
         """
         assert len(v.shape) == 2 and v.shape[0] == 3
 
-        q = Quaternion(np.vstack((v, np.zeros(v.shape[1], dtype=v.dtype))))
+        q = Quaternion(torch.vstack((v, torch.zeros(v.shape[1], dtype=v.dtype, device=v.device))))
 
         return (self * q * self.conjugate()).values[:3, :]
 

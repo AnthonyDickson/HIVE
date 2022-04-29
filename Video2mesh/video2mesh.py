@@ -12,17 +12,16 @@ import numpy as np
 import openmesh as om
 import sys
 import time
-from tqdm import tqdm
 import trimesh
 from PIL import Image
 from numpy.polynomial import Polynomial
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
+from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
 from trimesh.exchange.ply import load_ply
 
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask, \
-    point_cloud_from_rgbd
+from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask
 from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
@@ -734,9 +733,9 @@ class Video2Mesh:
             # Loop through RGB-D images and fuse them together
             t0_elapse = time.time()
 
-            for i in range(num_frames):
-                log("Fusing frame %d/%d" % (i + 1, (num_frames)))
+            log("Fusing frames...")
 
+            for i in tqdm(range(num_frames)):
                 # Read RGB-D image and camera pose
                 color_image = dataset.rgb_dataset[i]
                 mask = dataset.mask_dataset[i]

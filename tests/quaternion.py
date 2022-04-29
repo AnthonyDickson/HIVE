@@ -1,20 +1,29 @@
 import unittest
 
 import numpy as np
+from numpy import asarray as to_npy
 from scipy.spatial.transform import Rotation
+from torch import tensor as to_tensor
 
 from Video2mesh.geometry import Quaternion
+
+
+def quat_to_scipy(quat: Quaternion) -> Rotation:
+    return Rotation.from_quat(to_npy(quat.values.T))
+
+
+def scipy_to_quat(rotation: Rotation) -> Quaternion:
+    return Quaternion(to_tensor(rotation.as_quat().T))
 
 
 class QuaternionTests(unittest.TestCase):
     def test_normalise(self):
         q = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True)
-        quat = Quaternion(q.as_quat().T)
-
         # SciPy normalises rotations by default.
         q_norm = q.as_rotvec()
-        quat_norm = quat.normalize()
-        quat_norm = Rotation.from_quat(quat_norm.values.T).as_rotvec()
+
+        quat = scipy_to_quat(q)
+        quat_norm = quat_to_scipy(quat.normalise()).as_rotvec()
 
         np.testing.assert_allclose(q_norm, quat_norm)
 
@@ -22,9 +31,8 @@ class QuaternionTests(unittest.TestCase):
         q = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True)
         q_conjugate = q.inv()
 
-        quat = Quaternion(q.as_quat().T)
-        quat_conjugate = quat.conjugate().values.T
-        quat_conjugate = Rotation.from_quat(quat_conjugate)
+        quat = scipy_to_quat(q)
+        quat_conjugate = quat_to_scipy(quat.conjugate())
 
         # Have to use .as_rotvec(...) since SciPy's Rotation inverts quaternions by negating the scalar w, instead of
         # the xyz components.
@@ -32,25 +40,25 @@ class QuaternionTests(unittest.TestCase):
 
     def test_multiplying_by_conjugate_gives_identity(self):
         q = Rotation.from_euler('xyz', [[90, 0, 0]], degrees=True)
-        quat = Quaternion(q.as_quat().T)
+        quat = scipy_to_quat(q)
 
-        quat_by_conj = (quat * quat.conjugate()).values
+        quat_by_conj = to_npy((quat * quat.conjugate()).values)
 
         np.testing.assert_allclose(np.array([[0.], [0.], [0.], [1.]]), quat_by_conj)
 
     def test_multiplication(self):
-        q1 = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True)
-        q2 = Rotation.from_euler('xyz', [[45, 0, 0], [0, 45, 0], [0, 0, 45]], degrees=True)
+        r1 = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True)
+        r2 = Rotation.from_euler('xyz', [[45, 0, 0], [0, 45, 0], [0, 0, 45]], degrees=True)
 
-        result_scipy = (q1 * q2).as_rotvec()
+        result_scipy = (r1 * r2).as_rotvec()
 
-        result = Quaternion(q1.as_quat().T) * Quaternion(q2.as_quat().T)
-        result = Rotation.from_quat(result.values.T).as_rotvec()
+        result = scipy_to_quat(r1) * scipy_to_quat(r2)
+        result = quat_to_scipy(result).as_rotvec()
 
         np.testing.assert_allclose(result_scipy, result)
 
     def test_rotating_vector(self):
-        q1 = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True).as_quat().T
+        r1 = Rotation.from_euler('xyz', [[90, 0, 0], [0, 90, 0], [0, 0, 90]], degrees=True)
         v1 = np.array([
             [1, 0, 0],
             [0, 1, 0],
@@ -67,9 +75,12 @@ class QuaternionTests(unittest.TestCase):
             [0, 1, 0],
         ])
 
-        np.testing.assert_allclose(Rotation.from_quat(q1.T).apply(v1.T), Quaternion(q1).apply(v1).T)
-        np.testing.assert_allclose(Rotation.from_quat(q1.T).apply(v2.T), Quaternion(q1).apply(v2).T)
-        np.testing.assert_allclose(Rotation.from_quat(q1.T).apply(v3.T), Quaternion(q1).apply(v3).T)
+        np.testing.assert_allclose(r1.apply(v1.T),
+                                   to_npy(scipy_to_quat(r1).apply(to_tensor(v1))).T)
+        np.testing.assert_allclose(r1.apply(v2.T),
+                                   to_npy(scipy_to_quat(r1).apply(to_tensor(v2))).T)
+        np.testing.assert_allclose(r1.apply(v3.T),
+                                   to_npy(scipy_to_quat(r1).apply(to_tensor(v3))).T)
 
 
 if __name__ == '__main__':
