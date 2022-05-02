@@ -4,7 +4,7 @@ import json
 import os.path
 import shutil
 import warnings
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Iterable
 
 import cv2
 import matplotlib.pyplot as plt
@@ -19,6 +19,10 @@ from Video2mesh.io import VTMDataset
 from Video2mesh.options import StaticMeshOptions, MeshReconstructionMethod, COLMAPOptions
 from Video2mesh.utils import tqdm_imap, log
 from Video2mesh.video2mesh import Video2Mesh
+
+
+def to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    return tensor.detach().cpu().numpy().copy()
 
 
 # noinspection PyArgumentList
@@ -38,10 +42,17 @@ FramePairs = List[FramePair]
 class FeatureData:
     """Encapsulates the frame index, the coordinates of the image features and the depth at those points."""
 
-    def __init__(self, index, points, depth):
+    def __init__(self, index: list, points: list, depth: list):
+        assert len(index) == len(points) == len(depth), \
+            f"Expected index, points and depth to the same length, " \
+            f"but instead got lengths {len(index)}, {len(points)} and {len(depth)}."
+
         self.index = index
         self.points = points
         self.depth = depth
+
+    def __len__(self):
+        return len(self.index)
 
     @classmethod
     def from_json(cls, data):
@@ -80,6 +91,9 @@ class FeatureSet:
     """FeatureData for a pair of frames."""
 
     def __init__(self, frame_i: FeatureData, frame_j: FeatureData):
+        assert len(frame_i) == len(frame_j), \
+            f"Feature data must be of the same length, but instead got lengths {len(frame_i)} and {len(frame_j)}."
+
         self.frame_i = frame_i
         self.frame_j = frame_j
 
@@ -196,11 +210,11 @@ class FeatureExtractor:
 
             num_points = len(feature_set.frame_i.points)
 
-            index_i += [feature_set.frame_i.index] * num_points
+            index_i += feature_set.frame_i.index * num_points
             points_i += feature_set.frame_i.points
             depth_i += feature_set.frame_i.depth
 
-            index_j += [feature_set.frame_j.index] * num_points
+            index_j += feature_set.frame_j.index * num_points
             points_j += feature_set.frame_j.points
             depth_j += feature_set.frame_j.depth
 
@@ -307,7 +321,7 @@ class FeatureExtractor:
 
         self._save_matches_visualisation(i, j, key_points_i, key_points_j, matches, matches_mask, frame_accepted=True)
 
-        return FeatureSet(FeatureData(i, points_i, depth_i), FeatureData(j, points_j, depth_j))
+        return FeatureSet(FeatureData([i], points_i, depth_i), FeatureData([j], points_j, depth_j))
 
     def _get_key_points_and_descriptors(self, index) -> Tuple[tuple, tuple]:
         """
@@ -490,7 +504,7 @@ class FixedParameters(torch.nn.Module):
         """
         super().__init__()
 
-        def to_tensor(x, data_type=dtype):
+        def to_tensor(x, data_type=dtype) -> torch.Tensor:
             x = np.asarray(x)
             x = torch.from_numpy(x)
             x = x.to(data_type)
@@ -506,6 +520,44 @@ class FixedParameters(torch.nn.Module):
 
         self.frame_i = to_tensor_feature_data(feature_set.frame_i)
         self.frame_j = to_tensor_feature_data(feature_set.frame_j)
+
+    @property
+    def dtype(self):
+        return self.camera_matrix.dtype
+
+    def sample_at(self, frame_indices: Iterable[int]) -> 'FixedParameters':
+        """
+        Sample the fixed parameters at the given frames.
+        :param frame_indices: The frames to include.
+        :return: The FixedParameters object that only contains the data for the specified frames.
+        """
+        frame_set = set(frame_indices)
+
+        def get_matching_indices_mask(feature_data: FeatureData) -> torch.BoolTensor:
+            matches_mask = torch.zeros(len(feature_data), dtype=torch.bool)
+
+            for index in frame_set:
+                matches_mask |= feature_data.index == index
+
+            return matches_mask
+
+        def sample_feature_data(feature_data: FeatureData, indices: torch.LongTensor) -> FeatureData:
+            index_view = to_numpy(feature_data.index[indices]).tolist()
+            points_view = to_numpy(feature_data.points[indices]).tolist()
+            depth_view = to_numpy(feature_data.depth[indices]).tolist()
+
+            # noinspection PyTypeChecker
+            return FeatureData(index_view, points_view, depth_view)
+
+        matching_indices_mask = get_matching_indices_mask(self.frame_i) & get_matching_indices_mask(self.frame_j)
+        selected_indices = matching_indices_mask.nonzero().flatten()
+
+        feature_set = FeatureSet(
+            sample_feature_data(self.frame_i, selected_indices),
+            sample_feature_data(self.frame_j, selected_indices),
+        )
+
+        return FixedParameters(self.camera_matrix.numpy(), feature_set, dtype=self.dtype)
 
 
 class OptimisationParameters(torch.nn.Module):
@@ -527,6 +579,10 @@ class OptimisationParameters(torch.nn.Module):
         self.rotation_quaternions = to_param(r)
         self.translation_vectors = to_param(t)
 
+    @property
+    def dtype(self):
+        return self.rotation_quaternions.dtype
+
     def __len__(self):
         """
         :return: The number of optimisation parameters.
@@ -535,12 +591,22 @@ class OptimisationParameters(torch.nn.Module):
 
     def to_trajectory(self) -> np.ndarray:
         """Convert the optimisation parameters to a (N, 7) NumPy array."""
-        r = self.rotation_quaternions.detach().cpu().numpy()
-        t = self.translation_vectors.detach().cpu().numpy()
+        r = to_numpy(self.rotation_quaternions)
+        t = to_numpy(self.translation_vectors)
 
         r = r / np.linalg.norm(r, ord=2, axis=1).reshape((-1, 1))
 
         return np.hstack((r, t))
+
+    def sample_at(self, frame_indices: Iterable[int]) -> 'OptimisationParameters':
+        """
+        Sample the optimisation parameters at the given frames.
+        :param frame_indices: The frames to include.
+        :return: The OptimisationParameters object that only contains the data for the specified frames.
+        """
+        trajectory = self.to_trajectory()[frame_indices]
+
+        return OptimisationParameters(initial_camera_poses=trajectory, dtype=self.dtype)
 
 
 class EarlyStopping:
@@ -581,20 +647,30 @@ class EarlyStopping:
         return self.should_stop
 
 
-
 class PoseOptimiser:
     def __init__(self, dataset: VTMDataset):
         self.dataset = dataset
 
     def run(self, frame_sampling=FrameSamplingMode.HIERARCHICAL, mask_features=True,
-            min_features_per_frame=20, max_features_per_frame: Optional[int] = 2048, num_epochs=10000):
+            min_features_per_frame=20, max_features_per_frame: Optional[int] = 2048, num_epochs=10000, num_frames=-1):
+        """
+
+        :param frame_sampling:
+        :param mask_features:
+        :param min_features_per_frame:
+        :param max_features_per_frame:
+        :param num_epochs:
+        :param num_frames:
+        :return:
+        """
         frame_pairs = self.sample_frame_pairs(frame_sampling)
         feature_set = self.extract_feature_points(frame_pairs, min_features_per_frame, max_features_per_frame,
                                                   mask_features)
         fixed_parameters = FixedParameters(self.dataset.camera_matrix.copy(), feature_set)
         optimisation_parameters = OptimisationParameters(self.dataset.camera_trajectory.copy())
         optimised_camera_trajectory = self.optimise_pose_data(fixed_parameters, optimisation_parameters,
-                                                              learning_rate=1e-1, num_epochs=num_epochs)
+                                                              learning_rate=1e-1, num_epochs=num_epochs,
+                                                              num_frames=num_frames)
         interpolated_trajectory = self.interpolate_poses_without_matches(feature_set, optimised_camera_trajectory)
 
         return interpolated_trajectory
@@ -644,9 +720,16 @@ class PoseOptimiser:
 
     def optimise_pose_data(self, fixed_parameters: FixedParameters,
                            optimisation_parameters: OptimisationParameters,
-                           num_epochs=10000,
+                           num_frames=-1, num_epochs=10000,
                            learning_rate=1e-4, min_loss_delta=1e-4,
                            lr_scheduler_patience=250, early_stopping_patience=500) -> np.ndarray:
+        if num_frames == -1:
+            num_frames = self.dataset.num_frames
+
+        if num_frames != self.dataset.num_frames:
+            fixed_parameters = fixed_parameters.sample_at(range(num_frames))
+            optimisation_parameters = optimisation_parameters.sample_at(range(num_frames))
+
         fixed_parameters.cuda()
         optimisation_parameters.cuda()
 
@@ -665,7 +748,7 @@ class PoseOptimiser:
             loss.backward()
 
             # TODO: Focus training on aligning pairs initially, later expanding it to all frames.
-            # Can mask gradients as such: optimisation_parameters.translation_vectors.grad[row_to_mask, :] = 0.0
+            # Can mask gradients as such: optimisation_parameters.translation_vectors.grad[row_to_mask, :] *= 0.0
 
             optimiser.step()
             lr_scheduler.step(loss)
@@ -724,7 +807,8 @@ class PoseOptimiser:
 
         return points_world_space
 
-    def project_to_image_coords(self, points_world_space: torch.Tensor, frame_data: FeatureDataTorch, camera_matrix: torch.Tensor,
+    def project_to_image_coords(self, points_world_space: torch.Tensor, frame_data: FeatureDataTorch,
+                                camera_matrix: torch.Tensor,
                                 pose_data: OptimisationParameters) -> torch.Tensor:
         indices = frame_data.index
 
@@ -780,6 +864,8 @@ class PoseOptimiser:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('dataset_path', type=str, help='Path to the VTM formatted dataset.')
+    parser.add_argument('--num_frames', type=int, default=-1,
+                        help='Number of frames to optimise. If set to -1 (default), use all frames.')
     args = parser.parse_args()
 
     if not VTMDataset.is_valid_folder_structure(args.dataset_path):
@@ -790,8 +876,16 @@ def main():
     dataset.use_estimated_camera_parameters(COLMAPOptions())
     dataset.create_or_find_masks()
 
+    num_frames = args.num_frames
+
+    if num_frames == -1:
+        num_frames = dataset.num_frames
+    elif num_frames < 2:
+        raise RuntimeError(f"--num_frames must at least 2, but got {num_frames}.")
+
     optimiser = PoseOptimiser(dataset)
-    camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=2048, num_epochs=100000)
+    camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=2048, num_epochs=100000,
+                                      num_frames=num_frames)
     # TODO: Complete docstrings.
     # TODO: Cache image feature data and frame pairs used to generate the data
     # TODO: Saved optimised trajectory
@@ -799,12 +893,12 @@ def main():
     # TODO: Create mesh with TSDFFusion using the optimised trajectory
     reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
                                                sdf_num_voxels=4000000)
-    mesh_before = Video2Mesh._create_static_mesh(dataset, options=reconstruction_options)
+    mesh_before = Video2Mesh._create_static_mesh(dataset, num_frames, options=reconstruction_options)
 
     camera_trajectory_backup = dataset.camera_trajectory.copy()
     dataset.camera_trajectory = camera_trajectory
 
-    mesh_after = Video2Mesh._create_static_mesh(dataset, options=reconstruction_options)
+    mesh_after = Video2Mesh._create_static_mesh(dataset, num_frames, options=reconstruction_options)
 
     dataset.camera_trajectory = camera_trajectory_backup
 
