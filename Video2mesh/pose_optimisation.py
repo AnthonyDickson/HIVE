@@ -4,7 +4,7 @@ import json
 import os.path
 import shutil
 import warnings
-from typing import Tuple, List, Optional, Iterable
+from typing import Tuple, List, Optional, Iterable, Union
 
 import cv2
 import matplotlib.pyplot as plt
@@ -14,28 +14,44 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 
-from Video2mesh.geometry import Quaternion
+from Video2mesh.geometry import Quaternion, pose_vec2mat, invert_trajectory, pose_mat2vec
+from Video2mesh.fusion import tsdf_fusion
 from Video2mesh.io import VTMDataset
-from Video2mesh.options import StaticMeshOptions, MeshReconstructionMethod, COLMAPOptions
-from Video2mesh.utils import tqdm_imap, log
-from Video2mesh.video2mesh import Video2Mesh
+from Video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
+from Video2mesh.utils import tqdm_imap, log, temp_seed
 
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    """
+    Convert a PyTorch tensor to a NumPy array.
+
+    :param tensor: The tensor to convert.
+    :return: The NumPy array.
+    """
     return tensor.detach().cpu().numpy().copy()
 
 
 # noinspection PyArgumentList
 class FrameSamplingMode(enum.Enum):
-    # All unique pairs of frames
+    """Method for sampling frame pairs from a video sequence."""
+
+    # All unique pairs of frames, e.g. [(0, 1), (0, 1), ..., (0, n - 1), (1, 2), (1, 3), ..., (n - 2, n - 1)]
     EXHAUSTIVE = enum.auto()
-    # All consecutive pairs
+    # All consecutive pairs, e.g. [(0, 1), (1, 2), (2, 3)]
     CONSECUTIVE = enum.auto()
-    # Consecutive pairs + increasingly distant pairs.
+    # Consecutive pairs that do not overlap, e.g. [(0, 1), (2, 3), (4, 5)]
+    CONSECUTIVE_NO_OVERLAP = enum.auto()
+    # Consecutive pairs that do not overlap and start at 1 (compare CONSECUTIVE_NO_OVERLAP),
+    # e.g. [(1, 2), (3, 4), (5, 6)]
+    CONSECUTIVE_NO_OVERLAP_OFFSET = enum.auto()
+    # Consecutive pairs + increasingly distant pairs, e.g. [(0, 1), (0, 2), (0, 4), ..., (1, 2)]
     HIERARCHICAL = enum.auto()
 
 
+"""A pair of frame indices."""
 FramePair = Tuple[int, int]
+
+"""A list of pairs of frame indices."""
 FramePairs = List[FramePair]
 
 
@@ -43,6 +59,12 @@ class FeatureData:
     """Encapsulates the frame index, the coordinates of the image features and the depth at those points."""
 
     def __init__(self, index: list, points: list, depth: list):
+        """
+
+        :param index:
+        :param points:
+        :param depth:
+        """
         assert len(index) == len(points) == len(depth), \
             f"Expected index, points and depth to the same length, " \
             f"but instead got lengths {len(index)}, {len(points)} and {len(depth)}."
@@ -56,6 +78,11 @@ class FeatureData:
 
     @classmethod
     def from_json(cls, data):
+        """
+
+        :param data:
+        :return:
+        """
         index = data['index']
         points = data['points']
         depth = data['depth']
@@ -63,7 +90,23 @@ class FeatureData:
         return cls(index, points, depth)
 
     def to_json(self):
+        """
+
+        :return:
+        """
         return dict(index=self.index, points=self.points, depth=self.depth)
+
+    def sample_at(self, frame_indices: Union[List[int], np.ndarray]) -> 'FeatureData':
+        """
+
+        :param frame_indices:
+        :return:
+        """
+        return FeatureData(
+            self.index[frame_indices].copy(),
+            self.points[frame_indices].copy(),
+            self.depth[frame_indices].copy()
+        )
 
 
 class FeatureDataTorch(torch.nn.Module, FeatureData):
@@ -85,6 +128,18 @@ class FeatureDataTorch(torch.nn.Module, FeatureData):
 
     def to_json(self):
         return dict(index=self.index.tolist(), points=self.points.tolist(), depth=self.depth.tolist())
+
+    def sample_at(self, frame_indices: Union[torch.LongTensor, torch.BoolTensor]) -> 'FeatureDataTorch':
+        """
+
+        :param frame_indices:
+        :return:
+        """
+        return FeatureDataTorch(
+            self.index[frame_indices].clone(),
+            self.points[frame_indices].clone(),
+            self.depth[frame_indices].clone()
+        )
 
 
 class FeatureSet:
@@ -121,16 +176,10 @@ class FeatureSet:
             json.dump(dict(frame_i=frame_i, frame_j=frame_j), f)
 
 
-class FeatureExtractor:
-    """Extracts correspondences between image pairs and the depth at those correspondences."""
-
-    def __init__(self, dataset: VTMDataset, frame_pairs: FramePairs,
-                 min_features: int = 20, max_features: Optional[int] = None,
-                 ignore_dynamic_objects: bool = True):
+class FeatureExtractionOptions:
+    def __init__(self, ignore_dynamic_objects=True, min_features=20, max_features: Optional[int] = 2048):
         """
 
-        :param dataset: The RGB-D dataset to use.
-        :param frame_pairs: The pairs of frames to extract matching image features from.
         :param min_features: The minimum number of matched features required per frame pair.
         :param max_features: (optional) The maximum number of features to keep per frame pair. Setting this to None will
             mean that all features will be kept. This parameter affects two things:
@@ -139,6 +188,7 @@ class FeatureExtractor:
             frame pair and a higher chance that all frames will be covered.
         :param ignore_dynamic_objects: Whether to ignore dynamic objects when extracting image features.
         """
+
         if not isinstance(min_features, int) or min_features < 5:
             raise ValueError(f"`min_features` must be a positive integer that is at least 5, but got {min_features}.")
 
@@ -156,13 +206,35 @@ class FeatureExtractor:
                           f"that enough features will remain after filtering to meet the requirement of having "
                           f"at least `min_features` features.")
 
-        self.dataset = dataset
-        self.frame_pairs = frame_pairs
+        self.ignore_dynamic_objects = ignore_dynamic_objects
         self.min_features = min_features
         self.max_features = max_features
-        self.ignore_dynamic_objects = ignore_dynamic_objects
 
-        self.debug_path: Optional[str] = None
+    def __repr__(self):
+        return f"{self.__class__.__name__}(ignore_dynamic_objects={self.ignore_dynamic_objects}, " \
+               f"min_features={self.min_features}, " \
+               f"max_features={self.max_features})"
+
+
+class FeatureExtractor:
+    """Extracts correspondences between image pairs and the depth at those correspondences."""
+
+    def __init__(self, dataset: VTMDataset, frame_pairs: FramePairs,
+                 feature_extraction_options=FeatureExtractionOptions(),
+                 debug_path: Optional[str] = None):
+        """
+
+        :param dataset:
+        :param frame_pairs:
+        :param feature_extraction_options:
+        :param debug_path: Setting this to `None` disables debug output and results caching.
+        """
+
+        self.dataset = dataset
+        self.frame_pairs = frame_pairs
+        self.options = feature_extraction_options
+
+        self.debug_path: Optional[str] = debug_path
         self.match_viz_path: Optional[str] = None
         self.frame_pairs_path: Optional[str] = None
         self.feature_set_path: Optional[str] = None
@@ -171,12 +243,24 @@ class FeatureExtractor:
         self.depth_maps: Optional[List[np.ndarray]] = None
         self.masks: Optional[List[np.ndarray]] = None
 
-        self.sift = cv2.SIFT_create(nfeatures=max_features)
+        self.sift = cv2.SIFT_create(nfeatures=self.max_features)
 
-        FLANN_INDEX_KDTREE = 1
-        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        flann_index_kdtree = 1
+        index_params = dict(algorithm=flann_index_kdtree, trees=5)
         search_params = dict(checks=50)  # or pass empty dictionary
         self.matcher = cv2.FlannBasedMatcher(index_params, search_params)
+
+    @property
+    def min_features(self):
+        return self.options.min_features
+
+    @property
+    def max_features(self):
+        return self.options.max_features
+
+    @property
+    def ignore_dynamic_objects(self):
+        return self.options.ignore_dynamic_objects
 
     def extract_feature_points(self) -> FeatureSet:
         """
@@ -188,7 +272,7 @@ class FeatureExtractor:
         log(f"Extracting image feature matches...")
         self._setup_folders()
 
-        if os.path.isfile(self.feature_set_path):
+        if self.feature_set_path and os.path.isfile(self.feature_set_path):
             log(f"Found cached feature set at: {self.feature_set_path}")
             return FeatureSet.load(self.feature_set_path)
 
@@ -208,13 +292,11 @@ class FeatureExtractor:
             if feature_set is None:
                 continue
 
-            num_points = len(feature_set.frame_i.points)
-
-            index_i += feature_set.frame_i.index * num_points
+            index_i += feature_set.frame_i.index
             points_i += feature_set.frame_i.points
             depth_i += feature_set.frame_i.depth
 
-            index_j += feature_set.frame_j.index * num_points
+            index_j += feature_set.frame_j.index
             points_j += feature_set.frame_j.points
             depth_j += feature_set.frame_j.depth
 
@@ -222,8 +304,11 @@ class FeatureExtractor:
 
         self._print_results_stats(index_i, index_j, num_good_frame_pairs)
 
-        full_feature_set = FeatureSet(FeatureData(index_i, points_i, depth_i), FeatureData(index_j, points_j, depth_j))
-        full_feature_set.save(self.feature_set_path)
+        full_feature_set = FeatureSet(FeatureData(index_i, points_i, depth_i),
+                                      FeatureData(index_j, points_j, depth_j))
+
+        if self.feature_set_path:
+            full_feature_set.save(self.feature_set_path)
 
         return full_feature_set
 
@@ -231,28 +316,33 @@ class FeatureExtractor:
         """
         Create a folder to save debug output.
         """
-        self.debug_path = os.path.join(self.dataset.base_path, 'pose_optim')
+        if self.debug_path is None:
+            return
+
         self.match_viz_path = os.path.join(self.debug_path, 'match_viz')
         self.frame_pairs_path = os.path.join(self.debug_path, 'frame_pairs.txt')
         self.feature_set_path = os.path.join(self.debug_path, 'feature_set.json')
 
         os.makedirs(self.debug_path, exist_ok=True)
 
+        clear_cache = True
+
         if os.path.isfile(self.frame_pairs_path):
             cached_frame_pairs = np.loadtxt(self.frame_pairs_path)
-            same_frame_pairs = len(cached_frame_pairs) == len(self.frame_pairs) and \
-                               np.all(cached_frame_pairs == self.frame_pairs)
+            same_frame_pairs = len(cached_frame_pairs) == len(self.frame_pairs)
+            same_frame_pairs = same_frame_pairs and np.all(cached_frame_pairs == self.frame_pairs)
 
-            if not same_frame_pairs:
-                shutil.rmtree(self.debug_path)
-                os.makedirs(self.debug_path)
-                # noinspection PyTypeChecker
-                np.savetxt(self.frame_pairs_path, self.frame_pairs)
+            if same_frame_pairs:
+                clear_cache = False
 
-        if os.path.isdir(self.match_viz_path):
+        if clear_cache:
             shutil.rmtree(self.match_viz_path)
+            os.remove(self.frame_pairs_path)
+            os.remove(self.feature_set_path)
 
-        os.makedirs(self.match_viz_path)
+            os.makedirs(self.match_viz_path)
+            # noinspection PyTypeChecker
+            np.savetxt(self.frame_pairs_path, self.frame_pairs)
 
     def _get_frame_data(self) -> Tuple[list, list, Optional[list]]:
         """
@@ -321,7 +411,8 @@ class FeatureExtractor:
 
         self._save_matches_visualisation(i, j, key_points_i, key_points_j, matches, matches_mask, frame_accepted=True)
 
-        return FeatureSet(FeatureData([i], points_i, depth_i), FeatureData([j], points_j, depth_j))
+        return FeatureSet(FeatureData([i] * len(points_i), points_i, depth_i),
+                          FeatureData([j] * len(points_j), points_j, depth_j))
 
     def _get_key_points_and_descriptors(self, index) -> Tuple[tuple, tuple]:
         """
@@ -368,7 +459,7 @@ class FeatureExtractor:
             if the_depth_i == 0.0 or the_depth_j == 0.0:
                 continue
 
-            # Mark match as good match for viz.
+            # Mark the match as good match for viz.
             matches_mask[k][0] = 1
 
             points_i.append(point_i)
@@ -379,7 +470,8 @@ class FeatureExtractor:
 
         return points_i, points_j, depth_i, depth_j, matches_mask
 
-    def _filter_matches_ransac(self, points_i, points_j, depth_i, depth_j, matches_mask) -> \
+    @staticmethod
+    def _filter_matches_ransac(points_i, points_j, depth_i, depth_j, matches_mask) -> \
             Tuple[list, list, list, list, list]:
         """
         Filter candidate matches with RANSAC.
@@ -493,16 +585,42 @@ class FeatureExtractor:
         log(f"Found {len(chunks)} groups consecutive of frames.")
 
 
-class FixedParameters(torch.nn.Module):
+class FeatureSetTorch(torch.nn.Module):
     """The parameters used in the optimisation process that do not change, e.g. matched feature points, depth."""
 
-    def __init__(self, camera_matrix: np.ndarray, feature_set: FeatureSet, dtype=torch.float32):
+    def __init__(self, camera_matrix: torch.Tensor, frame_i: FeatureDataTorch, frame_j: FeatureDataTorch):
+        """
+
+        :param camera_matrix:
+        :param frame_i:
+        :param frame_j:
+        """
+        # TODO: Complete docstring for FeatureSetTorch __init__() function.
+        super().__init__()
+
+        self.camera_matrix = torch.nn.Parameter(camera_matrix, requires_grad=False)
+
+        self.frame_i = frame_i
+        self.frame_j = frame_j
+
+    @property
+    def dtype(self):
+        return self.camera_matrix.dtype
+
+    @property
+    def device(self):
+        return self.camera_matrix.device
+
+    def __len__(self):
+        return len(self.frame_i)
+
+    @classmethod
+    def from_numpy(cls, camera_matrix: np.ndarray, feature_set: FeatureSet, dtype=torch.float32):
         """
         :param camera_matrix: The 3x3 camera intrinsics matrix.
         :param feature_set: The paired set of image feature data (frame index, match coordinates, depth).
         :param dtype: The data type to convert the parameters to.
         """
-        super().__init__()
 
         def to_tensor(x, data_type=dtype) -> torch.Tensor:
             x = np.asarray(x)
@@ -516,48 +634,50 @@ class FixedParameters(torch.nn.Module):
                                     points=to_tensor(feature_data.points),
                                     depth=to_tensor(feature_data.depth))
 
-        self.camera_matrix = to_tensor(camera_matrix)
+        camera_matrix = to_tensor(camera_matrix)
 
-        self.frame_i = to_tensor_feature_data(feature_set.frame_i)
-        self.frame_j = to_tensor_feature_data(feature_set.frame_j)
+        frame_i = to_tensor_feature_data(feature_set.frame_i)
+        frame_j = to_tensor_feature_data(feature_set.frame_j)
 
-    @property
-    def dtype(self):
-        return self.camera_matrix.dtype
+        return FeatureSetTorch(camera_matrix, frame_i, frame_j)
 
-    def sample_at(self, frame_indices: Iterable[int]) -> 'FixedParameters':
+    def sample_at(self, frame_indices: Iterable[int]) -> 'FeatureSetTorch':
         """
         Sample the fixed parameters at the given frames.
         :param frame_indices: The frames to include.
         :return: The FixedParameters object that only contains the data for the specified frames.
         """
         frame_set = set(frame_indices)
+        device = self.device
 
         def get_matching_indices_mask(feature_data: FeatureData) -> torch.BoolTensor:
-            matches_mask = torch.zeros(len(feature_data), dtype=torch.bool)
+            matches_mask = torch.zeros(len(feature_data), dtype=torch.bool, device=device)
 
             for index in frame_set:
                 matches_mask |= feature_data.index == index
 
             return matches_mask
 
-        def sample_feature_data(feature_data: FeatureData, indices: torch.LongTensor) -> FeatureData:
-            index_view = to_numpy(feature_data.index[indices]).tolist()
-            points_view = to_numpy(feature_data.points[indices]).tolist()
-            depth_view = to_numpy(feature_data.depth[indices]).tolist()
-
-            # noinspection PyTypeChecker
-            return FeatureData(index_view, points_view, depth_view)
-
         matching_indices_mask = get_matching_indices_mask(self.frame_i) & get_matching_indices_mask(self.frame_j)
-        selected_indices = matching_indices_mask.nonzero().flatten()
 
-        feature_set = FeatureSet(
-            sample_feature_data(self.frame_i, selected_indices),
-            sample_feature_data(self.frame_j, selected_indices),
-        )
+        frame_i = self.frame_i.sample_at(matching_indices_mask)
+        frame_j = self.frame_j.sample_at(matching_indices_mask)
 
-        return FixedParameters(self.camera_matrix.numpy(), feature_set, dtype=self.dtype)
+        return FeatureSetTorch(self.camera_matrix.clone(), frame_i, frame_j)
+
+    def subset_from(self, frame_pairs: FramePairs) -> 'FeatureSetTorch':
+        indices = torch.vstack((self.frame_i.index, self.frame_j.index)).T
+        indices = indices.cpu()
+        mask = torch.zeros(len(self), dtype=torch.bool)
+        frame_pairs = torch.from_numpy(np.asarray(frame_pairs))
+
+        for frame_pair in frame_pairs:
+            mask |= torch.all(torch.tensor(indices == frame_pair), dim=1)
+
+        frame_i = self.frame_i.sample_at(mask)
+        frame_j = self.frame_j.sample_at(mask)
+
+        return FeatureSetTorch(self.camera_matrix.clone(), frame_i, frame_j)
 
 
 class OptimisationParameters(torch.nn.Module):
@@ -583,6 +703,10 @@ class OptimisationParameters(torch.nn.Module):
     def dtype(self):
         return self.rotation_quaternions.dtype
 
+    @property
+    def device(self):
+        return self.rotation_quaternions.device
+
     def __len__(self):
         """
         :return: The number of optimisation parameters.
@@ -598,7 +722,7 @@ class OptimisationParameters(torch.nn.Module):
 
         return np.hstack((r, t))
 
-    def sample_at(self, frame_indices: Iterable[int]) -> 'OptimisationParameters':
+    def sample_at(self, frame_indices: List[int]) -> 'OptimisationParameters':
         """
         Sample the optimisation parameters at the given frames.
         :param frame_indices: The frames to include.
@@ -607,6 +731,9 @@ class OptimisationParameters(torch.nn.Module):
         trajectory = self.to_trajectory()[frame_indices]
 
         return OptimisationParameters(initial_camera_poses=trajectory, dtype=self.dtype)
+
+    def clone(self):
+        return OptimisationParameters(initial_camera_poses=self.to_trajectory(), dtype=self.dtype)
 
 
 class EarlyStopping:
@@ -647,63 +774,149 @@ class EarlyStopping:
         return self.should_stop
 
 
-class PoseOptimiser:
-    def __init__(self, dataset: VTMDataset):
-        self.dataset = dataset
+# noinspection PyArgumentList
 
-    def run(self, frame_sampling=FrameSamplingMode.HIERARCHICAL, mask_features=True,
-            min_features_per_frame=20, max_features_per_frame: Optional[int] = 2048, num_epochs=10000, num_frames=-1):
+
+class OptimisationMode(enum.Enum):
+    All = enum.auto()
+    Pairwise = enum.auto()
+    Fragments = enum.auto()
+
+
+# noinspection PyArgumentList
+
+
+class ResidualType(enum.Enum):
+    """Different ways for calculating points and residuals in the optimisation step."""
+
+    """
+    Residuals are calculated on points from both frames projected into the world coordinate system.
+    Faster but generally less accurate than `Image2D`.
+    """
+    World3D = enum.auto()
+
+    """
+    Residuals are calculated on points from one frame projected into the other frame in pixel coordinates.
+    Slower but generally more accurate than `World3D`.
+    """
+    Image2D = enum.auto()
+
+
+class OptimisationOptions:
+    def __init__(self, num_frames=-1, num_epochs=20000,
+                 learning_rate=1e-2, min_loss_delta=1e-4,
+                 lr_scheduler_patience=50, early_stopping_patience=500,
+                 mode=OptimisationMode.Pairwise, fine_tune=False):
+        self.num_frames = num_frames
+        self.num_epochs = num_epochs
+        self.learning_rate = learning_rate
+        self.min_loss_delta = min_loss_delta
+        self.lr_scheduler_patience = lr_scheduler_patience
+        self.early_stopping_patience = early_stopping_patience
+        self.mode = mode
+        self.fine_tune = fine_tune
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(num_frames={self.num_frames}, num_epochs={self.num_epochs}, " \
+               f"learning_rate={self.learning_rate}, min_loss_delta={self.min_loss_delta}, " \
+               f"lr_scheduler_patience={self.lr_scheduler_patience}, " \
+               f"early_stopping_patience={self.early_stopping_patience}, " \
+               f"mode={self.mode}" \
+               f"fine_time={self.fine_tune})"
+
+
+class PoseOptimiser:
+    """"""
+
+    DEBUG_FOLDER = 'pose_optim'
+
+    def __init__(self, dataset: VTMDataset, debug=True):
+        """
+
+        :param dataset:
+        :param debug:
+        """
+        self.dataset = dataset
+        self.debug_path: Optional[str] = None
+        self.debug = debug
+
+    def run(self, frame_sampling=FrameSamplingMode.HIERARCHICAL,
+            feature_extraction_options=FeatureExtractionOptions(),
+            optimisation_options=OptimisationOptions()):
         """
 
         :param frame_sampling:
-        :param mask_features:
-        :param min_features_per_frame:
-        :param max_features_per_frame:
-        :param num_epochs:
-        :param num_frames:
+        :param feature_extraction_options:
+        :param optimisation_options:
         :return:
         """
-        frame_pairs = self.sample_frame_pairs(frame_sampling)
-        feature_set = self.extract_feature_points(frame_pairs, min_features_per_frame, max_features_per_frame,
-                                                  mask_features)
-        fixed_parameters = FixedParameters(self.dataset.camera_matrix.copy(), feature_set)
+        self._setup_debug_folder()
+        frame_pairs = self._sample_frame_pairs(frame_sampling)
+        feature_set = self._extract_feature_points(frame_pairs, feature_extraction_options)
+        fixed_parameters = FeatureSetTorch.from_numpy(self.dataset.camera_matrix.copy(), feature_set)
         optimisation_parameters = OptimisationParameters(self.dataset.camera_trajectory.copy())
-        optimised_camera_trajectory = self.optimise_pose_data(fixed_parameters, optimisation_parameters,
-                                                              learning_rate=1e-1, num_epochs=num_epochs,
-                                                              num_frames=num_frames)
-        interpolated_trajectory = self.interpolate_poses_without_matches(feature_set, optimised_camera_trajectory)
+        optimised_camera_trajectory = self._optimise_pose(fixed_parameters, optimisation_parameters,
+                                                          optimisation_options=optimisation_options)
+        interpolated_trajectory = self._interpolate_poses_without_matches(feature_set, optimised_camera_trajectory)
 
-        return interpolated_trajectory
+        # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
+        final_camera_trajectory = invert_trajectory(interpolated_trajectory)
 
-    def sample_frame_pairs(self, frame_sampling_mode: FrameSamplingMode) -> FramePairs:
+        if self.debug_path:
+            np.savetxt(os.path.join(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
+
+        return final_camera_trajectory
+
+    def _setup_debug_folder(self):
+        if self.debug:
+            self.debug_path = os.path.join(self.dataset.base_path, self.DEBUG_FOLDER)
+
+            os.makedirs(self.debug_path, exist_ok=True)
+
+    def _sample_frame_pairs(self, frame_sampling_mode: FrameSamplingMode, num_frames=-1) -> FramePairs:
         """
         Select frame pairs for image feature extraction.
 
         :param frame_sampling_mode: The strategy to use for sampling frame pairs.
+        :param num_frames: (optional) The frame index to stop at.
+            If set to -1, this value is set to the length of the dataset.
         :return: A list of pairs of frame indices.
         """
+        num_frames = self.dataset.num_frames if num_frames == -1 else num_frames
         frame_pairs = []
 
         if frame_sampling_mode == FrameSamplingMode.EXHAUSTIVE:
-            for i in range(self.dataset.num_frames):
-                for j in range(i + 1, self.dataset.num_frames):
+            for i in range(num_frames):
+                for j in range(i + 1, num_frames):
                     frame_pairs.append((i, j))
 
-        elif frame_sampling_mode == FrameSamplingMode.CONSECUTIVE:
-            for i in range(self.dataset.num_frames - 1):
+        elif frame_sampling_mode in (FrameSamplingMode.CONSECUTIVE, FrameSamplingMode.CONSECUTIVE_NO_OVERLAP,
+                                     FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET):
+            if frame_sampling_mode == FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET:
+                start = 1
+            else:
+                start = 0
+
+            if frame_sampling_mode in (FrameSamplingMode.CONSECUTIVE_NO_OVERLAP,
+                                       FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET):
+                step = 2
+            else:
+                step = 1
+
+            for i in range(start, num_frames - 1, step):
                 frame_pairs.append((i, i + 1))
 
         elif frame_sampling_mode == FrameSamplingMode.HIERARCHICAL:
             # Adapted from https://github.com/facebookresearch/consistent_depth/blob/e2c9b724d3221aa7c0bf89aa9449ae33b418d943/utils/frame_sampling.py#L78
-            max_level = int(np.floor(np.log2(self.dataset.num_frames - 1)))
+            max_level = int(np.floor(np.log2(num_frames - 1)))
 
             for level in range(max_level + 1):
                 step = 1 << level
 
-                for start in range(0, self.dataset.num_frames, step):
+                for start in range(0, num_frames, step):
                     end = start + step
 
-                    if end >= self.dataset.num_frames:
+                    if end >= num_frames:
                         continue
 
                     frame_pairs.append((start, end))
@@ -712,43 +925,171 @@ class PoseOptimiser:
 
         return frame_pairs
 
-    def extract_feature_points(self, frame_pairs: FramePairs, min_features: int, max_features: int,
-                               mask_features: bool):
-        feature_extractor = FeatureExtractor(self.dataset, frame_pairs, min_features, max_features, mask_features)
+    def _extract_feature_points(self, frame_pairs: FramePairs, feature_extraction_options=FeatureExtractionOptions()):
+        """
+
+        :param frame_pairs:
+        :param feature_extraction_options:
+        :return:
+        """
+        feature_extractor = FeatureExtractor(self.dataset, frame_pairs, feature_extraction_options,
+                                             debug_path=self.debug_path)
 
         return feature_extractor.extract_feature_points()
 
-    def optimise_pose_data(self, fixed_parameters: FixedParameters,
-                           optimisation_parameters: OptimisationParameters,
-                           num_frames=-1, num_epochs=10000,
-                           learning_rate=1e-4, min_loss_delta=1e-4,
-                           lr_scheduler_patience=250, early_stopping_patience=500) -> np.ndarray:
+    def _optimise_pose(self, fixed_parameters: FeatureSetTorch,
+                       optimisation_parameters: OptimisationParameters,
+                       optimisation_options=OptimisationOptions()):
+        """
+
+        :param fixed_parameters:
+        :param optimisation_parameters:
+        :param optimisation_options:
+        :return:
+        """
+        num_frames = optimisation_options.num_frames
+
         if num_frames == -1:
             num_frames = self.dataset.num_frames
 
         if num_frames != self.dataset.num_frames:
             fixed_parameters = fixed_parameters.sample_at(range(num_frames))
-            optimisation_parameters = optimisation_parameters.sample_at(range(num_frames))
+            optimisation_parameters = optimisation_parameters.sample_at(list(range(num_frames)))
 
-        fixed_parameters.cuda()
-        optimisation_parameters.cuda()
+        if torch.cuda.is_available():
+            # Why is this not in-place like optimisation_parameters.cuda()?
+            fixed_parameters = fixed_parameters.cuda()
+            optimisation_parameters.cuda()
 
-        optimiser = torch.optim.Adam(optimisation_parameters.parameters(), lr=learning_rate)
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, patience=lr_scheduler_patience, mode='min',
-                                                                  threshold=min_loss_delta, threshold_mode='abs')
-        early_stopping = EarlyStopping(patience=early_stopping_patience, min_difference=min_loss_delta)
+        if optimisation_options.mode == OptimisationMode.Pairwise:
+            camera_trajectory = self._optimise_pairwise(fixed_parameters=fixed_parameters,
+                                                        optimisation_parameters=optimisation_parameters,
+                                                        optimisation_options=optimisation_options)
+            optimisation_parameters = OptimisationParameters(camera_trajectory, dtype=optimisation_parameters.dtype)
+            optimisation_parameters = optimisation_parameters.to(fixed_parameters.device)
 
-        progress_bar = tqdm(range(num_epochs))
+        log("Aligning all frame pairs...")
+        camera_trajectory = self._optimise_all(fixed_parameters=fixed_parameters,
+                                               optimisation_parameters=optimisation_parameters,
+                                               optimisation_options=optimisation_options)
+
+        if optimisation_options.fine_tune:
+            log("Fine tuning...")
+            optimisation_parameters = OptimisationParameters(camera_trajectory, dtype=optimisation_parameters.dtype)
+            optimisation_parameters = optimisation_parameters.to(fixed_parameters.device)
+
+            camera_trajectory = self._optimise_all(fixed_parameters=fixed_parameters,
+                                                   optimisation_parameters=optimisation_parameters,
+                                                   optimisation_options=optimisation_options,
+                                                   residual_type=ResidualType.Image2D)
+
+        return camera_trajectory
+
+    def _optimise_pairwise(self, fixed_parameters: FeatureSetTorch,
+                           optimisation_parameters: OptimisationParameters,
+                           optimisation_options=OptimisationOptions()) -> np.ndarray:
+        """
+
+        :param fixed_parameters:
+        :param optimisation_parameters:
+        :param optimisation_options:
+        :return:
+        """
+        num_frames = optimisation_options.num_frames
+
+        if num_frames == -1:
+            num_frames = self.dataset.num_frames
+
+        device = optimisation_parameters.device
+
+        log("Pairwise frame alignment...")
+
+        def add_trajectory(frame_sampling_mode: FrameSamplingMode):
+            frame_pairs = self._sample_frame_pairs(frame_sampling_mode, num_frames)
+            feature_set = fixed_parameters.subset_from(frame_pairs)
+            # Clone parameters to avoid side-effects in subsequent calls.
+            trajectory = self._optimise_all(feature_set, optimisation_parameters.clone().to(device),
+                                            optimisation_options)
+
+            for frame_pair in frame_pairs:
+                pose_data[tuple(frame_pair)] = trajectory[list(frame_pair)]
+
+        pose_data = dict()
+        add_trajectory(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP)
+        add_trajectory(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET)
+
+        def subtract_pose(pose_a, pose_b):
+            """
+            Get relative pose between two poses (i.e. `pose_b - pose_a`).
+            :param pose_a: The first pose.
+            :param pose_b: The second pose.
+            :return: The relative pose between `pose_a` and `pose_b`.
+            """
+            return pose_mat2vec(np.linalg.inv(pose_vec2mat(pose_b)) @ pose_vec2mat(pose_a))
+
+        def add_pose(pose_a, pose_b):
+            """
+            Get
+            :param pose_a:
+            :param pose_b:
+            :return:
+            """
+            return pose_mat2vec(pose_vec2mat(pose_b) @ pose_vec2mat(pose_a))
+
+        def get_identity_pose():
+            """
+
+            :return:
+            """
+            return np.asarray([0., 0., 0., 1., 0., 0., 0.])
+
+        merged_pose_data = [get_identity_pose()]
+        previous_pose = merged_pose_data[0]
+
+        for i, j in sorted(pose_data.keys()):
+            pose_i, pose_j = pose_data[i, j]
+            j_rel_to_i = subtract_pose(pose_i, pose_j)
+            next_pose = add_pose(previous_pose, j_rel_to_i)
+            merged_pose_data.append(next_pose)
+
+            previous_pose = next_pose
+
+        camera_trajectory = np.asarray(merged_pose_data)
+
+        return camera_trajectory
+
+    def _optimise_all(self, fixed_parameters: FeatureSetTorch,
+                      optimisation_parameters: OptimisationParameters,
+                      optimisation_options=OptimisationOptions(),
+                      residual_type=ResidualType.World3D) -> np.ndarray:
+        """
+
+        :param fixed_parameters:
+        :param optimisation_parameters:
+        :param optimisation_options:
+        :param residual_type:
+        :return:
+        """
+        options = optimisation_options
+
+        optimiser = torch.optim.Adam(optimisation_parameters.parameters(), lr=options.learning_rate)
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, patience=options.lr_scheduler_patience,
+                                                                  mode='min', threshold=options.min_loss_delta,
+                                                                  threshold_mode='abs')
+        early_stopping = EarlyStopping(patience=options.early_stopping_patience, min_difference=options.min_loss_delta)
+
+        progress_bar = tqdm(range(options.num_epochs))
 
         for _ in progress_bar:
             optimiser.zero_grad()
-            residuals = self.calculate_residuals(fixed_parameters, optimisation_parameters)
+            residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type)
             # noinspection PyTypeChecker
             loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
             loss.backward()
 
-            # TODO: Focus training on aligning pairs initially, later expanding it to all frames.
-            # Can mask gradients as such: optimisation_parameters.translation_vectors.grad[row_to_mask, :] *= 0.0
+            # Pin first frames at origin.
+            optimisation_parameters.translation_vectors.grad[0] *= 0.0
+            optimisation_parameters.rotation_quaternions.grad[0] *= 0.0
 
             optimiser.step()
             lr_scheduler.step(loss)
@@ -769,23 +1110,45 @@ class PoseOptimiser:
 
         return optimisation_parameters.to_trajectory()
 
-    def calculate_residuals(self, fixed_parameters: FixedParameters,
-                            optimisation_parameters: OptimisationParameters) -> torch.Tensor:
-        p = self.project_to_world_coords(fixed_parameters.frame_i,
-                                         fixed_parameters.camera_matrix,
-                                         optimisation_parameters)
-        q = self.project_to_world_coords(fixed_parameters.frame_j,
-                                         fixed_parameters.camera_matrix,
-                                         optimisation_parameters)
+    def _calculate_residuals(self, fixed_parameters: FeatureSetTorch,
+                             optimisation_parameters: OptimisationParameters,
+                             residual_type: ResidualType) -> torch.Tensor:
+        """
 
-        return p - q
-        # q_ = self.project_to_image_coords(p, fixed_parameters.frame_j, fixed_parameters.camera_matrix,
-        #                                   optimisation_parameters)
-        #
-        # return fixed_parameters.frame_j.points.T - q_
+        :param fixed_parameters:
+        :param optimisation_parameters:
+        :param residual_type:
+        :return:
+        """
+        p = self._project_to_world_coords(fixed_parameters.frame_i,
+                                          fixed_parameters.camera_matrix,
+                                          optimisation_parameters)
 
-    def project_to_world_coords(self, frame_data: FeatureDataTorch, camera_matrix: torch.Tensor,
-                                pose_data: OptimisationParameters) -> torch.Tensor:
+        if residual_type == ResidualType.World3D:
+            q = self._project_to_world_coords(fixed_parameters.frame_j,
+                                              fixed_parameters.camera_matrix,
+                                              optimisation_parameters)
+
+            return p - q
+        elif residual_type == ResidualType.Image2D:
+            q_ = self._project_to_image_coords(p, fixed_parameters.frame_j, fixed_parameters.camera_matrix,
+                                               optimisation_parameters)
+
+            return fixed_parameters.frame_j.points.T - q_
+        else:
+            raise RuntimeError(f"calculate_residuals got give an unsupported residuals type "
+                               f"{residual_type}.")
+
+    @staticmethod
+    def _project_to_world_coords(frame_data: FeatureDataTorch, camera_matrix: torch.Tensor,
+                                 pose_data: OptimisationParameters) -> torch.Tensor:
+        """
+
+        :param frame_data:
+        :param camera_matrix:
+        :param pose_data:
+        :return:
+        """
         indices = frame_data.index
         points = frame_data.points
         depth = frame_data.depth
@@ -807,14 +1170,23 @@ class PoseOptimiser:
 
         return points_world_space
 
-    def project_to_image_coords(self, points_world_space: torch.Tensor, frame_data: FeatureDataTorch,
-                                camera_matrix: torch.Tensor,
-                                pose_data: OptimisationParameters) -> torch.Tensor:
+    @staticmethod
+    def _project_to_image_coords(points_world_space: torch.Tensor, frame_data: FeatureDataTorch,
+                                 camera_matrix: torch.Tensor,
+                                 pose_data: OptimisationParameters) -> torch.Tensor:
+        """
+
+        :param points_world_space:
+        :param frame_data:
+        :param camera_matrix:
+        :param pose_data:
+        :return:
+        """
         indices = frame_data.index
 
         r = pose_data.rotation_quaternions[indices].T
         t = pose_data.translation_vectors[indices].T
-        points_camera_space = Quaternion(r).normalise().conjugate().apply(points_world_space + t)
+        points_camera_space = Quaternion(r).normalise().apply(points_world_space) + t
 
         x, y, z = points_camera_space
         f_x, f_y, c_x, c_y = camera_matrix[0, 0], camera_matrix[1, 1], camera_matrix[0, 2], camera_matrix[1, 2]
@@ -822,13 +1194,23 @@ class PoseOptimiser:
 
         return points_image_space
 
-    def interpolate_poses_without_matches(self, feature_set: FeatureSet, optimised_camera_trajectory: np.ndarray):
-        frames_with_matched_features = set(feature_set.frame_i.index + feature_set.frame_j.index)
+    @staticmethod
+    def _interpolate_poses_without_matches(feature_set: FeatureSet, optimised_camera_trajectory: np.ndarray):
+        """
+
+        :param feature_set:
+        :param optimised_camera_trajectory:
+        :return:
+        """
+        num_frames = len(optimised_camera_trajectory)
+
+        all_indices = feature_set.frame_i.index + feature_set.frame_j.index
+        frames_with_matched_features = set(index for index in all_indices if index < num_frames)
 
         chunks = []
         chunk = []
 
-        for frame_index in range(self.dataset.num_frames):
+        for frame_index in range(num_frames):
             if frame_index not in frames_with_matched_features:
                 chunk.append(frame_index)
             elif chunk:
@@ -841,7 +1223,7 @@ class PoseOptimiser:
         interpolated_poses = optimised_camera_trajectory.copy()
 
         for chunk in chunks:
-            start = chunk[0] - 1
+            start = max(0, chunk[0] - 1)
             end = chunk[-1] + 1
 
             start_rotation = optimised_camera_trajectory[start, :4]
@@ -850,7 +1232,7 @@ class PoseOptimiser:
             end_position = optimised_camera_trajectory[end, 4:]
 
             key_frame_times = [0, 1]
-            times_to_interpolate = np.linspace(0, 1, num=len(chunk) + 2)
+            times_to_interpolate = np.linspace(0, 1, num=end - start + 1)
 
             slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
             lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
@@ -862,18 +1244,23 @@ class PoseOptimiser:
 
 
 def main():
+    # TODO: Complete docstrings.
+
     parser = argparse.ArgumentParser()
     parser.add_argument('dataset_path', type=str, help='Path to the VTM formatted dataset.')
     parser.add_argument('--num_frames', type=int, default=-1,
                         help='Number of frames to optimise. If set to -1 (default), use all frames.')
+    parser.add_argument('--fine_tune', action='store_true', help='Whether to perform an additional fine tuning step.')
+    parser.add_argument('--params_init', type=str, choices=['gt', 'random', 'colmap'], default='gt',
+                        help='How to initialise the camera trajectory.')
+    parser.add_argument('--random_seed', type=int, default=None,
+                        help='Random seed to use when initialising camera trajectory with random data.')
     args = parser.parse_args()
 
     if not VTMDataset.is_valid_folder_structure(args.dataset_path):
         raise RuntimeError(f"The path {args.dataset_path} does not point to a valid dataset.")
 
     dataset = VTMDataset(args.dataset_path, overwrite_ok=False)
-
-    dataset.use_estimated_camera_parameters(COLMAPOptions())
     dataset.create_or_find_masks()
 
     num_frames = args.num_frames
@@ -883,27 +1270,39 @@ def main():
     elif num_frames < 2:
         raise RuntimeError(f"--num_frames must at least 2, but got {num_frames}.")
 
+    if args.params_init == 'colmap':
+        dataset.use_estimated_camera_parameters()
+    elif args.params_init == 'random':
+        with temp_seed(args.random_seed):
+            dataset.camera_trajectory[:, :4] = Rotation.random(len(dataset), random_state=args.random_seed).as_quat()
+            dataset.camera_trajectory[:, 4:] = np.random.normal(loc=0., scale=.1, size=(len(dataset), 3))
+
     optimiser = PoseOptimiser(dataset)
-    camera_trajectory = optimiser.run(min_features_per_frame=40, max_features_per_frame=2048, num_epochs=100000,
-                                      num_frames=num_frames)
-    # TODO: Complete docstrings.
-    # TODO: Cache image feature data and frame pairs used to generate the data
-    # TODO: Saved optimised trajectory
-    # TODO: Create mesh with TSDFFusion using the original trajectory
-    # TODO: Create mesh with TSDFFusion using the optimised trajectory
-    reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
-                                               sdf_num_voxels=4000000)
-    mesh_before = Video2Mesh._create_static_mesh(dataset, num_frames, options=reconstruction_options)
+    camera_trajectory = optimiser.run(
+        feature_extraction_options=FeatureExtractionOptions(
+            min_features=40,
+            max_features=2048
+        ),
+        optimisation_options=OptimisationOptions(
+            num_epochs=20000,
+            num_frames=num_frames,
+            learning_rate=1e-2,
+            lr_scheduler_patience=50,
+            fine_tune=args.fine_tune
+        )
+    )
 
-    camera_trajectory_backup = dataset.camera_trajectory.copy()
-    dataset.camera_trajectory = camera_trajectory
+    if optimiser.debug_path:
+        reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
+                                                   sdf_num_voxels=80000000)
+        log("Running TSDFFusion on initial pose data...")
+        mesh_before = tsdf_fusion(dataset, num_frames=num_frames, options=reconstruction_options)
+        mesh_before.export(os.path.join(optimiser.debug_path, 'before.ply'))
 
-    mesh_after = Video2Mesh._create_static_mesh(dataset, num_frames, options=reconstruction_options)
-
-    dataset.camera_trajectory = camera_trajectory_backup
-
-    mesh_before.export('before.ply')
-    mesh_after.export('after.ply')
+        dataset.camera_trajectory = camera_trajectory
+        log("Running TSDFFusion on final pose data..")
+        mesh_after = tsdf_fusion(dataset, num_frames=num_frames, options=reconstruction_options)
+        mesh_after.export(os.path.join(optimiser.debug_path, 'after.ply'))
 
 
 if __name__ == '__main__':

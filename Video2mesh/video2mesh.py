@@ -4,14 +4,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import time
 import warnings
 from os.path import join as pjoin
 from pathlib import Path
+from typing import Optional, Set
 
 import numpy as np
 import openmesh as om
-import sys
-import time
 import trimesh
 from PIL import Image
 from numpy.polynomial import Polynomial
@@ -22,11 +23,12 @@ from trimesh.exchange.export import export_mesh
 from trimesh.exchange.ply import load_ply
 
 from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask
+from Video2mesh.fusion import tsdf_fusion
 from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
+from Video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
 from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
-from thirdparty.tsdf_fusion_python import fusion
 
 
 class Video2Mesh:
@@ -93,6 +95,26 @@ class Video2Mesh:
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
 
+        if self.options.optimise_camera_trajectory:
+            log(f"Optimising camera trajectory...")
+            optimiser = PoseOptimiser(dataset)
+            # TODO: Allow optimisation options to be set via CLI?
+            dataset.camera_trajectory = optimiser.run(
+                feature_extraction_options=FeatureExtractionOptions(
+                    min_features=40,
+                    max_features=2048,
+                    ignore_dynamic_objects=True
+                ),
+                optimisation_options=OptimisationOptions(
+                    num_epochs=20000,
+                    num_frames=self.num_frames,
+                    learning_rate=1e-2,
+                    lr_scheduler_patience=50,
+                    # TODO: Add CLI argument for pose optimiser's fine tuning option.
+                    fine_tune=True
+                )
+            )
+
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
@@ -130,11 +152,6 @@ class Video2Mesh:
 
         log("Aligning foreground and background scenes...")
         foreground_scene.apply_transform(centering_transform)
-
-        # TODO: Change this so that the scene is transformed instead of the static mesh.
-        # if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
-        #     static_mesh = self.align_bundle_fusion_reconstruction(dataset, static_mesh)
-
         background_scene.apply_transform(centering_transform)
 
         if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
@@ -162,7 +179,8 @@ class Video2Mesh:
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
 
-    def _get_centroid(self, foreground_scene, background_scene):
+    @staticmethod
+    def _get_centroid(foreground_scene, background_scene):
         """
         Get the centroid of two scenes.
 
@@ -430,7 +448,8 @@ class Video2Mesh:
 
         return dataset
 
-    def refine_colmap_poses(self, dataset: VTMDataset):
+    @staticmethod
+    def refine_colmap_poses(dataset: VTMDataset):
         """
         Refine the pose data estimated with COLMAP with additional data from BundleFusion.
 
@@ -615,13 +634,15 @@ class Video2Mesh:
         return scene
 
     @classmethod
-    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions()):
+    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions(),
+                            frame_set: Optional[Set[int]] = None):
         """
         Create a static mesh of the scene.
 
         :param dataset: The dataset to create the mesh from.
         :param num_frames: The max number of frames to use from the dataset.
         :param options: The options/settings for creating the static mesh.
+        :param frame_set: The subset of frames to use for reconstruction (only applies to TSDFFusion method).
 
         :return: The reconstructed 3D mesh of the scene.
         """
@@ -689,75 +710,7 @@ class Video2Mesh:
 
             mesh = trimesh.Trimesh(**mesh_data)
         elif options.reconstruction_method == MeshReconstructionMethod.TSDF_FUSION:
-            # ======================================================================================================== #
-            # (Optional) This is an example of how to compute the 3D bounds
-            # in world coordinates of the convex hull of all camera view
-            # frustums in the dataset
-            # ======================================================================================================== #
-            log("Estimating voxel volume bounds...")
-
-            cam_intr = dataset.camera_matrix
-            vol_bnds = np.zeros((3, 2))
-
-            # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
-            # (this typically results in floating fragments in the static mesh.)
-            mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
-
-            for i in range(num_frames):
-                # Read depth image and camera pose
-                mask = dataset.mask_dataset[i]
-                mask = dilate_mask(mask, mask_dilation_options)
-                depth_im = dataset.depth_dataset[i]
-                depth_im[mask > 0] = 0.0
-                cam_pose = pose_vec2mat(dataset.camera_trajectory[i])  # 4x4 rigid transformation matrix
-
-                # Compute camera view frustum and extend convex hull
-                view_frust_pts = fusion.get_view_frustum(depth_im, cam_intr, cam_pose)
-                vol_bnds[:, 0] = np.minimum(vol_bnds[:, 0], np.amin(view_frust_pts, axis=1))
-                vol_bnds[:, 1] = np.maximum(vol_bnds[:, 1], np.amax(view_frust_pts, axis=1))
-            # ======================================================================================================== #
-
-            # ======================================================================================================== #
-            # Integrate
-            # ======================================================================================================== #
-            if options.sdf_num_voxels:
-                # actual_num_voxels = np.ceil(np.product((vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_voxel_size))
-                voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_num_voxels) ** (1 / 3)
-            else:
-                voxel_size = options.sdf_voxel_size
-
-            # Initialize voxel volume
-            log("Initializing voxel volume...")
-            tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=voxel_size)
-
-            # Loop through RGB-D images and fuse them together
-            t0_elapse = time.time()
-
-            log("Fusing frames...")
-
-            for i in tqdm(range(num_frames)):
-                # Read RGB-D image and camera pose
-                color_image = dataset.rgb_dataset[i]
-                mask = dataset.mask_dataset[i]
-                mask = dilate_mask(mask, mask_dilation_options)
-                depth_im = dataset.depth_dataset[i]
-                depth_im[mask > 0] = 0.0
-                cam_pose = pose_vec2mat(dataset.camera_trajectory[i])
-
-                # Integrate observation into voxel volume (assume color aligned with depth)
-                tsdf_vol.integrate(color_image, depth_im, cam_intr, cam_pose, obs_weight=1.)
-
-            fps = dataset.num_frames / (time.time() - t0_elapse)
-            log("Average FPS: {:.2f}".format(fps))
-
-            # Get mesh from voxel volume and save to disk (can be viewed with Meshlab)
-            verts, faces, norms, colors = tsdf_vol.get_mesh()
-
-            # TODO: Cleanup mesh for floating fragments (e.g. via connected components analysis).
-            # TODO: Fix this. It seems to mess up the order of the face vertices or something.
-            # verts, faces = Video2Mesh.cleanup_with_connected_components(verts, faces, is_object=False, min_components=10)
-
-            mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors, vertex_normals=norms)
+            mesh = tsdf_fusion(dataset, num_frames, options, frame_set)
         else:
             raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
 

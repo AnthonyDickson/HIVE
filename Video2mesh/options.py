@@ -415,6 +415,7 @@ class Video2MeshOptions(Options):
                  num_frames=-1,
                  estimate_depth=False, estimate_camera_params=False,
                  refine_colmap_poses=False,
+                 optimise_camera_trajectory=False,
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
         :param create_masks: Whether to create masks for dynamic objects
@@ -428,6 +429,8 @@ class Video2MeshOptions(Options):
         :param refine_colmap_poses: Whether to refine estimated pose data from COLMAP with pose data from BundleFusion.
             Note that this argument is only valid if the flag '--estimate_camera_params' is used and BundleFusion is the
             specified mesh reconstruction method.
+        :param optimise_camera_trajectory: Whether to refine the camera trajectory with SIFT features and a
+            gradient descent based optimiser.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         """
@@ -438,6 +441,7 @@ class Video2MeshOptions(Options):
         self.estimate_depth = estimate_depth
         self.estimate_camera_params = estimate_camera_params
         self.refine_colmap_poses = refine_colmap_poses
+        self.optimise_camera_trajectory = optimise_camera_trajectory
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
 
@@ -473,6 +477,10 @@ class Video2MeshOptions(Options):
                                 "Note that this argument is only valid if the flag '--estimate_camera_params' is used "
                                 "and BundleFusion is the specified mesh reconstruction method.",
                            action='store_true')
+        group.add_argument('--optimise_camera_trajectory',
+                           help="Whether to refine the camera trajectory with SIFT features and a "
+                                "gradient descent based optimiser.",
+                           action='store_true')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
                            default='thirdparty/webxr3dvideo/docs')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
@@ -488,6 +496,7 @@ class Video2MeshOptions(Options):
             estimate_depth=args.estimate_depth,
             estimate_camera_params=args.estimate_camera_params,
             refine_colmap_poses=args.refine_colmap_poses,
+            optimise_camera_trajectory=args.optimise_camera_trajectory,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url
         )

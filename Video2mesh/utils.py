@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 from multiprocessing.pool import ThreadPool
 from typing import Optional
@@ -20,7 +21,7 @@ def validate_shape(x: np.ndarray, x_name: str, expected_shape: tuple):
     :param x: The array to validate.
     :param x_name: The name of the array (e.g. the parameter name).
     :param expected_shape: The expected shape as a tuple. Dimensions with a variable size can indicated with a
-    value of None, e.g. (None, 3) accepts any 2D array as long as the second dimension has a size of 3.
+        value of None, e.g. (None, 3) accepts any 2D array as long as the second dimension has a size of 3.
     """
     assert type(expected_shape) is tuple, "`expected_shape` must be a tuple."
 
@@ -78,3 +79,14 @@ def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
         results.append(return_value)
 
     return results
+
+
+@contextlib.contextmanager
+def temp_seed(seed):
+    state = np.random.get_state()
+    np.random.seed(seed)
+
+    try:
+        yield
+    finally:
+        np.random.set_state(state)

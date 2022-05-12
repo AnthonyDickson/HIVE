@@ -7,7 +7,7 @@ from Video2mesh.options import MaskDilationOptions
 from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
-def pose_vec2mat(pose):
+def pose_vec2mat(pose: np.ndarray) -> np.ndarray:
     """
     Convert a transformation 7-vector [r, t] to a (4, 4) homogenous transformation matrix.
 
@@ -18,11 +18,24 @@ def pose_vec2mat(pose):
     R = Rotation.from_quat(pose[:4]).as_matrix()
     t = pose[4:].reshape((-1, 1))
 
-    M = np.hstack((R, t))
-    M = np.vstack((M, np.zeros(4)))
-    M[-1, -1] = 1
+    M = np.eye(4, dtype=R.dtype)
+    M[:3, :3] = R
+    M[:3, 3:] = t
 
     return M
+
+
+def pose_mat2vec(pose: np.ndarray) -> np.ndarray:
+    """
+    Convert a homogenous transformation matrix to a transformation 7-vector [r, t].
+
+    :param pose: The (4, 4) homogenous transformation matrix to convert.
+    :return: The 7-vector transformation.
+    """
+    quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()
+    translation_vector = pose[:3, 3]
+
+    return np.hstack((quaternion, translation_vector))
 
 
 def get_pose_components(pose):
@@ -38,6 +51,70 @@ def get_pose_components(pose):
     t = pose[:3, 3:]
 
     return R, t
+
+
+def vector_trajectory_to_matrix_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
+    """
+    Convert each pose in a camera trajectory from a quaternion + translation vector to a homogenous 4x4 transformation.
+
+    :param camera_trajectory: The (N, 7) camera trajectory to adjust.
+        Each row should be a quaternion (scalar last) and a translation vector.
+    :return: The (N, 4, 4) camera trajectory.
+    """
+    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
+
+    T = np.tile(np.eye(4), (len(camera_trajectory), 1, 1))
+    T[:, :3, :3] = Rotation.from_quat(camera_trajectory[:, :4]).as_matrix()
+    T[:, :3, 3] = camera_trajectory[:, 4:]
+
+    return T
+
+
+def matrix_trajectory_to_vector_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
+    """
+    Convert each pose in a camera trajectory from a homogenous 4x4 transformation to a quaternion + translation vector.
+
+    :param camera_trajectory: The (N, 4, 4) camera trajectory to adjust.
+        Each row should be a 4x4 homogenous transformation matrix.
+    :return: The (N, 7) camera trajectory where each row is a quaternion and translation vector.
+    """
+    validate_shape(camera_trajectory, 'camera_trajectory', (None, 4, 4))
+
+    r = Rotation.from_matrix(camera_trajectory[:, :3, :3]).as_quat()
+    t = camera_trajectory[:, :3, 3]
+
+    return np.hstack((r, t))
+
+
+def normalise_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
+    """
+    Adjust a camera trajectory so that the first pose is the identity.
+    :param camera_trajectory: The (N, 7) camera trajectory to adjust.
+        Each row should be a quaternion (scalar last) and a translation vector.
+    :return: The normalised camera trajectory.
+    """
+    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
+
+    T = vector_trajectory_to_matrix_trajectory(camera_trajectory)
+    T = np.linalg.inv(T[0]) @ T
+
+    return matrix_trajectory_to_vector_trajectory(T)
+
+
+def invert_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
+    """
+    Get the inverse of the camera trajectory.
+
+    :param camera_trajectory: The (N, 7) camera trajectory to invert.
+        Each row should be a quaternion (scalar last) and a translation vector.
+    :return: The inverted camera trajectory.
+    """
+    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
+
+    T = vector_trajectory_to_matrix_trajectory(camera_trajectory)
+    T = np.linalg.inv(T)
+
+    return matrix_trajectory_to_vector_trajectory(T)
 
 
 def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):

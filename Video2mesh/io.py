@@ -1322,7 +1322,7 @@ class VTMDataset(DatasetBase):
 
         return self
 
-    def use_estimated_camera_parameters(self, colmap_options: COLMAPOptions) -> 'VTMDataset':
+    def use_estimated_camera_parameters(self, colmap_options = COLMAPOptions()) -> 'VTMDataset':
         """
         Use camera matrix and trajectory data estimated with COLMAP.
         These will be created if they do not already exist.
@@ -1347,7 +1347,7 @@ class VTMDataset(DatasetBase):
 
         return self
 
-    def _load_camera_parameters(self, load_ground_truth_data=True) -> Tuple[np.ndarray, np.ndarray]:
+    def _load_camera_parameters(self, load_ground_truth_data=True, normalise=True) -> Tuple[np.ndarray, np.ndarray]:
         """
         Load the ground truth camera matrix and trajectory from disk.
 
@@ -1357,6 +1357,7 @@ class VTMDataset(DatasetBase):
 
         :param load_ground_truth_data: Whether to use the ground truth camera parameters or to use
             estimated camera parameters (e.g. from COLMAP).
+        :param normalise: Whether to normalise the pose data s.t. the first pose is the identity.
         """
         if load_ground_truth_data:
             camera_matrix = np.loadtxt(self.path_to_camera_matrix)
@@ -1379,6 +1380,13 @@ class VTMDataset(DatasetBase):
         if len(camera_trajectory.shape) != 2 or camera_trajectory.shape[1] != 7:
             raise RuntimeError(f"Expected camera trajectory to be a Nx7 matrix,"
                                f" but got {camera_trajectory.shape} instead.")
+
+        if normalise:
+            T = np.tile(np.eye(4), (len(camera_trajectory), 1, 1))
+            T[:, :3, :3] = Rotation.from_quat(camera_trajectory[:, :4]).as_matrix()
+            T[:, :3, 3] = camera_trajectory[:, 4:]
+            T = np.linalg.inv(T[0]) @ T
+            camera_trajectory = np.hstack((Rotation.from_matrix(T[:, :3, :3]).as_quat(), T[:, :3, 3]))
 
         return camera_matrix, camera_trajectory
 
@@ -1840,6 +1848,7 @@ class StrayScannerAdaptor(DatasetAdaptor):
             f"Confidence filter must be one of the following: {self.depth_confidence_levels}."
 
     def convert(self) -> VTMDataset:
+        # TODO: Fix handling of datasets captured with different device orientations.
         video_metadata = self._get_video_metadata()
 
         if VTMDataset.is_valid_folder_structure(self.output_path):
@@ -1959,9 +1968,9 @@ class StrayScannerAdaptor(DatasetAdaptor):
         :param target_resolution: The resolution that the final video frames will be resized to.
         """
         height, width = target_resolution
-        # Input video is rotated 90 degrees anti-clockwise for some reason.
-        # Need to swap height and width.
-        width, height = height, width
+        # # Input video is rotated 90 degrees anti-clockwise for some reason.
+        # # Need to swap height and width.
+        # width, height = height, width
 
         metadata = DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width,
                                    height=height, depth_scale=1. / 1000.)
@@ -2054,9 +2063,9 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
         def image_transform(frame):
             frame = cv2.resize(frame, target_resolution_cv)
-            # Input video is rotated 90 degrees anti-clockwise for some reason.
-            # Need to adjust camera matrix and RGB-D data so that it is the right way up.
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            # # Input video is rotated 90 degrees anti-clockwise for some reason.
+            # # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+            # frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             return frame
 
@@ -2095,9 +2104,9 @@ class StrayScannerAdaptor(DatasetAdaptor):
             depth_map[confidence_map < filter_level] = 0
 
             depth_map = cv2.resize(depth_map, target_resolution_cv)
-            # Input video is rotated 90 degrees anti-clockwise for some reason.
-            # Need to adjust camera matrix and RGB-D data so that it is the right way up.
-            depth_map = cv2.rotate(depth_map, cv2.ROTATE_90_CLOCKWISE)
+            # # Input video is rotated 90 degrees anti-clockwise for some reason.
+            # # Need to adjust camera matrix and RGB-D data so that it is the right way up.
+            # depth_map = cv2.rotate(depth_map, cv2.ROTATE_90_CLOCKWISE)
 
             output_depth_map_path = pjoin(output_depth_path, f"{i:06d}.png")
             cv2.imwrite(output_depth_map_path, depth_map)
