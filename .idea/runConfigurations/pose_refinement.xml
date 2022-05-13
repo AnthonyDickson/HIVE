@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="video2mesh (Docker)" type="PythonConfigurationType" factoryName="Python">
+  <configuration default="false" name="pose_refinement" type="PythonConfigurationType" factoryName="Python">
     <module name="video2mesh" />
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
@@ -41,8 +41,8 @@
       </option>
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
-    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Video2mesh/video2mesh.py" />
-    <option name="PARAMETERS" value="--base_path data/rgbd_dataset_freiburg3_walking_xyz --max_depth_dist 0.1 --overwrite_ok --create_masks --num_frames 150 --estimate_camera_params --optimise_camera_trajectory --estimate_depth --mesh_reconstruction_method tsdf_fusion --sdf_volume_size 10 --sdf_num_voxels 40000000" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Video2mesh/pose_optimisation.py" />
+    <option name="PARAMETERS" value="data/rgbd_dataset_freiburg3_walking_xyz_vtm --num_frames 150 --params_init colmap --fine_tune" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />

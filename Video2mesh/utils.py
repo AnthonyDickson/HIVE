@@ -60,13 +60,14 @@ def log(message, prefix='', end='\n', file=None):
 def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
     """
     Process args in parallel with a progress bar.
+    Note that this function blocks and the results are not accessible until all `args` have been processed.
 
     :param func: The function to apply to the given arguments.
     :param args: List of arguments to proces.
     :param num_processes: (optional) Number of processes to spawn.
     :return: A list of the values returned by `func`.
     """
-    pool = ThreadPool(processes=num_processes or psutil.cpu_count(logical=False))
+    pool = ThreadPool(processes=num_processes or psutil.cpu_count())
 
     results = []
 

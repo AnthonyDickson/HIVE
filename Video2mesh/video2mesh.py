@@ -97,9 +97,9 @@ class Video2Mesh:
 
         if self.options.optimise_camera_trajectory:
             log(f"Optimising camera trajectory...")
-            optimiser = PoseOptimiser(dataset)
             # TODO: Allow optimisation options to be set via CLI?
-            dataset.camera_trajectory = optimiser.run(
+            optimiser = PoseOptimiser(
+                dataset,
                 feature_extraction_options=FeatureExtractionOptions(
                     min_features=40,
                     max_features=2048,
@@ -107,13 +107,14 @@ class Video2Mesh:
                 ),
                 optimisation_options=OptimisationOptions(
                     num_epochs=20000,
-                    num_frames=self.num_frames,
                     learning_rate=1e-2,
                     lr_scheduler_patience=50,
                     # TODO: Add CLI argument for pose optimiser's fine tuning option.
                     fine_tune=True
-                )
+                ),
+                debug=False
             )
+            dataset.camera_trajectory = optimiser.run(num_frames=self.num_frames)
 
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
@@ -587,6 +588,7 @@ class Video2Mesh:
                                   f"due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
+                # TODO: Filter long stretched out bits of floor attached to peoples' feet.
                 points2d, depth_proj = world2image(vertices, camera_matrix, R, t)
                 faces = self._triangulate_faces(points2d)
                 faces = self._filter_faces(points2d, depth_proj, faces, self.filtering_options)

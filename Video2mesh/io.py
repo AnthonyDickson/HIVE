@@ -1098,6 +1098,7 @@ class VTMDataset(DatasetBase):
             # TODO: Use optional argument in DepthOptions to specify the weights path which falls back to the
             #  environment variable if not specified.
             if depth_estimation_model == DepthEstimationModel.ADABINS:
+                # TODO: Mini-batch inference for AdaBins to speed it up?
                 adabins_inference = InferenceHelper(weights_path=os.path.abspath(os.environ['WEIGHTS_PATH']))
                 adabins_inference.predict_dir(self.path_to_rgb_frames, out_dir=estimated_depth_path)
             elif depth_estimation_model == DepthEstimationModel.LERES:
@@ -1360,8 +1361,8 @@ class VTMDataset(DatasetBase):
         :param normalise: Whether to normalise the pose data s.t. the first pose is the identity.
         """
         if load_ground_truth_data:
-            camera_matrix = np.loadtxt(self.path_to_camera_matrix)
-            camera_trajectory = np.loadtxt(self.path_to_camera_trajectory)
+            camera_matrix = np.loadtxt(self.path_to_camera_matrix, dtype=np.float32)
+            camera_trajectory = np.loadtxt(self.path_to_camera_trajectory, dtype=np.float32)
         else:
             if not os.path.isfile(self.path_to_estimated_camera_matrix) or \
                     not os.path.isfile(self.path_to_estimated_camera_trajectory):
@@ -1370,8 +1371,8 @@ class VTMDataset(DatasetBase):
                                    f"the camera trajectory file at {self.path_to_estimated_camera_trajectory}. "
                                    f"Make sure you have run `VTMDataset(...).use_estimated_camera_params().")
 
-            camera_matrix = np.loadtxt(self.path_to_estimated_camera_matrix)
-            camera_trajectory = np.loadtxt(self.path_to_estimated_camera_trajectory)
+            camera_matrix = np.loadtxt(self.path_to_estimated_camera_matrix, dtype=np.float32)
+            camera_trajectory = np.loadtxt(self.path_to_estimated_camera_trajectory, dtype=np.float32)
 
         if camera_matrix.shape != (3, 3):
             raise RuntimeError(f"Expected camera matrix to be a 3x3 matrix,"
