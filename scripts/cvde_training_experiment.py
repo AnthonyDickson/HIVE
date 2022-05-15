@@ -12,8 +12,9 @@ from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from Video2mesh.geometry import dilate_mask
-from Video2mesh.io import VTMDataset, ImageFolderDataset, BundleFusionConfig
+from Video2mesh.image_processing import dilate_mask
+from Video2mesh.io import VTMDataset, ImageFolderDataset
+from Video2mesh.fusion import BundleFusionConfig
 from Video2mesh.options import StaticMeshOptions, MaskDilationOptions, DepthOptions, DepthEstimationModel
 from Video2mesh.utils import log
 from thirdparty.consistent_depth.depth_fine_tuning import DepthFineTuner

@@ -1,13 +1,11 @@
 import datetime
 import json
 import os
-import re
 import shutil
 import struct
 import subprocess
 import warnings
 from argparse import Namespace
-from collections import OrderedDict
 from multiprocessing.pool import ThreadPool
 from os.path import join as pjoin
 from pathlib import Path
@@ -29,7 +27,8 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 
-from Video2mesh.geometry import pose_vec2mat, dilate_mask
+from Video2mesh.geometry import pose_vec2mat
+from Video2mesh.image_processing import dilate_mask
 from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
 from Video2mesh.utils import log, tqdm_imap
 from thirdparty.AdaBins.infer import InferenceHelper
@@ -1323,7 +1322,7 @@ class VTMDataset(DatasetBase):
 
         return self
 
-    def use_estimated_camera_parameters(self, colmap_options = COLMAPOptions()) -> 'VTMDataset':
+    def use_estimated_camera_parameters(self, colmap_options=COLMAPOptions()) -> 'VTMDataset':
         """
         Use camera matrix and trajectory data estimated with COLMAP.
         These will be created if they do not already exist.
@@ -2271,96 +2270,3 @@ class UnrealAdaptor(DatasetAdaptor):
         return dataset
 
 
-class BundleFusionConfig:
-    def __init__(self, **kwargs):
-        self.config_dict = OrderedDict(**kwargs)
-
-    def __getitem__(self, key):
-        return self.config_dict[key]
-
-    def __setitem__(self, key, value):
-        if key in self.config_dict and (value_type := type(value)) != (expected_type := type(self.config_dict[key])):
-            warnings.warn(f"The config file entry \"{key}\" is of type {expected_type} "
-                          f"but it is being set to a new value of type {value_type}")
-
-        self.config_dict[key] = value
-
-    @staticmethod
-    def load(f) -> 'BundleFusionConfig':
-        if isinstance(f, str):
-            with open(f, 'r') as fp:
-                return BundleFusionConfig._read_file(fp)
-        else:
-            return BundleFusionConfig._read_file(f)
-
-    @staticmethod
-    def _read_file(fp) -> 'BundleFusionConfig':
-        config = OrderedDict()
-
-        delimiter_pattern = re.compile("[;#]|(//)")
-
-        def convert_value(string_value):
-            if string_value[0] == '"' and string_value[-1] == '"':
-                return string_value.strip('"')
-            elif string_value == 'true':
-                return True
-            elif string_value == 'false':
-                return False
-            elif string_value[-1] == 'f':
-                return float(string_value[:-1])
-            else:
-                return int(string_value)
-
-        for line in fp:
-            line = line.strip()
-
-            if delimiter_match := re.search(delimiter_pattern, line):
-                line = line[:delimiter_match.start()]
-
-            if len(line) < 1:
-                continue
-
-            attribute_name, values = line.split("=")
-            attribute_name = attribute_name.strip()
-            values = values.strip()
-
-            if len(attribute_name) < 1 or len(values) < 1:
-                continue
-
-            parts = values.split(" ")
-
-            if len(parts) > 1:
-                converted_values = [convert_value(value) for value in parts]
-            else:
-                converted_values = convert_value(values)
-
-            config[attribute_name] = converted_values
-
-        return BundleFusionConfig(**config)
-
-    def save(self, f):
-        if isinstance(f, str):
-            with open(f, 'w') as fp:
-                self._write_to_disk(fp)
-        else:
-            self._write_to_disk(f)
-
-    def _write_to_disk(self, fp):
-        def convert_to_string(value):
-            if type(value) == list:
-                return ' '.join([convert_to_string(item) for item in value])
-            elif type(value) == float:
-                return f"{value}f"
-            elif type(value) == int:
-                return str(value)
-            elif type(value) == str:
-                return f"\"{value}\""
-            elif type(value) == bool:
-                return str(value).lower()
-            else:
-                raise ValueError(
-                    f"The type '{type(value)}' is not supported for serialisation. Supported types are list, float, int and str.")
-
-        for attribute_name, value in self.config_dict.items():
-            line = f"{attribute_name} = {convert_to_string(value)};\n"
-            fp.write(line)

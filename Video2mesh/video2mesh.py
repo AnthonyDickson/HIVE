@@ -3,7 +3,6 @@ import datetime
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 import warnings
@@ -20,11 +19,11 @@ from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
-from trimesh.exchange.ply import load_ply
 
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components, dilate_mask
-from Video2mesh.fusion import tsdf_fusion
-from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor, BundleFusionConfig
+from Video2mesh.fusion import tsdf_fusion, bundle_fusion
+from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
+from Video2mesh.image_processing import dilate_mask
+from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
 from Video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
@@ -652,67 +651,9 @@ class Video2Mesh:
             num_frames = dataset.num_frames
 
         if options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
-            log("Creating masked depth maps for BundleFusion...")
-            dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
-            dataset_path = os.path.abspath(dataset.base_path)
-
-            bundle_fusion_output_path = pjoin(dataset_path, cls.bundle_fusion_folder)
-            os.makedirs(bundle_fusion_output_path, exist_ok=dataset.overwrite_ok)
-
-            log("Configuring BundleFusion...")
-            bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
-            default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
-            config = BundleFusionConfig.load(default_config_path)
-            config['s_SDFMaxIntegrationDistance'] = options.sdf_volume_size
-            config['s_SDFVoxelSize'] = options.sdf_voxel_size
-            config['s_cameraIntrinsicFx'] = int(dataset.fx)
-            config['s_cameraIntrinsicFy'] = int(dataset.fy)
-            config['s_cameraIntrinsicCx'] = int(dataset.cx)
-            config['s_cameraIntrinsicCy'] = int(dataset.cy)
-            config['s_generateMeshDir'] = bundle_fusion_output_path
-
-            config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionConfig.txt')
-            config.save(config_output_path)
-
-            bundle_fusion_bin = os.environ['BUNDLE_FUSION_BIN']
-            bundling_config_path = pjoin(bundle_fusion_path, 'zParametersBundlingDefault.txt')
-            bundling_config = BundleFusionConfig.load(bundling_config_path)
-
-            submap_size = bundling_config['s_submapSize']
-            # the `+ submap_size` is to avoid 'off-by-one' like errors.
-
-            bundling_config['s_maxNumImages'] = (num_frames + submap_size) // submap_size
-            bundling_config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionBundlingConfig.txt')
-            bundling_config.save(bundling_config_output_path)
-
-            cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
-                   dataset_path, dataset.masked_depth_folder]
-            log_path = pjoin(bundle_fusion_output_path, 'log.txt')
-
-            log(f"Running BundleFusion with command '{' '.join(cmd)}'")
-
-            with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
-                    open(log_path, mode='w') as f, \
-                    tqdm(total=num_frames) as progress_bar:
-                for line in p.stdout:
-                    f.write(line)
-
-                    if line.startswith("processing frame ") and int(line.split()[-1][:-3]) <= num_frames:
-                        progress_bar.update()
-
-            if p.returncode != 0:
-                raise RuntimeError(f"BundleFusion returned a non-zero code, "
-                                   f"check the logs for what went wrong ({os.path.abspath(log_path)}).")
-
-            # Read ply file into trimesh object
-            mesh_path = pjoin(bundle_fusion_output_path, 'mesh.ply')
-
-            with open(mesh_path, 'rb') as mesh_file:
-                mesh_data = load_ply(mesh_file)
-
-            mesh = trimesh.Trimesh(**mesh_data)
+            mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)
         elif options.reconstruction_method == MeshReconstructionMethod.TSDF_FUSION:
-            mesh = tsdf_fusion(dataset, num_frames, options, frame_set)
+            mesh = tsdf_fusion(dataset, options, num_frames)
         else:
             raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
 

@@ -1,9 +1,12 @@
-import cv2
+"""
+This module contains functions and classes used for manipulating camera trajectories, projecting points between
+2D image and 3D world coordinates, and creating point clouds.
+"""
+
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from Video2mesh.options import MaskDilationOptions
 from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
@@ -148,7 +151,7 @@ def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), 
     colour[:, :3] = rgb[valid_pixels]
     colour[:, 3] = 255
 
-    return colour, points
+    return points, colour
 
 
 def world2image(points, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0, dtype=np.int32):
@@ -203,24 +206,6 @@ def image2world(points, depth, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=
     pixel_world = R.T @ (depth * pixel_i - t)
 
     return pixel_world.T
-
-
-def dilate_mask(mask, dilation_options: MaskDilationOptions):
-    """
-    Dilate an instance segmentation mask so that it covers a larger area.
-
-    :param mask: The mask to enlarge/dilate.
-    :param dilation_options: The object containing the dilation mask/filter and other settings.
-
-    :return: The dilated mask.
-    """
-    validate_shape(mask, 'mask', expected_shape=(None, None))
-
-    mask = mask.astype(np.float32)
-    mask = cv2.dilate(mask.astype(float), dilation_options.filter, iterations=dilation_options.num_iterations)
-    mask = mask.astype(bool)
-
-    return mask
 
 
 class Quaternion:

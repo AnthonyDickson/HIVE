@@ -622,7 +622,7 @@ class FeatureExtractor:
         if chunk:
             chunks.append(chunk)
 
-        log(f"Found {len(chunks)} groups consecutive of frames.")
+        log(f"Found {len(chunks)} group(s) of consecutive frames.")
 
 
 class OptimisationParameters(torch.nn.Module):
@@ -1287,12 +1287,12 @@ def main():
         reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
                                                    sdf_num_voxels=80000000)
         log("Running TSDFFusion on initial pose data...")
-        mesh_before = tsdf_fusion(dataset, num_frames=num_frames, options=reconstruction_options)
+        mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_before.export(os.path.join(optimiser.debug_path, 'before.ply'))
 
         dataset.camera_trajectory = camera_trajectory
         log("Running TSDFFusion on final pose data..")
-        mesh_after = tsdf_fusion(dataset, num_frames=num_frames, options=reconstruction_options)
+        mesh_after = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_after.export(os.path.join(optimiser.debug_path, 'after.ply'))
 
 

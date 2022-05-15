@@ -1,3 +1,5 @@
+"""This module contains various utility functions that can't be stuffed into other modules."""
+
 import contextlib
 import datetime
 from multiprocessing.pool import ThreadPool
