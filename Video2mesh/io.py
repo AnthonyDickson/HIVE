@@ -22,6 +22,7 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
 from matplotlib import pyplot as plt
+from scipy.interpolate import interpolate
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
@@ -825,6 +826,7 @@ class VTMDataset(DatasetBase):
     rgb_folder = "rgb"
     depth_folder = "depth"
     estimated_depth_folder = "estimated_depth"
+    scaled_depth_folder = "scaled_depth"
     mask_folder = "mask"
     colmap_folder = "colmap"
     cvde_folder = "cvde"
@@ -882,6 +884,10 @@ class VTMDataset(DatasetBase):
     @property
     def path_to_estimated_depth_maps(self):
         return pjoin(self.base_path, self.estimated_depth_folder)
+
+    @property
+    def path_to_scaled_depth_maps(self):
+        return pjoin(self.base_path, self.scaled_depth_folder)
 
     @property
     def path_to_masks(self):
@@ -1404,6 +1410,61 @@ class VTMDataset(DatasetBase):
             depth_map = depth_map.astype(np.uint16)
 
             imageio.imwrite(os.path.join(output_path, f"{i:06d}.png"), depth_map)
+
+    def scale_and_shift_depth(self, scale: np.ndarray, shift: np.ndarray, num_frames=-1) -> ImageFolderDataset:
+        """
+        Apply a scale and shift to the depth maps and write these new depth maps to disk.
+
+        :param scale: Per frame scale value. These can either be a single scalar, or a (3, 3) matrix per frame.
+        :param shift: Per frame shift value. These can either be a single scalar, or a (3, 3) matrix per frame.
+        :param num_frames: (optional) The number of frames to convert.
+            If set to -1, all depth maps in the dataset will be converted.
+        :return: The depth map dataset.
+        """
+        if num_frames == -1:
+            num_frames = self.num_frames
+
+        if num_frames > len(scale) or num_frames > len(shift):
+            raise RuntimeError(f"Not enough data points in scale and shift ({min(len(scale), len(shift))}) to "
+                               f"convert {num_frames} frames.")
+
+        if os.path.isdir(self.path_to_scaled_depth_maps):
+            shutil.rmtree(self.path_to_scaled_depth_maps)
+
+        os.makedirs(self.path_to_scaled_depth_maps)
+
+        # TODO: Add some way to detect when the depth maps should be recreated.
+        def apply(index):
+            depth_map = self.depth_dataset[index]
+            scale_factor = scale[index]
+            shift_factor = shift[index]
+
+            if isinstance(scale, np.ndarray) and not isinstance(shift, np.ndarray):
+                def get_map(grid: np.ndarray) -> np.ndarray:
+                    map_f = interpolate.interp2d(
+                        x=[0, self.frame_width // 2, self.frame_width],
+                        y=[0, self.frame_height // 2, self.frame_height],
+                        z=grid
+                    )
+
+                    return map_f(x=np.arange(0, self.frame_width), y=np.arange(0, self.frame_height))
+
+                scale_map = get_map(scale_factor)
+                shift_map = get_map(shift_factor)
+
+                depth_map = scale_map * depth_map + shift_map
+            else:
+                depth_map = 1. / (scale_factor * (1. / depth_map) + shift_factor)
+
+            # TODO: Clip to range [min_depth, max_depth]?
+            depth_map *= 1000.0
+            depth_map = depth_map.astype(np.uint16)
+            imageio.imwrite(pjoin(self.path_to_scaled_depth_maps, f"{index:06d}.png"), depth_map)
+
+        log("Applying scale and shift to depth maps...")
+        tqdm_imap(apply, range(num_frames))
+
+        return ImageFolderDataset(self.path_to_scaled_depth_maps, transform=self._get_depth_map_transform())
 
     def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
         self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=True)

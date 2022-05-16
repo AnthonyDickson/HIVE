@@ -26,7 +26,7 @@ from Video2mesh.image_processing import dilate_mask
 from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor
 from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
-from Video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
+from Video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, AlignmentType
 from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
 
 
@@ -96,6 +96,7 @@ class Video2Mesh:
 
         if self.options.optimise_camera_trajectory:
             log(f"Optimising camera trajectory...")
+            alignment_type = AlignmentType.Affine
             # TODO: Allow optimisation options to be set via CLI?
             optimiser = PoseOptimiser(
                 dataset,
@@ -107,13 +108,18 @@ class Video2Mesh:
                 optimisation_options=OptimisationOptions(
                     num_epochs=20000,
                     learning_rate=1e-2,
+                    l2_regularisation=0.5,
                     lr_scheduler_patience=50,
-                    # TODO: Add CLI argument for pose optimiser's fine tuning option.
-                    fine_tune=True
+                    # TODO: Add CLI argument for pose optimiser's fine tuning and alignment type option.
+                    fine_tune=False,
+                    alignment_type=alignment_type
                 ),
-                debug=False
+                debug=True
             )
-            dataset.camera_trajectory = optimiser.run(num_frames=self.num_frames)
+            dataset.camera_trajectory, scale, shift = optimiser.run(num_frames=self.num_frames)
+
+            if alignment_type != AlignmentType.Rigid:
+                dataset.depth_dataset = dataset.scale_and_shift_depth(scale, shift, num_frames=self.num_frames)
 
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)

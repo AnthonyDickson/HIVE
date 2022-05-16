@@ -30,6 +30,16 @@ def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().numpy().copy()
 
 
+def clone_param(param: torch.nn.Parameter) -> torch.Tensor:
+    """
+    Convert a PyTorch Parameter to a Tensor and detach it from the computation graph.
+
+    :param param: The Parameter object to clone.
+    :return: The copied Parameter object as a Tensor.
+    """
+    return param.detach().clone()
+
+
 # noinspection PyArgumentList
 class FrameSamplingMode(enum.Enum):
     """Method for sampling frame pairs from a video sequence."""
@@ -625,28 +635,62 @@ class FeatureExtractor:
         log(f"Found {len(chunks)} group(s) of consecutive frames.")
 
 
+# noinspection PyArgumentList
+class AlignmentType(enum.Enum):
+    """How depth maps should be scaled and shifted (if at all) during pose optimisation."""
+
+    """Align RGB-D frames with just the camera pose."""
+    Rigid = enum.auto()
+
+    """Align RGB-D frames with the camera pose and a scale and shift per depth map."""
+    Affine = enum.auto()
+
+    """Align RGB-D frames with the camera pose and a scale and shift per depth map."""
+    Deformable = enum.auto()
+
+
 class OptimisationParameters(torch.nn.Module):
     """The parameters subject to optimisation (camera poses)."""
 
-    def __init__(self, initial_camera_poses: np.ndarray, dtype=torch.float32):
+    def __init__(self, initial_camera_poses: torch.FloatTensor,
+                 alignment_type: AlignmentType,
+                 scale_parameters: Optional[torch.FloatTensor] = None,
+                 shift_parameters: Optional[torch.FloatTensor] = None,
+                 dtype=torch.float32):
         """
         :param initial_camera_poses: The initial guess for the camera poses where each row is in the
             format [r_x, r_y, r_z, r_w, t_x, t_y, t_z] where r is a quaternion and t is a 3D position vector.
+        :param alignment_type: The method for aligning the frames and whether to add additional parameters for
+            pose optimisation.
         :param dtype: The data type to convert the parameters to.
         """
         super().__init__()
 
         def to_param(a):
-            a = torch.tensor(a, dtype=dtype)
-            return torch.nn.Parameter(a, requires_grad=True)
+            a_copy = torch.tensor(a, dtype=dtype).clone()
+            return torch.nn.Parameter(a_copy, requires_grad=True)
 
         r, t = initial_camera_poses[:, :4], initial_camera_poses[:, 4:]
         self.rotation_quaternions = to_param(r)
         self.translation_vectors = to_param(t)
 
+        self.alignment_type = alignment_type
+
+        if alignment_type == AlignmentType.Rigid:
+            shift_parameters = torch.empty(0)
+            scale_parameters = torch.empty(0)
+        elif alignment_type == AlignmentType.Affine:
+            shift_parameters = shift_parameters if shift_parameters is not None else torch.zeros(len(r))
+            scale_parameters = scale_parameters if scale_parameters is not None else torch.ones(len(r))
+        else:
+            raise RuntimeError(f"Unsupported alignment type {alignment_type}.")
+
+        self.shift = to_param(shift_parameters)
+        self.scale = to_param(scale_parameters)
+
     @property
     def dtype(self):
-        """The data type of the optimisation paramters."""
+        """The data type of the optimisation parameters."""
         return self.rotation_quaternions.dtype
 
     @property
@@ -660,8 +704,8 @@ class OptimisationParameters(torch.nn.Module):
         """
         return sum([p.nelement() for p in self.parameters()])
 
-    def to_trajectory(self) -> np.ndarray:
-        """Convert the optimisation parameters to a (N, 7) NumPy array."""
+    def get_trajectory(self) -> np.ndarray:
+        """Get the camera trajectory from the optimisation parameters as a (N, 7) NumPy array."""
         r = to_numpy(self.rotation_quaternions)
         t = to_numpy(self.translation_vectors)
 
@@ -675,13 +719,36 @@ class OptimisationParameters(torch.nn.Module):
         :param frame_indices: The frames to include.
         :return: The OptimisationParameters object that only contains the data for the specified frames.
         """
-        trajectory = self.to_trajectory()[frame_indices]
+        r = clone_param(self.rotation_quaternions[frame_indices])
+        t = clone_param(self.translation_vectors[frame_indices])
+        trajectory = torch.hstack((r, t))
 
-        return OptimisationParameters(initial_camera_poses=trajectory, dtype=self.dtype)
+        if self.shift.numel() > 0:
+            shift_parameters = clone_param(self.shift[frame_indices])
+        else:
+            shift_parameters = None
+        if self.shift.numel() > 0:
+            scale_parameters = clone_param(self.scale[frame_indices])
+        else:
+            scale_parameters = None
+
+        return OptimisationParameters(initial_camera_poses=trajectory, alignment_type=self.alignment_type,
+                                      scale_parameters=scale_parameters, shift_parameters=shift_parameters,
+                                      dtype=self.dtype)
 
     def clone(self) -> 'OptimisationParameters':
         """Get a copy of the optimisation parameters object."""
-        return OptimisationParameters(initial_camera_poses=self.to_trajectory(), dtype=self.dtype)
+
+        trajectory = torch.hstack((
+            clone_param(self.rotation_quaternions), clone_param(self.translation_vectors)
+        ))
+
+        shift_parameters = clone_param(self.shift)
+        scale_parameters = clone_param(self.scale)
+
+        return OptimisationParameters(initial_camera_poses=trajectory, alignment_type=self.alignment_type,
+                                      shift_parameters=shift_parameters, scale_parameters=scale_parameters,
+                                      dtype=self.dtype)
 
 
 class EarlyStopping:
@@ -742,35 +809,57 @@ class ResidualType(enum.Enum):
 class OptimisationOptions:
     """Configuration for the `PoseOptimiser` class."""
 
-    def __init__(self, num_epochs=20000,
-                 learning_rate=1e-2, min_loss_delta=1e-4,
-                 lr_scheduler_patience=50, early_stopping_patience=500, fine_tune=False):
+    def __init__(self, num_epochs=20000, learning_rate=1e-2, l2_regularisation=1e-4,
+                 min_loss_delta=1e-4, lr_scheduler_patience=50, early_stopping_patience=500,
+                 alignment_type=AlignmentType.Rigid, fine_tune=False):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
             lead to instability and the algorithm not finding a good solution.
+        :param l2_regularisation: Controls how much the scale and shift parameters influence the loss
+            (if alignment type is not `Rigid`). The default value is taken from the paper 'Instant 3D Photography'.
         :param min_loss_delta: The minimum change in the loss before the learning rate scheduler and early stopping
             objects start counting down to either lower the learning rate or exit early.
         :param lr_scheduler_patience: How many epochs where the loss has changed less than `min_loss_delta` before
             lowering the learning rate.
         :param early_stopping_patience: How many epochs where the loss has changed less than `min_loss_delta` before
-            exitting the optimisation loop early.
-        :param fine_tune: Whether to apply a fine tuning step at the end (another round of optimisation, but with
+            exiting the optimisation loop early.
+        :param alignment_type: The method for aligning the frames and whether to add additional parameters for
+            pose optimisation.
+        :param fine_tune: Whether to apply a fine-tuning step at the end (another round of optimisation, but with
             Image2D residuals which tend to be a slower to optimise but give slightly more accurate results.
         """
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
+        self.l2_regularisation = l2_regularisation
         self.min_loss_delta = min_loss_delta
         self.lr_scheduler_patience = lr_scheduler_patience
         self.early_stopping_patience = early_stopping_patience
         self.fine_tune = fine_tune
+        self.alignment_type = alignment_type
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
-               f"learning_rate={self.learning_rate}, min_loss_delta={self.min_loss_delta}, " \
+               f"learning_rate={self.learning_rate}, " \
+               f"l2_regularisation={self.l2_regularisation}, " \
+               f"min_loss_delta={self.min_loss_delta}, " \
                f"lr_scheduler_patience={self.lr_scheduler_patience}, " \
                f"early_stopping_patience={self.early_stopping_patience}, " \
-               f"fine_time={self.fine_tune})"
+               f"fine_time={self.fine_tune}, " \
+               f"alignment_type={self.alignment_type})"
+
+    def copy(self) -> 'OptimisationOptions':
+        """Make a copy of the optimisation options."""
+        return OptimisationOptions(
+            num_epochs=self.num_epochs,
+            learning_rate=self.learning_rate,
+            l2_regularisation=self.l2_regularisation,
+            min_loss_delta=self.min_loss_delta,
+            lr_scheduler_patience=self.lr_scheduler_patience,
+            early_stopping_patience=self.early_stopping_patience,
+            fine_tune=self.fine_tune,
+            alignment_type=self.alignment_type
+        )
 
 
 class PoseOptimiser:
@@ -796,7 +885,7 @@ class PoseOptimiser:
         self.debug = debug
         self.debug_path: Optional[str] = None
 
-    def run(self, num_frames=-1) -> np.ndarray:
+    def run(self, num_frames=-1) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Optimise the pose data.
         :param num_frames: (optional) a limit on the number of frames to use. Defaults to -1 which will use all frames.
@@ -806,11 +895,13 @@ class PoseOptimiser:
         self._setup_debug_folder()
         frame_pairs = self._sample_frame_pairs(self.frame_sampling)
         fixed_parameters = self._extract_feature_points(frame_pairs, self.feature_extraction_options)
-        optimisation_parameters = OptimisationParameters(self.dataset.camera_trajectory.copy())
-        optimised_camera_trajectory = self._optimise_pose(fixed_parameters, optimisation_parameters,
-                                                          optimisation_options=self.optimisation_options,
-                                                          num_frames=num_frames)
-        interpolated_trajectory = self._interpolate_poses_without_matches(fixed_parameters, optimised_camera_trajectory)
+        optimisation_parameters = OptimisationParameters(torch.from_numpy(self.dataset.camera_trajectory),
+                                                         alignment_type=self.optimisation_options.alignment_type)
+        optimised_parameters = self._optimise_pose(fixed_parameters, optimisation_parameters,
+                                                   optimisation_options=self.optimisation_options,
+                                                   num_frames=num_frames)
+        interpolated_trajectory = self._interpolate_poses_without_matches(fixed_parameters,
+                                                                          optimised_parameters.get_trajectory())
 
         # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
         final_camera_trajectory = invert_trajectory(interpolated_trajectory)
@@ -818,8 +909,12 @@ class PoseOptimiser:
         if self.debug_path:
             # noinspection PyTypeChecker
             np.savetxt(os.path.join(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
+            # noinspection PyTypeChecker
+            np.savetxt(os.path.join(self.debug_path, 'scale.txt'), to_numpy(optimised_parameters.scale))
+            # noinspection PyTypeChecker
+            np.savetxt(os.path.join(self.debug_path, 'shift.txt'), to_numpy(optimised_parameters.shift))
 
-        return final_camera_trajectory
+        return final_camera_trajectory, to_numpy(optimised_parameters.scale), to_numpy(optimised_parameters.shift)
 
     def _setup_debug_folder(self):
         """Create the debug folder if in debug mode and the folder doesn't already exist."""
@@ -896,7 +991,7 @@ class PoseOptimiser:
     def _optimise_pose(self, fixed_parameters: FeatureSet,
                        optimisation_parameters: OptimisationParameters,
                        optimisation_options=OptimisationOptions(),
-                       num_frames=-1) -> np.ndarray:
+                       num_frames=-1) -> OptimisationParameters:
         """
         Optimises the given poses.
 
@@ -906,8 +1001,7 @@ class PoseOptimiser:
         :param optimisation_options: The options for the optimisation algorithm.
         :param num_frames: (optional) The frame index to stop at.
             If set to -1, this value is set to the length of the dataset.
-        :return: the (N, 7) optimised camera trajectory where each row is a quaternion (scalar last) and a
-            translation vector.
+        :return: the optimised parameters.
         """
         if num_frames == -1:
             num_frames = self.dataset.num_frames
@@ -924,20 +1018,20 @@ class PoseOptimiser:
         device = fixed_parameters.device
 
         # First round, align frame pairs independently to get locally optimal alignments.
-        camera_trajectory = self._optimise_pairwise(fixed_parameters=fixed_parameters,
-                                                    optimisation_parameters=optimisation_parameters,
-                                                    optimisation_options=optimisation_options,
-                                                    num_frames=num_frames)
-        optimisation_parameters = OptimisationParameters(camera_trajectory, dtype=optimisation_parameters.dtype)
-        optimisation_parameters = optimisation_parameters.to(device)
+        pairwise_parameters = self._optimise_pairwise(fixed_parameters=fixed_parameters,
+                                                      optimisation_parameters=optimisation_parameters,
+                                                      optimisation_options=optimisation_options,
+                                                      num_frames=num_frames)
+        pairwise_parameters = pairwise_parameters.to(device)
 
         # Second round of alignment to get a more globally optimal alignment.
         # If using the frame sampling method `HIERARCHICAL`, this will introduce new constraints from non-adjacent
         # frames. These new constraints should help improve the robustness of the estimated poses.
         log("Aligning all frame pairs...")
-        camera_trajectory = self._optimisation_loop(fixed_parameters=fixed_parameters,
-                                                    optimisation_parameters=optimisation_parameters,
+        global_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
+                                                    optimisation_parameters=pairwise_parameters,
                                                     optimisation_options=optimisation_options)
+        global_parameters = global_parameters.to(device)
 
         if optimisation_options.fine_tune:
             # The final and optional round of optimisation uses a different residual type for calculating the loss -
@@ -946,36 +1040,39 @@ class PoseOptimiser:
             # This final step takes much longer than the previous two steps that use the `World3D` residuals, but also
             # produces slightly better alignments.
             log("Fine tuning...")
-            optimisation_parameters = OptimisationParameters(camera_trajectory, dtype=optimisation_parameters.dtype)
-            optimisation_parameters = optimisation_parameters.to(device)
-
-            camera_trajectory = self._optimisation_loop(fixed_parameters=fixed_parameters,
-                                                        optimisation_parameters=optimisation_parameters,
+            lr = optimisation_options.learning_rate
+            # optimisation_options.learning_rate = 1e-3
+            global_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
+                                                        optimisation_parameters=global_parameters,
                                                         optimisation_options=optimisation_options,
                                                         residual_type=ResidualType.Image2D)
+            optimisation_options.learning_rate = lr
 
-        return camera_trajectory
+        return global_parameters.cpu()
 
     def _optimise_pairwise(self, fixed_parameters: FeatureSet,
                            optimisation_parameters: OptimisationParameters,
                            optimisation_options=OptimisationOptions(),
-                           num_frames=-1) -> np.ndarray:
+                           num_frames=-1) -> OptimisationParameters:
         """
         Optimise poses over each unique consecutive frame pair in isolation and merge the resulting pose data.
+        Note: Rigid alignment is used regardless of what is specified in `optimisation_options`.
 
         :param fixed_parameters: Object containing the paired sets of correspondence data and the
             camera intrinsics matrix K.
-        :param optimisation_parameters: The pose parameters to optimise.
+        :param optimisation_parameters: The pose and depth scaling parameters to optimise.
         :param optimisation_options: The options for the optimisation algorithm.
         :param num_frames: (optional) The frame index to stop at.
             If set to -1, this value is set to the length of the dataset.
-        :return: the (N, 7) optimised camera trajectory where each row is a quaternion (scalar last) and a
-            translation vector.
+        :return: the optimised parameters.
         """
         if num_frames == -1:
             num_frames = self.dataset.num_frames
 
         device = optimisation_parameters.device
+        options = optimisation_options.copy()
+        # First align pose data alone and not scale+shift data, so force `Rigid` alignment.
+        options.alignment_type = AlignmentType.Rigid
 
         log("Pairwise frame alignment...")
 
@@ -983,11 +1080,15 @@ class PoseOptimiser:
             frame_pairs = self._sample_frame_pairs(frame_sampling_mode, num_frames)
             feature_set = fixed_parameters.subset_from(frame_pairs)
             # Clone parameters to avoid side-effects in subsequent calls.
-            trajectory = self._optimisation_loop(feature_set, optimisation_parameters.clone().to(device),
-                                                 optimisation_options)
+            optimised_parameters = self._optimisation_loop(feature_set, optimisation_parameters.clone().to(device),
+                                                           options)
+            trajectory = optimised_parameters.get_trajectory()
 
             for frame_pair in frame_pairs:
-                pose_data[tuple(frame_pair)] = trajectory[list(frame_pair)]
+                key = tuple(frame_pair)
+                indices = list(frame_pair)
+
+                pose_data[key] = trajectory[indices]
 
         # First we run the optimisation over the frame pairs (0, 1), (2, 3), ..., (n - 2, n - 1) where n is the number
         # of frames in the sequence. Since they don't overlap, they should not affect each other during
@@ -1029,30 +1130,32 @@ class PoseOptimiser:
             j_rel_to_i = subtract_pose(pose_i, pose_j)
             next_pose = add_pose(previous_pose, j_rel_to_i)
             merged_pose_data.append(next_pose)
-
             previous_pose = next_pose
 
-        camera_trajectory = np.asarray(merged_pose_data)
+        camera_trajectory = torch.from_numpy(np.asarray(merged_pose_data))
 
-        return camera_trajectory
+        return OptimisationParameters(camera_trajectory,
+                                      optimisation_parameters.alignment_type,
+                                      optimisation_parameters.scale,
+                                      optimisation_parameters.shift,
+                                      optimisation_parameters.dtype)
 
     def _optimisation_loop(self, fixed_parameters: FeatureSet,
                            optimisation_parameters: OptimisationParameters,
                            optimisation_options=OptimisationOptions(),
-                           residual_type=ResidualType.World3D) -> np.ndarray:
+                           residual_type=ResidualType.World3D) -> OptimisationParameters:
         """
         Run the full optimisation loop.
 
         :param fixed_parameters: Object containing the paired sets of correspondence data and the
             camera intrinsics matrix K.
-        :param optimisation_parameters: The pose parameters to optimise.
+        :param optimisation_parameters: The pose and depth map scaling parameters to optimise.
         :param optimisation_options: The options for the optimisation algorithm.
         :param residual_type: The type of residuals to use. Either: `World3D` which projects both frames of a frame pair
             into the world coordinate system and measures the geometric distance between correspondences in 3D space;
             or `Image2D` which projects the points of one frame onto the other and measures the pixel distance between
             the correspondences.
-        :return: the (N, 7) optimised camera trajectory where each row is a quaternion (scalar last) and a
-            translation vector.
+        :return: the optimised parameters object.
         """
         options = optimisation_options
 
@@ -1065,10 +1168,24 @@ class PoseOptimiser:
         progress_bar = tqdm(range(options.num_epochs))
 
         for _ in progress_bar:
+            # TODO: Any way of speeding this step up?
+            # This step helps prevent quaternion rotations' norms becoming zero.
+            with torch.no_grad():
+                r = optimisation_parameters.rotation_quaternions
+                r = r / torch.linalg.norm(r, ord=2, dim=1).reshape((-1, 1))
+                optimisation_parameters.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True)
+
             optimiser.zero_grad()
-            residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type)
+            residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type,
+                                                  optimisation_options.alignment_type)
             # noinspection PyTypeChecker
             loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
+
+            if options.alignment_type != AlignmentType.Rigid:
+                # noinspection PyTypeChecker
+                loss += options.l2_regularisation * torch.mean(torch.square(1. / optimisation_parameters.scale - 1.))
+                loss += 2 * options.l2_regularisation * torch.mean(torch.square(optimisation_parameters.shift))
+
             loss.backward()
 
             # Pin first frames at origin or at least whatever they were initialised to.
@@ -1092,11 +1209,12 @@ class PoseOptimiser:
             if early_stopping.should_stop:
                 break
 
-        return optimisation_parameters.to_trajectory()
+        return optimisation_parameters
 
     def _calculate_residuals(self, fixed_parameters: FeatureSet,
                              optimisation_parameters: OptimisationParameters,
-                             residual_type: ResidualType) -> torch.Tensor:
+                             residual_type: ResidualType,
+                             alignment_type = AlignmentType.Rigid) -> torch.Tensor:
         """
         Calculate the distance (residuals) between correspondences given the camera poses.
 
@@ -1107,19 +1225,23 @@ class PoseOptimiser:
             into the world coordinate system and measures the geometric distance between correspondences in 3D space;
             or `Image2D` which projects the points of one frame onto the other and measures the pixel distance between
             the correspondences.
+        :param alignment_type: (optional) How depth maps should be scaled and shifted (if at all).
         :return: Given N correspondences, returns N residuals.
         """
         p = self._project_to_world_coords(fixed_parameters.frame_i,
                                           fixed_parameters.camera_matrix,
-                                          optimisation_parameters)
+                                          optimisation_parameters,
+                                          alignment_type)
 
         if residual_type == ResidualType.World3D:
             q = self._project_to_world_coords(fixed_parameters.frame_j,
                                               fixed_parameters.camera_matrix,
-                                              optimisation_parameters)
+                                              optimisation_parameters,
+                                              alignment_type)
 
             return p - q
         elif residual_type == ResidualType.Image2D:
+            # TODO: Should the scale + shift params be applied to the world to image projection?
             q_ = self._project_to_image_coords(p, fixed_parameters.frame_j, fixed_parameters.camera_matrix,
                                                optimisation_parameters)
 
@@ -1130,18 +1252,22 @@ class PoseOptimiser:
 
     @staticmethod
     def _project_to_world_coords(frame_data: FeatureData, camera_matrix: torch.Tensor,
-                                 params: OptimisationParameters) -> torch.Tensor:
+                                 params: OptimisationParameters, alignment_type=AlignmentType.Rigid) -> torch.Tensor:
         """
         Project correspondences from 2D image coordinates to 3D world coordinates.
 
         :param frame_data: The correspondence data to project.
         :param camera_matrix: The camera matrix for projecting points into camera space.
         :param params: The optimisation parameters including the camera poses.
+        :param alignment_type: (optional) How depth maps should be scaled and shifted (if at all).
         :return: A (3, N) tensor of the projected points.
         """
         indices = frame_data.index
         points = frame_data.points
         depth = frame_data.depth
+
+        if alignment_type == AlignmentType.Affine:
+            depth = 1. / (params.scale[indices] * (1. / depth) + params.shift[indices])
 
         u, v = points.T
         f_x, f_y, c_x, c_y = camera_matrix[0, 0], camera_matrix[1, 1], camera_matrix[0, 2], camera_matrix[1, 2]
@@ -1281,7 +1407,7 @@ def main():
             fine_tune=args.fine_tune
         )
     )
-    camera_trajectory = optimiser.run(num_frames)
+    camera_trajectory, _, _ = optimiser.run(num_frames)
 
     if optimiser.debug_path:
         reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
