@@ -30,7 +30,7 @@ from tqdm import tqdm
 from Video2mesh.geometry import pose_vec2mat
 from Video2mesh.image_processing import dilate_mask
 from Video2mesh.options import COLMAPOptions, MaskDilationOptions, DepthEstimationModel, DepthOptions
-from Video2mesh.utils import log, tqdm_imap
+from Video2mesh.utils import log, tqdm_imap, cudnn
 from thirdparty.AdaBins.infer import InferenceHelper
 from thirdparty.colmap.scripts.python.read_write_model import read_model
 from thirdparty.consistent_depth.depth_fine_tuning import DepthFineTuner
@@ -39,6 +39,7 @@ from thirdparty.consistent_depth.monodepth.depth_model_registry import get_depth
 from thirdparty.consistent_depth.params import Video3dParamsParser
 from thirdparty.consistent_depth.process import DatasetProcessor
 from thirdparty.consistent_depth.utils.torch_helpers import to_device
+from thirdparty.dpt import dpt
 
 File = Union[str, Path]
 Size = Tuple[int, int]
@@ -441,7 +442,7 @@ class ImageFolderDataset(Dataset):
         self.image_filenames = filenames
         self.image_paths = [pjoin(base_dir, filename) for filename in filenames]
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> np.ndarray:
         image_path = self.image_paths[idx]
 
         if image_path.endswith('.raw'):
@@ -454,6 +455,7 @@ class ImageFolderDataset(Dataset):
             elif image.mode != 'L' and image.mode != 'I;16':
                 image = image.convert('RGB')
 
+            # noinspection PyTypeChecker
             image = np.asarray(image)
 
         if self.transform:
@@ -1109,6 +1111,8 @@ class VTMDataset(DatasetBase):
                     sampling_framerate = self.fps
 
                 self._estimate_depth_cvde(estimated_depth_path, sampling_framerate=sampling_framerate)
+            elif depth_estimation_model == DepthEstimationModel.DPT:
+                self._estimate_depth_dpt(estimated_depth_path)
             else:
                 raise RuntimeError(f"Unsupported depth estimation model '{depth_estimation_model.name}'.")
 
@@ -1284,37 +1288,122 @@ class VTMDataset(DatasetBase):
         dataset = VideoFrameDataset(pjoin(self.base_path, self.rgb_folder, '{:06d}.png'), range(self.num_frames))
         data_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
 
-        torch.backends.cudnn.enabled = True
-        torch.backends.cudnn.benchmark = True
-
         os.makedirs(path_to_estimated_depth, exist_ok=self.overwrite_ok)
-
         depth_map_index = 0
 
-        model = get_depth_model(params.model_type)(model_path_override=weights_path)
-        model.eval()
+        with cudnn():
+            model = get_depth_model(params.model_type)(model_path_override=weights_path)
+            model.eval()
 
-        with tqdm(total=len(dataset)) as progress_bar:
-            for data in data_loader:
-                data = to_device(data)
-                stacked_images, metadata = data
+            with tqdm(total=len(dataset)) as progress_bar:
+                for data in data_loader:
+                    data = to_device(data)
+                    stacked_images, metadata = data
 
-                depth_maps = model.forward(stacked_images, metadata)
+                    depth_maps = model.forward(stacked_images, metadata)
 
-                depth_map = depth_maps.detach().cpu().numpy().squeeze()
-                depth_map = 1000.0 * depth_map
-                depth_map = depth_map.astype(np.uint16)
+                    depth_map = depth_maps.detach().cpu().numpy().squeeze()
+                    depth_map = 1000.0 * depth_map
+                    depth_map = depth_map.astype(np.uint16)
 
-                output_filename = f"{depth_map_index:06d}.png"
-                imageio.imwrite(pjoin(path_to_estimated_depth, output_filename), depth_map)
+                    output_filename = f"{depth_map_index:06d}.png"
+                    imageio.imwrite(pjoin(path_to_estimated_depth, output_filename), depth_map)
 
-                depth_map_index += 1
-                progress_bar.update()
+                    depth_map_index += 1
+                    progress_bar.update()
 
         # TODO: (optional) Interpolate pose data
         # TODO: (optional) Refine BundleFusion pose data.
         with open(frame_step_json_path, 'w') as f:
             json.dump(dict(sampling_framerate=sampling_framerate), f)
+
+    def _estimate_depth_dpt(self, output_path: str, weights_filename='dpt_hybrid_nyu.pt', optimize=True):
+        # TODO: Fix memory leak that happens after using the DPT model.
+        #  Memory only gets released after the script exits. I suspect it has something to do with the timm package or
+        #  if not that, something in the DPT model code.
+        model_path = os.path.join(os.environ['WEIGHTS_PATH'], weights_filename)
+
+        if not os.path.isfile(model_path):
+            model_path = os.path.join('weights', weights_filename)
+
+        # TODO: Once memory leak is fixed, re-enable use of cuDNN
+        # with cudnn():
+        # select device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # load network
+        net_w = 640
+        net_h = 480
+
+        model = dpt.models.DPTDepthModel(
+            path=model_path,
+            scale=0.000305,
+            shift=0.1378,
+            invert=True,
+            backbone="vitb_rn50_384",
+            non_negative=True,
+            enable_attention_hooks=False,
+        )
+
+        normalization = dpt.transforms.NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
+        transform = transforms.Compose(
+            [
+                dpt.transforms.Resize(
+                    net_w,
+                    net_h,
+                    resize_target=None,
+                    keep_aspect_ratio=True,
+                    ensure_multiple_of=32,
+                    resize_method="minimal",
+                    image_interpolation_method=cv2.INTER_CUBIC,
+                ),
+                normalization,
+                dpt.transforms.PrepareForNet(),
+            ]
+        )
+
+        model.eval()
+
+        if optimize and device == torch.device("cuda"):
+            model = model.to(memory_format=torch.channels_last)
+            model = model.half()
+
+        model.to(device)
+
+        # create output folder
+        os.makedirs(output_path, exist_ok=True)
+
+        for i, image in tqdm(enumerate(self.rgb_dataset), total=len(self.rgb_dataset)):
+            img = image / 255.0
+
+            img_input = transform({"image": img})["image"]
+
+            # compute
+            with torch.no_grad():
+                sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
+
+                if optimize and device == torch.device("cuda"):
+                    sample = sample.to(memory_format=torch.channels_last)
+                    sample = sample.half()
+
+                prediction = model.forward(sample)
+                prediction = (
+                    torch.nn.functional.interpolate(
+                        prediction.unsqueeze(1),
+                        size=img.shape[:2],
+                        mode="bicubic",
+                        align_corners=False,
+                    )
+                        .squeeze()
+                        .cpu()
+                        .numpy()
+                )
+
+            depth_map = prediction * 1000.0
+            depth_map = depth_map.astype(np.uint16)
+
+            imageio.imwrite(os.path.join(output_path, f"{i:06d}.png"), depth_map)
 
     def use_ground_truth_camera_parameters(self) -> 'VTMDataset':
         self.camera_matrix, self.camera_trajectory = self._load_camera_parameters(load_ground_truth_data=True)
@@ -1733,7 +1822,7 @@ class TUMAdaptor(DatasetAdaptor):
         log(f"Copying depth maps.")
 
         def convert_depth_to_mm(input_path, output_path):
-            depth_map = imageio.imread(input_path)
+            depth_map = imageio.v2.imread(input_path)
             depth_map = depth_map * self.depth_scale_factor  # convert to metres from non-standard scale & units.
             depth_map = (1000 * depth_map).astype(np.uint16)  # convert to 16-bit millimetres.
             imageio.imwrite(output_path, depth_map)
@@ -2092,14 +2181,14 @@ class StrayScannerAdaptor(DatasetAdaptor):
 
         def convert_depth_map(i, filename):
             depth_map_path = pjoin(source_depth_path, filename)
-            depth_map = imageio.imread(depth_map_path)
+            depth_map = imageio.v2.imread(depth_map_path)
 
             if depth_map.dtype != np.uint16:
                 raise RuntimeError(f"Expected 16-bit depth maps, got {depth_map.dtype}.")
 
             confidence_map_filename = f"{Path(filename).stem}.png"
             confidence_map_path = pjoin(confidence_path, confidence_map_filename)
-            confidence_map = imageio.imread(confidence_map_path)
+            confidence_map = imageio.v2.imread(confidence_map_path)
 
             depth_map[confidence_map < filter_level] = 0
 
@@ -2254,7 +2343,7 @@ class UnrealAdaptor(DatasetAdaptor):
         depth_scale = dataset_metadata.max_depth / depth_map_max_value
 
         def convert_depth_to_mm(input_path, output_path):
-            depth_map = imageio.imread(input_path)
+            depth_map = imageio.v2.imread(input_path)
             depth_map = depth_scale * depth_map
             depth_map = (1000 * depth_map).astype(np.uint16)
             imageio.imwrite(output_path, depth_map)
@@ -2268,5 +2357,3 @@ class UnrealAdaptor(DatasetAdaptor):
         dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
         return dataset
-
-

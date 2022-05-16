@@ -87,6 +87,8 @@ RUN python3 download_weights.py && \
     gdown https://drive.google.com/uc?id=1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF -O ${WEIGHTS_PATH}/AdaBins_nyu.pt && \
     # FlowNet2 weights
     gdown https://drive.google.com/uc?id=1hF8vS6YeHkx3j2pfCeQqqZGwA_PJq_Da -O ${WEIGHTS_PATH}/flownet2.pth && \
+    # DPT weights
+    wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt && \
     # COLMAP vocab file.
     mkdir -p ${COLMAP_VOCAB_PATH} && \
     wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \

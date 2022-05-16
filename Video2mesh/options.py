@@ -70,22 +70,29 @@ class StorageOptions(Options):
         return StorageOptions(base_path=args.base_path, overwrite_ok=args.overwrite_ok)
 
 
+# noinspection PyArgumentList
 class DepthFormat(enum.Enum):
     DEPTH_TO_POINT = enum.auto()
     DEPTH_TO_PLANE = enum.auto()
 
 
 class DepthEstimationModel(enum.Enum):
+    # noinspection PyArgumentList
     ADABINS = enum.auto()
+    # noinspection PyArgumentList
     LERES = enum.auto()
+    # noinspection PyArgumentList
     CVDE = enum.auto()
+    # noinspection PyArgumentList
+    DPT = enum.auto()
 
     @classmethod
     def get_choices(cls):
         return {
             'adabins': cls.ADABINS,
             'leres': cls.LERES,
-            'cvde': cls.CVDE
+            'cvde': cls.CVDE,
+            'dpt': cls.DPT
         }
 
     @classmethod
@@ -102,10 +109,10 @@ class DepthOptions(Options):
     """Options for depth maps."""
 
     supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES,
-                                         DepthEstimationModel.CVDE]
+                                         DepthEstimationModel.CVDE, DepthEstimationModel.DPT]
 
     def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE,
-                 depth_estimation_model=DepthEstimationModel.ADABINS, sampling_framerate=-1):
+                 depth_estimation_model=DepthEstimationModel.DPT, sampling_framerate=-1):
         """
         :param max_depth: The maximum depth value in the depth maps.
         :param dtype: The type of the depth values.
@@ -149,7 +156,7 @@ class DepthOptions(Options):
         group.add_argument('--depth_estimation_model', type=str,
                            help="The model to use for estimating depth maps.",
                            choices=[model.name.lower() for model in DepthOptions.supported_depth_estimation_models],
-                           default=DepthEstimationModel.ADABINS.name.lower())
+                           default=DepthEstimationModel.DPT.name.lower())
         group.add_argument('--sampling_framerate', type=int,
                            help='The number of frames to sample every second for the CVDE depth estimation method. '
                                 'Defaults to every frame (this may be very slow depending on the number of frames!)',

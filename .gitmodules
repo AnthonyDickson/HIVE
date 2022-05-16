@@ -16,3 +16,6 @@
 [submodule "thirdparty/consistent_depth"]
 	path = thirdparty/consistent_depth
 	url = https://github.com/eight0153/consistent_video_depth.git
+[submodule "thirdparty/dpt"]
+	path = thirdparty/dpt
+	url = https://github.com/eight0153/DPT.git

@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 import psutil
+import torch
 from tqdm import tqdm
 
 
@@ -86,10 +87,28 @@ def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
 
 @contextlib.contextmanager
 def temp_seed(seed):
+    """Seed NumPy with a temporary seed."""
     state = np.random.get_state()
-    np.random.seed(seed)
 
     try:
+        np.random.seed(seed)
+
         yield
     finally:
         np.random.set_state(state)
+
+
+@contextlib.contextmanager
+def cudnn():
+    """Temporarily enable the cuDNN backend for torch."""
+    cudnn_enabled = torch.backends.cudnn.enabled
+    cudnn_benchmark = torch.backends.cudnn.benchmark
+
+    try:
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True
+
+        yield
+    finally:
+        torch.backends.cudnn.enabled = cudnn_enabled
+        torch.backends.cudnn.benchmark = cudnn_benchmark
