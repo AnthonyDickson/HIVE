@@ -257,18 +257,14 @@ class Quaternion:
         """
         return self.conjugate()
 
-    def normalise(self, tolerance=0.00001) -> 'Quaternion':
+    def normalise(self) -> 'Quaternion':
         """
         Normalise a quaternion.
-        :param tolerance:
         :return: A unit quaternion.
         """
-        values = self.values
-        norm = torch.linalg.norm(values, ord=2, dim=0)
-        # noinspection PyTypeChecker
-        values = torch.where(torch.abs(norm - 1.0) > tolerance, values / norm, values)
+        norm = torch.linalg.norm(self.values, ord=2, dim=0)
 
-        return Quaternion(values)
+        return Quaternion(self.values / norm)
 
     @staticmethod
     def multiply(q1: 'Quaternion', q2: 'Quaternion') -> 'Quaternion':

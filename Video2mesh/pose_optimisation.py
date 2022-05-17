@@ -676,12 +676,17 @@ class OptimisationParameters(torch.nn.Module):
 
         self.alignment_type = alignment_type
 
+        num_frames = len(r)
+
         if alignment_type == AlignmentType.Rigid:
             shift_parameters = torch.empty(0)
             scale_parameters = torch.empty(0)
         elif alignment_type == AlignmentType.Affine:
-            shift_parameters = shift_parameters if shift_parameters is not None else torch.zeros(len(r))
-            scale_parameters = scale_parameters if scale_parameters is not None else torch.ones(len(r))
+            shift_parameters = shift_parameters if shift_parameters is not None else torch.zeros(num_frames)
+            scale_parameters = scale_parameters if scale_parameters is not None else torch.ones(num_frames)
+        elif alignment_type == AlignmentType.Deformable:
+            shift_parameters = shift_parameters if shift_parameters is not None else torch.zeros((num_frames, 3, 3))
+            scale_parameters = scale_parameters if scale_parameters is not None else torch.ones((num_frames, 3, 3))
         else:
             raise RuntimeError(f"Unsupported alignment type {alignment_type}.")
 
@@ -703,6 +708,16 @@ class OptimisationParameters(torch.nn.Module):
         :return: The number of optimisation parameters.
         """
         return sum([p.nelement() for p in self.parameters()])
+
+    def normalise_rotations(self):
+        """
+        Scale rotation quaternions to unit vectors.
+        Note that this is done in place.
+        """
+        with torch.no_grad():
+            r = self.rotation_quaternions
+            r = r / torch.linalg.norm(r, ord=2, dim=1).reshape((-1, 1))
+            self.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True)
 
     def get_trajectory(self) -> np.ndarray:
         """Get the camera trajectory from the optimisation parameters as a (N, 7) NumPy array."""
@@ -906,15 +921,22 @@ class PoseOptimiser:
         # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
         final_camera_trajectory = invert_trajectory(interpolated_trajectory)
 
+        scale = to_numpy(optimised_parameters.scale)
+        shift = to_numpy(optimised_parameters.shift)
+
         if self.debug_path:
             # noinspection PyTypeChecker
             np.savetxt(os.path.join(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
-            # noinspection PyTypeChecker
-            np.savetxt(os.path.join(self.debug_path, 'scale.txt'), to_numpy(optimised_parameters.scale))
-            # noinspection PyTypeChecker
-            np.savetxt(os.path.join(self.debug_path, 'shift.txt'), to_numpy(optimised_parameters.shift))
 
-        return final_camera_trajectory, to_numpy(optimised_parameters.scale), to_numpy(optimised_parameters.shift)
+            should_reshape = self.optimisation_options.alignment_type == AlignmentType.Deformable
+
+            np.savetxt(os.path.join(self.debug_path, 'scale.txt'),
+                       scale.reshape((num_frames, -1)) if should_reshape else scale)
+
+            np.savetxt(os.path.join(self.debug_path, 'shift.txt'),
+                       shift.reshape((num_frames, -1)) if should_reshape else shift)
+
+        return final_camera_trajectory, scale, shift
 
     def _setup_debug_folder(self):
         """Create the debug folder if in debug mode and the folder doesn't already exist."""
@@ -1076,7 +1098,7 @@ class PoseOptimiser:
 
         log("Pairwise frame alignment...")
 
-        def add_trajectory(frame_sampling_mode: FrameSamplingMode):
+        def optimise_frame_pairs(frame_sampling_mode: FrameSamplingMode):
             frame_pairs = self._sample_frame_pairs(frame_sampling_mode, num_frames)
             feature_set = fixed_parameters.subset_from(frame_pairs)
             # Clone parameters to avoid side-effects in subsequent calls.
@@ -1097,8 +1119,8 @@ class PoseOptimiser:
         # Combining the optimised poses from both runs gives us overlapping frames (0, 1) -> (1, 2) -> (2, 3) which can
         # be chained to give us the absolute pose for all the frames (unless some frame pairs could not be matched).
         pose_data = dict()
-        add_trajectory(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP)
-        add_trajectory(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET)
+        optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP)
+        optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET)
 
         def subtract_pose(pose_a, pose_b) -> np.ndarray:
             """
@@ -1178,14 +1200,7 @@ class PoseOptimiser:
             optimiser.zero_grad()
             residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type,
                                                   optimisation_options.alignment_type)
-            # noinspection PyTypeChecker
-            loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
-
-            if options.alignment_type != AlignmentType.Rigid:
-                # noinspection PyTypeChecker
-                loss += options.l2_regularisation * torch.mean(torch.square(1. / optimisation_parameters.scale - 1.))
-                loss += 2 * options.l2_regularisation * torch.mean(torch.square(optimisation_parameters.shift))
-
+            loss = self._calculate_loss(residuals, optimisation_parameters)
             loss.backward()
 
             # Pin first frames at origin or at least whatever they were initialised to.
@@ -1211,10 +1226,21 @@ class PoseOptimiser:
 
         return optimisation_parameters
 
+    def _calculate_loss(self, residuals: torch.Tensor, optimisation_parameters: OptimisationParameters):
+        loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
+
+        if self.optimisation_options.alignment_type != AlignmentType.Rigid:
+            l2_reg = self.optimisation_options.l2_regularisation
+            # noinspection PyTypeChecker
+            loss += l2_reg * torch.mean(torch.square(1. / optimisation_parameters.scale - 1.))
+            loss += 2 * l2_reg * torch.mean(torch.square(optimisation_parameters.shift))
+
+        return loss
+
     def _calculate_residuals(self, fixed_parameters: FeatureSet,
                              optimisation_parameters: OptimisationParameters,
                              residual_type: ResidualType,
-                             alignment_type = AlignmentType.Rigid) -> torch.Tensor:
+                             alignment_type=AlignmentType.Rigid) -> torch.Tensor:
         """
         Calculate the distance (residuals) between correspondences given the camera poses.
 
@@ -1250,8 +1276,7 @@ class PoseOptimiser:
             raise RuntimeError(f"calculate_residuals got give an unsupported residuals type "
                                f"{residual_type}.")
 
-    @staticmethod
-    def _project_to_world_coords(frame_data: FeatureData, camera_matrix: torch.Tensor,
+    def _project_to_world_coords(self, frame_data: FeatureData, camera_matrix: torch.Tensor,
                                  params: OptimisationParameters, alignment_type=AlignmentType.Rigid) -> torch.Tensor:
         """
         Project correspondences from 2D image coordinates to 3D world coordinates.
@@ -1268,6 +1293,11 @@ class PoseOptimiser:
 
         if alignment_type == AlignmentType.Affine:
             depth = 1. / (params.scale[indices] * (1. / depth) + params.shift[indices])
+        elif alignment_type == AlignmentType.Deformable:
+            u, v = torch.round(points).to(torch.long).T
+            scale = self._interpolate_field(params.scale)[indices, u, v]
+            shift = self._interpolate_field(params.shift)[indices, u, v]
+            depth = 1. / (scale * (1. / depth) + shift)
 
         u, v = points.T
         f_x, f_y, c_x, c_y = camera_matrix[0, 0], camera_matrix[1, 1], camera_matrix[0, 2], camera_matrix[1, 2]
@@ -1282,10 +1312,22 @@ class PoseOptimiser:
 
         r = params.rotation_quaternions[indices].T
         t = params.translation_vectors[indices].T
-        # Note: The conjugate of a quaternion is the equivalent of an inverse (e.g. R -> R^T).
+        # Note: The conjugate of a quaternion is the equivalent of an inverse.
         points_world_space = Quaternion(r).normalise().conjugate().apply(points_camera_space - t)
 
         return points_world_space
+
+    def _interpolate_field(self, fields: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Take a (N, H, W) tensor of (H, W) grids and scale them up to the resolution of the dataset.
+
+        :param fields: a (N, H, W) tensor of (H, W) grids.
+        :return: The (N, frame_width, frame_height) tensor of grids with interpolated values.
+        """
+        return torch.nn.functional.interpolate(fields.unsqueeze(1),
+                                               size=(self.dataset.frame_width, self.dataset.frame_height),
+                                               align_corners=True,
+                                               mode='bilinear').squeeze(1)
 
     @staticmethod
     def _project_to_image_coords(points_world_space: torch.Tensor, frame_data: FeatureData,

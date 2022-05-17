@@ -96,7 +96,7 @@ class Video2Mesh:
 
         if self.options.optimise_camera_trajectory:
             log(f"Optimising camera trajectory...")
-            alignment_type = AlignmentType.Affine
+            alignment_type = AlignmentType.Rigid
             # TODO: Allow optimisation options to be set via CLI?
             optimiser = PoseOptimiser(
                 dataset,
@@ -114,7 +114,7 @@ class Video2Mesh:
                     fine_tune=False,
                     alignment_type=alignment_type
                 ),
-                debug=True
+                debug=False
             )
             dataset.camera_trajectory, scale, shift = optimiser.run(num_frames=self.num_frames)
 
@@ -322,8 +322,10 @@ class Video2Mesh:
                 print_traj_stats(bf_trajectory[:self.num_frames], "BundleFusion", rotation=is_rotation, norm=True)
                 print()
 
-    def _print_summary(self, foreground_scene, background_scene, foreground_scene_path, background_scene_path,
-                       elapsed_time_seconds):
+    @staticmethod
+    def _print_summary(foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
+                       foreground_scene_path: str, background_scene_path: str,
+                       elapsed_time_seconds: float):
         def format_bytes(num):
             for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
                 if abs(num) < 1024.0:
@@ -335,6 +337,7 @@ class Video2Mesh:
 
         def count_tris(scene: trimesh.Scene):
             total = 0
+            num_frames = 0
 
             for node_name in scene.graph.nodes_geometry:
                 # which geometry does this node refer to
@@ -345,31 +348,34 @@ class Video2Mesh:
 
                 if hasattr(geometry, 'triangles'):
                     total += len(geometry.triangles)
+                    num_frames += 1
 
-            return total
+            return total, num_frames
+
+        fg_num_tris, num_fg_frames = count_tris(foreground_scene)
+        bg_num_tris, num_bg_frames = count_tris(background_scene)
+        fg_num_tris_per_frame = fg_num_tris / num_fg_frames
+        bg_num_tris_per_frame = bg_num_tris / num_bg_frames
+        num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
+
+        num_frames = max(num_fg_frames, num_bg_frames)
 
         fg_file_size = os.path.getsize(foreground_scene_path)
         bg_file_size = os.path.getsize(background_scene_path)
-        fg_file_size_per_frame = fg_file_size / self.num_frames
-        bg_file_size_per_frame = bg_file_size / self.num_frames
+        fg_file_size_per_frame = fg_file_size / num_fg_frames
+        bg_file_size_per_frame = bg_file_size / num_bg_frames
         file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
 
-        fg_num_tris = count_tris(foreground_scene)
-        bg_num_tris = count_tris(background_scene)
-        fg_num_tris_per_frame = fg_num_tris / self.num_frames
-        bg_num_tris_per_frame = bg_num_tris / self.num_frames
-        num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
-
         elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
-        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
+        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / num_frames)
 
         log('#' + '=' * 78 + '#')
         log('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
         log('#' + '=' * 78 + '#')
-        log(f"Processed {self.num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
+        log(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
         log(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         log(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
-        log(f"        Background mesh: {bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        log(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
         log(f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
         log(f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
         log(f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")

@@ -1439,7 +1439,7 @@ class VTMDataset(DatasetBase):
             scale_factor = scale[index]
             shift_factor = shift[index]
 
-            if isinstance(scale, np.ndarray) and not isinstance(shift, np.ndarray):
+            if isinstance(scale_factor, np.ndarray) and isinstance(shift_factor, np.ndarray):
                 def get_map(grid: np.ndarray) -> np.ndarray:
                     map_f = interpolate.interp2d(
                         x=[0, self.frame_width // 2, self.frame_width],
