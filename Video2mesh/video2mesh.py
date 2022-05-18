@@ -163,10 +163,12 @@ class Video2Mesh:
         if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
             background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
-        scene_centroid = self._get_centroid(foreground_scene, background_scene)
+        scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
+        scene_centroid = np.mean(scene_bounds, axis=0)
 
-        foreground_scene.apply_translation(-scene_centroid)
-        background_scene.apply_translation(-scene_centroid)
+        offset_from_center = np.array([-scene_centroid[0], -scene_bounds[0, 1], -scene_bounds[0, 2]])
+        foreground_scene.apply_translation(offset_from_center)
+        background_scene.apply_translation(offset_from_center)
 
         foreground_scene_path = self._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
         background_scene_path = self._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
@@ -186,21 +188,21 @@ class Video2Mesh:
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
 
     @staticmethod
-    def _get_centroid(foreground_scene, background_scene):
+    def _get_scene_bounds(foreground_scene, background_scene):
         """
-        Get the centroid of two scenes.
+        Get the bounds of two scenes.
 
-        :return: The centre for each of the X, Y, and Z axes in a list.
+        :return: A (2, 3) array where the first row is the minimum x, y and z coordinates and the second row the maximum.
         """
         fg_bounds = foreground_scene.bounds
         bg_bounds = background_scene.bounds
 
-        scene_centroid = np.mean([
-            np.mean(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
-            np.mean(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
-        ], axis=0)
+        scene_bounds = np.vstack([
+            np.min(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
+            np.max(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
+        ])
 
-        return scene_centroid
+        return scene_bounds
 
     def _print_trajectory_stats(self, dataset):
         if self.options.estimate_camera_params and \
@@ -385,7 +387,7 @@ class Video2Mesh:
         pose = pose_vec2mat(camera_trajectory[0])
         R, t = get_pose_components(pose)
 
-        rot_180 = Rotation.from_euler('xyz', [180, 180, 0], degrees=True).as_matrix()
+        rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
         centering_transform = np.eye(4, dtype=np.float32)
         centering_transform[:3, :3] = rot_180 @ R.T
         centering_transform[:3, 3:] = -(R.T @ t)
