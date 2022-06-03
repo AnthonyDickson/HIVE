@@ -8,7 +8,7 @@ import time
 import warnings
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, List
 
 import numpy as np
 import openmesh as om
@@ -20,49 +20,42 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
 
-from Video2mesh.fusion import tsdf_fusion, bundle_fusion
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
-from Video2mesh.image_processing import dilate_mask
-from Video2mesh.io import TUMAdaptor, StrayScannerAdaptor, VTMDataset, UnrealAdaptor
-from Video2mesh.options import StorageOptions, DepthOptions, COLMAPOptions, MeshDecimationOptions, \
-    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, Video2MeshOptions, StaticMeshOptions
-from Video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, AlignmentType
-from Video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
+from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAdaptor
+from video2mesh.fusion import tsdf_fusion, bundle_fusion
+from video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
+from video2mesh.image_processing import dilate_mask
+from video2mesh.io import VTMDataset
+from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
+    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StaticMeshOptions
+from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
 
 
-class Video2Mesh:
+class Pipeline:
     """Converts a 2D video to a 3D video."""
 
     mesh_folder = "mesh"
     bundle_fusion_folder = "bundle_fusion"
 
-    def __init__(self, options: Video2MeshOptions, storage_options: StorageOptions,
+    def __init__(self, options: PipelineOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 depth_options=DepthOptions(), colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions()):
+                 colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions()):
         """
         :param options: Options pertaining to the core program.
         :param storage_options: Options regarding storage of inputs and outputs.
         :param decimation_options: Options for mesh decimation.
         :param dilation_options: Options for mask dilation.
         :param filtering_options: Options for face filtering.
-        :param depth_options: Options for depth maps.
         :param colmap_options: Options for COLMAP.
         :param static_mesh_options: Options for creating the background static mesh.
         """
         self.options = options
         self.storage_options = storage_options
-        self.mask_folder = storage_options
-        self.depth_options = depth_options
         self.colmap_options = colmap_options
         self.decimation_options = decimation_options
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
         self.static_mesh_options = static_mesh_options
-
-    @property
-    def should_create_masks(self):
-        return self.options.create_masks
 
     @property
     def num_frames(self):
@@ -77,12 +70,8 @@ class Video2Mesh:
         return self.options.static_background
 
     @property
-    def estimate_depth(self):
-        return self.options.estimate_depth
-
-    @property
-    def estimate_camera_params(self):
-        return self.options.estimate_camera_params
+    def use_estimated_data(self):
+        return self.options.use_estimated_data
 
     def run(self):
         start_time = time.time()
@@ -93,33 +82,6 @@ class Video2Mesh:
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
-
-        if self.options.optimise_camera_trajectory:
-            log(f"Optimising camera trajectory...")
-            alignment_type = AlignmentType.Rigid
-            # TODO: Allow optimisation options to be set via CLI?
-            optimiser = PoseOptimiser(
-                dataset,
-                feature_extraction_options=FeatureExtractionOptions(
-                    min_features=40,
-                    max_features=2048,
-                    ignore_dynamic_objects=True
-                ),
-                optimisation_options=OptimisationOptions(
-                    num_epochs=20000,
-                    learning_rate=1e-2,
-                    l2_regularisation=0.5,
-                    lr_scheduler_patience=50,
-                    # TODO: Add CLI argument for pose optimiser's fine tuning and alignment type option.
-                    fine_tune=False,
-                    alignment_type=alignment_type
-                ),
-                debug=False
-            )
-            dataset.camera_trajectory, scale, shift = optimiser.run(num_frames=self.num_frames)
-
-            if alignment_type != AlignmentType.Rigid:
-                dataset.depth_dataset = dataset.scale_and_shift_depth(scale, shift, num_frames=self.num_frames)
 
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
@@ -138,18 +100,20 @@ class Video2Mesh:
                 camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
             )
 
+            if self.options.frame_step > 1:
+                # frame_set = list(range(0, self.num_frames, self.options.frame_step))
+                frame_set = list(range(0, self.num_frames, self.options.frame_step))
+
+                if frame_set[-1] != self.num_frames - 1:
+                    frame_set.append(self.num_frames - 1)
+            else:
+                frame_set = list(range(self.num_frames))
+
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
-                                                   options=self.static_mesh_options)
+                                                   options=self.static_mesh_options, frame_set=frame_set)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
         self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
-
-        self._print_trajectory_stats(dataset)
-
-        if self.options.estimate_camera_params and \
-                self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION and \
-                self.options.refine_colmap_poses:
-            dataset.camera_trajectory = self.refine_colmap_poses(dataset)
 
         log("Creating foreground mesh(es)...")
         foreground_scene = self._create_scene(dataset)
@@ -203,126 +167,6 @@ class Video2Mesh:
         ])
 
         return scene_bounds
-
-    def _print_trajectory_stats(self, dataset):
-        if self.options.estimate_camera_params and \
-                self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
-            raw_bf_trajectory = np.loadtxt(pjoin(dataset.base_path, 'bundle_fusion', 'trajectory.txt'))
-
-            pose_mats = raw_bf_trajectory.reshape((-1, 4, 4))
-            rot_mats = pose_mats[:, :3, :3]
-            # Nx4 matrix where each row is a quaternion
-            R = Rotation.from_matrix(rot_mats).as_quat()
-            # For whatever reason, this gets the rotations to match up with the ground truth.
-            R *= [1, -1, 1, 1]
-            # Nx3 matrix where each row is a translation row vector
-            T = pose_mats[:, :3, 3]
-            # For whatever reason, this gets the position vectors to match up with the ground truth.
-            T *= [-1, 1, -1]
-
-            gt_trajectory = dataset._load_camera_parameters(load_ground_truth_data=True)[1]
-            cm_trajectory = dataset.camera_trajectory.copy()
-            bf_trajectory = np.hstack((R, T))
-
-            def normalise_traj(traj):
-                R = Rotation.from_quat(traj[:, :4])
-                R = (R[0].inv() * R).as_quat()
-                T = traj[:, 4:] - traj[0, 4:]
-                return np.hstack((R, T))
-
-            gt_trajectory = normalise_traj(gt_trajectory)
-            cm_trajectory = normalise_traj(cm_trajectory)
-            # The bf_trajectory is already normalised
-
-            scale_coeffs = [1, 1, 1]
-            shift_coeffs = [0, 0, 0]
-            row_mask = np.all(np.isfinite(bf_trajectory), axis=1)
-
-            for i in range(3):
-                axis = 4 + i
-                trunc_cm_trajectory = cm_trajectory[:len(bf_trajectory)][row_mask, axis].ravel()
-                trunc_bf_trajectory = bf_trajectory[row_mask, axis].ravel()
-                a, b = Polynomial.fit(trunc_cm_trajectory, trunc_bf_trajectory, 1)
-                scale_coeffs[i] = a
-                shift_coeffs[i] = b
-
-            log(f"Scale + Shift Coefficients: {scale_coeffs}, {shift_coeffs}")
-            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] - cm_trajectory[:, 4:])))
-            log(f"Error Before: {rmse:.2f}")
-            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] -
-                                             (scale_coeffs * cm_trajectory[:, 4:] + shift_coeffs))))
-            log(f"Error After: {rmse:.2f}")
-
-            def print_traj_stats(traj, name=None, norm=False, rotation=False):
-                if rotation:
-                    T_gt = gt_trajectory[:len(traj), :4].copy()
-                    T = traj[:, :4].copy()
-                else:
-                    T_gt = gt_trajectory[:len(traj), 4:].copy()
-                    T = traj[:, 4:].copy()
-
-                if not np.all(np.isfinite(T)):
-                    complete_rows = np.all(np.isfinite(T), axis=1)
-                    T_gt = T_gt[complete_rows]
-                    T = T[complete_rows]
-
-                    num_missing = (~complete_rows).sum()
-                    percent_missing = 100 * (num_missing / len(complete_rows))
-                    log(f"The given trajectory contains {num_missing} rows ({percent_missing:.2f}%)"
-                        f" with NaN/inf values - these rows wil be excluded from the below stats.",
-                        file=sys.stderr)
-
-                if norm:
-                    if rotation:
-                        T = Rotation.from_quat(T)
-                        T = T * T[0].inv()
-                        T = T.as_quat()
-
-                        T_gt = Rotation.from_quat(T_gt)
-                        T_gt = T_gt * T_gt[0].inv()
-                        T_gt = T_gt.as_quat()
-                    else:
-                        T = (T - T.mean(axis=0)) / T.std(axis=0)
-                        T = T - T[0]
-
-                        T_gt = (T_gt - T_gt.mean(axis=0)) / T_gt.std(axis=0)
-                        T_gt = T_gt - T_gt[0]
-
-                if name:
-                    print(name)
-
-                rmse = np.sqrt(np.mean(np.square(T - T_gt), axis=0))
-
-                with np.printoptions(precision=3, suppress=True):
-                    print(f"T_0: {T[0]}")
-                    print(f"T_n: {T[-1]}")
-                    print(f"Min: {T.min(axis=0)}")
-                    print(f"Max: {T.max(axis=0)}")
-                    print(f"Range: {abs(T.max(axis=0) - T.min(axis=0))}")
-                    print(f"Error: {rmse}")
-                    print(f"Rel Error: {rmse / abs(T.max(axis=0) - T.min(axis=0))}")
-
-            for is_rotation in [False, True]:
-                if is_rotation:
-                    print("#=========================#")
-                    print("# Stats for Rotation Data #")
-                    print("#=========================#")
-                else:
-                    print("#============================#")
-                    print("# Stats for Translation Data #")
-                    print("#============================#")
-
-                print("Raw (No Normalisation)")
-                print_traj_stats(gt_trajectory[:self.num_frames], "Ground Truth", rotation=is_rotation)
-                print_traj_stats(cm_trajectory[:self.num_frames], "COLMAP", rotation=is_rotation)
-                print_traj_stats(bf_trajectory[:self.num_frames], "BundleFusion", rotation=is_rotation)
-                print()
-
-                print("Normalised")
-                print_traj_stats(gt_trajectory[:self.num_frames], "Ground Truth", rotation=is_rotation, norm=True)
-                print_traj_stats(cm_trajectory[:self.num_frames], "COLMAP", rotation=is_rotation, norm=True)
-                print_traj_stats(bf_trajectory[:self.num_frames], "BundleFusion", rotation=is_rotation, norm=True)
-                print()
 
     @staticmethod
     def _print_summary(foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
@@ -422,112 +266,52 @@ class Video2Mesh:
 
         dataset_path = storage_options.base_path
 
-        if TUMAdaptor.is_valid_folder_structure(dataset_path):
-            # TODO: Test TUMAdaptor
-            dataset = TUMAdaptor(
-                base_path=dataset_path,
-                output_path=f"{dataset_path}_vtm",
-                overwrite_ok=storage_options.overwrite_ok
-            ).convert()
-        elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
-            dataset = StrayScannerAdaptor(
-                base_path=dataset_path,
-                output_path=f"{dataset_path}_vtm",
-                overwrite_ok=storage_options.overwrite_ok,
-                resize_to=640,  # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
-                depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
-            ).convert()
-        elif UnrealAdaptor.is_valid_folder_structure(dataset_path):
-            dataset = UnrealAdaptor(
-                base_path=dataset_path,
-                output_path=f"{dataset_path}_vtm",
-                overwrite_ok=storage_options.overwrite_ok
-            ).convert()
-        elif VTMDataset.is_valid_folder_structure(dataset_path):
+        if VTMDataset.is_valid_folder_structure(dataset_path):
             dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
-        elif not os.path.isdir(dataset_path):
-            raise RuntimeError(f"Could open the path {dataset_path}.")
         else:
-            raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
+            if TUMAdaptor.is_valid_folder_structure(dataset_path):
+                dataset_converter = TUMAdaptor(
+                    base_path=dataset_path,
+                    output_path=f"{dataset_path}_vtm",
+                    num_frames=self.options.num_frames,
+                    frame_step=self.options.frame_step,
+                    overwrite_ok=storage_options.overwrite_ok
+                )
+            elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
+                dataset_converter = StrayScannerAdaptor(
+                    base_path=dataset_path,
+                    output_path=f"{dataset_path}_vtm",
+                    num_frames=self.options.num_frames,
+                    frame_step=self.options.frame_step,
+                    overwrite_ok=storage_options.overwrite_ok,
+                    # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
+                    resize_to=640,
+                    depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
+                )
+            elif VideoAdaptor.is_valid_folder_structure(dataset_path):
+                path_no_extensions, _ = os.path.splitext(dataset_path)
 
-        dataset.create_or_find_masks()
+                dataset_converter = VideoAdaptor(
+                    base_path=dataset_path,
+                    output_path=f"{path_no_extensions}_vtm",
+                    num_frames=self.options.num_frames,
+                    frame_step=self.options.frame_step,
+                    overwrite_ok=storage_options.overwrite_ok,
+                    resize_to=640
+                )
+            elif not os.path.isdir(dataset_path):
+                raise RuntimeError(f"Could open the path {dataset_path} or it is not a folder.")
+            else:
+                raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
 
-        if self.estimate_depth:
-            dataset.use_estimated_depth(depth_options=self.depth_options)
-
-        if self.estimate_camera_params:
-            dataset.use_estimated_camera_parameters(colmap_options=colmap_options)
+            if self.use_estimated_data:
+                dataset = dataset_converter.convert_from_rgb(colmap_options)
+            else:
+                dataset = dataset_converter.convert_from_ground_truth()
 
         self.options.num_frames = min(dataset.num_frames, self.num_frames)
 
         return dataset
-
-    @staticmethod
-    def refine_colmap_poses(dataset: VTMDataset):
-        """
-        Refine the pose data estimated with COLMAP with additional data from BundleFusion.
-
-        :param dataset: The dataset with the COLMAP and BundleFusion data.
-        :return: The refined camera trajectory data.
-        """
-        log("Refine COLMAP pose data.")
-        bundle_fusion_folder = pjoin(dataset.base_path, 'bundle_fusion')
-        bundle_fusion_trajectory_path = pjoin(bundle_fusion_folder, 'trajectory.txt')
-
-        if not os.path.isdir(bundle_fusion_folder):
-            raise RuntimeError(f"Could not open folder {bundle_fusion_folder}. "
-                               f"Have you set `--mesh_reconstruction_method bundle_fusion?")
-
-        if not os.path.isfile(bundle_fusion_trajectory_path):
-            raise RuntimeError(
-                f"Could not open the file {bundle_fusion_trajectory_path}. Have you run BundleFusion yet?")
-
-        raw_bf_trajectory = np.loadtxt(bundle_fusion_trajectory_path)
-
-        pose_mats = raw_bf_trajectory.reshape((-1, 4, 4))
-        rot_mats = pose_mats[:, :3, :3]
-        # Nx4 matrix where each row is a quaternion
-        R = Rotation.from_matrix(rot_mats).as_quat()
-        # For whatever reason, this gets the rotations to match up with the ground truth.
-        R *= [1, -1, 1, 1]
-        # Nx3 matrix where each row is a translation row vector
-        T = pose_mats[:, :3, 3]
-        # For whatever reason, this gets the position vectors to match up with the ground truth.
-        T *= [-1, 1, -1]
-
-        cm_trajectory = dataset.camera_trajectory.copy()
-        bf_trajectory = np.hstack((R, T))
-
-        def normalise_traj(traj):
-            R = Rotation.from_quat(traj[:, :4])
-            R = (R[0].inv() * R).as_quat()
-            T = traj[:, 4:] - traj[0, 4:]
-            return np.hstack((R, T))
-
-        cm_trajectory = normalise_traj(cm_trajectory)
-
-        scale_coeffs = np.ones(shape=7)
-        shift_coeffs = np.zeros(shape=7)
-        row_mask = np.all(np.isfinite(bf_trajectory), axis=1)
-
-        for axis in range(4, 7):
-            trunc_cm_trajectory = cm_trajectory[:len(bf_trajectory)][row_mask, axis].ravel()
-            trunc_bf_trajectory = bf_trajectory[row_mask, axis].ravel()
-            a, b = Polynomial.fit(trunc_cm_trajectory, trunc_bf_trajectory, 1)
-            scale_coeffs[axis] = a
-            shift_coeffs[axis] = b
-
-        if True:
-            gt_trajectory = dataset._load_camera_parameters(load_ground_truth_data=True)[1]
-            gt_trajectory = normalise_traj(gt_trajectory)
-            rmse = np.sqrt(np.mean(np.square(gt_trajectory[:, 4:] - cm_trajectory[:, 4:])))
-            log(f"Error Before: {rmse:.2f}")
-
-            rmse = np.sqrt(
-                np.mean(np.square(gt_trajectory[:, 4:] - (scale_coeffs * cm_trajectory + shift_coeffs)[:, 4:])))
-            log(f"Error After: {rmse:.2f}")
-
-        return scale_coeffs * cm_trajectory + shift_coeffs
 
     def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
                       static_background=False) -> trimesh.Scene:
@@ -650,7 +434,7 @@ class Video2Mesh:
 
     @classmethod
     def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions(),
-                            frame_set: Optional[Set[int]] = None):
+                            frame_set: Optional[List[int]] = None):
         """
         Create a static mesh of the scene.
 
@@ -667,7 +451,7 @@ class Video2Mesh:
         if options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
             mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)
         elif options.reconstruction_method == MeshReconstructionMethod.TSDF_FUSION:
-            mesh = tsdf_fusion(dataset, options, num_frames)
+            mesh = tsdf_fusion(dataset, options, num_frames, frame_set=frame_set)
         else:
             raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
 
@@ -957,9 +741,8 @@ class Video2Mesh:
 def main():
     parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
                                                                   "camera trajectory annotations.")
-    Video2MeshOptions.add_args(parser)
+    PipelineOptions.add_args(parser)
     StorageOptions.add_args(parser)
-    DepthOptions.add_args(parser)
     MaskDilationOptions.add_args(parser)
     MeshFilteringOptions.add_args(parser)
     MeshDecimationOptions.add_args(parser)
@@ -969,23 +752,21 @@ def main():
     args = parser.parse_args()
     log(args)
 
-    video2mesh_options = Video2MeshOptions.from_args(args)
+    video2mesh_options = PipelineOptions.from_args(args)
     storage_options = StorageOptions.from_args(args)
-    depth_options = DepthOptions.from_args(args)
     filtering_options = MeshFilteringOptions.from_args(args)
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
     colmap_options = COLMAPOptions.from_args(args)
     static_mesh_options = StaticMeshOptions.from_args(args)
 
-    program = Video2Mesh(options=video2mesh_options,
-                         storage_options=storage_options,
-                         decimation_options=decimation_options,
-                         dilation_options=dilation_options,
-                         filtering_options=filtering_options,
-                         depth_options=depth_options,
-                         colmap_options=colmap_options,
-                         static_mesh_options=static_mesh_options)
+    program = Pipeline(options=video2mesh_options,
+                       storage_options=storage_options,
+                       decimation_options=decimation_options,
+                       dilation_options=dilation_options,
+                       filtering_options=filtering_options,
+                       colmap_options=colmap_options,
+                       static_mesh_options=static_mesh_options)
     program.run()
 
 

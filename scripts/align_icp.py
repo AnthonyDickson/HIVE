@@ -7,9 +7,9 @@ import trimesh
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from Video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, point_cloud_from_rgbd
-from Video2mesh.io import VTMDataset
-from Video2mesh.utils import log
+from video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, point_cloud_from_rgbd
+from video2mesh.io import VTMDataset
+from video2mesh.utils import log
 
 
 def get_dataset(args):
@@ -17,8 +17,7 @@ def get_dataset(args):
 
     VTMDataset._validate_dataset(dataset_path)
 
-    dataset = VTMDataset(dataset_path) \
-        .create_or_find_masks()
+    dataset = VTMDataset(dataset_path)
 
     return dataset
 

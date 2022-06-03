@@ -6,20 +6,21 @@ import subprocess
 import warnings
 from collections import OrderedDict
 from os.path import join as pjoin
+from typing import Optional, List
 
 import numpy as np
 import trimesh
 from tqdm import tqdm
 
-from Video2mesh.geometry import pose_vec2mat
-from Video2mesh.image_processing import dilate_mask
-from Video2mesh.io import VTMDataset
-from Video2mesh.options import StaticMeshOptions, MaskDilationOptions, MeshReconstructionMethod
-from Video2mesh.utils import log
+from video2mesh.geometry import pose_vec2mat
+from video2mesh.image_processing import dilate_mask
+from video2mesh.io import VTMDataset
+from video2mesh.options import StaticMeshOptions, MaskDilationOptions, MeshReconstructionMethod
+from video2mesh.utils import log
 from thirdparty.tsdf_fusion_python import fusion
 
 
-def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1) -> trimesh.Trimesh:
+def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1, frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
     """
     Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
      http://3dmatch.cs.princeton.edu).
@@ -39,7 +40,7 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1)
     # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
     # (this typically results in floating fragments in the static mesh.)
     mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
-    frame_range = range(num_frames)
+    frame_range = frame_set if frame_set is not None else range(num_frames)
 
     for i in frame_range:
         # Read depth image and camera pose

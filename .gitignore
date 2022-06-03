@@ -3,3 +3,4 @@ results/
 .DS_Store
 weights/
 checkpoints/
+ismar_experiment_results/

@@ -2,12 +2,11 @@
 This module contains functions and classes used for manipulating camera trajectories, projecting points between
 2D image and 3D world coordinates, and creating point clouds.
 """
-
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from Video2mesh.utils import validate_shape, validate_camera_parameter_shapes
+from video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
 def pose_vec2mat(pose: np.ndarray) -> np.ndarray:
@@ -54,6 +53,32 @@ def get_pose_components(pose):
     t = pose[:3, 3:]
 
     return R, t
+
+
+def add_pose(pose_a, pose_b) -> np.ndarray:
+    """
+    Accumulate two poses.
+    :param pose_a: The first (1, 7) pose.
+    :param pose_b: The second (1, 7) pose.
+    :return: The (1, 7) pose a + b.
+    """
+    return pose_mat2vec(pose_vec2mat(pose_b) @ pose_vec2mat(pose_a))
+
+
+def subtract_pose(pose_a, pose_b) -> np.ndarray:
+    """
+    Get relative pose between two poses (i.e. `pose_a - pose_b`).
+
+    :param pose_a: The first (1, 7) pose.
+    :param pose_b: The second (1, 7) pose.
+    :return: The (1, 7) relative pose between `pose_a` and `pose_b`.
+    """
+    return pose_mat2vec(np.linalg.inv(pose_vec2mat(pose_b)) @ pose_vec2mat(pose_a))
+
+
+def get_identity_pose():
+    """Get the identity 7-vector pose (quaternion + translation vector)."""
+    return np.asarray([0., 0., 0., 1., 0., 0., 0.])
 
 
 def vector_trajectory_to_matrix_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:

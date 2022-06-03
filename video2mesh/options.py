@@ -70,127 +70,10 @@ class StorageOptions(Options):
         return StorageOptions(base_path=args.base_path, overwrite_ok=args.overwrite_ok)
 
 
-# noinspection PyArgumentList
-class DepthFormat(enum.Enum):
-    DEPTH_TO_POINT = enum.auto()
-    DEPTH_TO_PLANE = enum.auto()
-
-
-class DepthEstimationModel(enum.Enum):
-    # noinspection PyArgumentList
-    ADABINS = enum.auto()
-    # noinspection PyArgumentList
-    LERES = enum.auto()
-    # noinspection PyArgumentList
-    CVDE = enum.auto()
-    # noinspection PyArgumentList
-    DPT = enum.auto()
-
-    @classmethod
-    def get_choices(cls):
-        return {
-            'adabins': cls.ADABINS,
-            'leres': cls.LERES,
-            'cvde': cls.CVDE,
-            'dpt': cls.DPT
-        }
-
-    @classmethod
-    def from_string(cls, name):
-        choices = cls.get_choices()
-
-        if name.lower() in choices:
-            return choices[name.lower()]
-        else:
-            raise RuntimeError(f"No model called {name}, valid choices are: {list(choices.keys())}")
-
-
-class DepthOptions(Options):
-    """Options for depth maps."""
-
-    supported_depth_estimation_models = [DepthEstimationModel.ADABINS, DepthEstimationModel.LERES,
-                                         DepthEstimationModel.CVDE, DepthEstimationModel.DPT]
-
-    def __init__(self, max_depth=10.0, dtype=np.uint16, depth_format=DepthFormat.DEPTH_TO_PLANE,
-                 depth_estimation_model=DepthEstimationModel.DPT, sampling_framerate=-1):
-        """
-        :param max_depth: The maximum depth value in the depth maps.
-        :param dtype: The type of the depth values.
-        :param depth_format: How depth values are measured in the depth maps.
-        :param depth_estimation_model: The model to use to estimate depth maps.
-        :param sampling_framerate: The number of frames to sample every second for the CVDE depth estimation method.
-        """
-        assert dtype is np.uint8 or dtype is np.uint16, 'Only 8-bit and 16-bit depth maps are supported.'
-
-        assert depth_estimation_model in DepthOptions.supported_depth_estimation_models, \
-            f"Depth estimation model must be one of the following: " \
-            f"{[model.name for model in self.supported_depth_estimation_models]}, but got {depth_estimation_model.name} " \
-            f"instead."
-
-        if not isinstance(max_depth, (int, float)) or not np.isfinite(max_depth) or max_depth <= 0.0:
-            raise ValueError(f"Max depth must a finite, positive number, but got {max_depth}.")
-
-        if max_depth != 10.0:
-            warnings.warn("The --max_depth option has no effect in this version.")
-            # TODO: Figure out a clean way to apply max depth and to ensure that results that used a different
-            #  max depth are overwritten.
-
-        if not isinstance(sampling_framerate, int) or (sampling_framerate < 1 and sampling_framerate != -1):
-            raise ValueError(f"Sampling framerate must be a positive integer or -1, but got {sampling_framerate}.")
-
-        self.max_depth = max_depth
-        self.depth_dtype = dtype
-        self.depth_format = depth_format
-        self.depth_estimation_model = depth_estimation_model
-        self.sampling_framerate = sampling_framerate
-
-    @staticmethod
-    def add_args(parser: argparse.ArgumentParser):
-        group = parser.add_argument_group('Depth Options')
-        group.add_argument('--max_depth', type=float, help='The maximum depth value in the provided depth maps.',
-                           default=10.0)
-        group.add_argument('--depth_format', type=str, help='How depth values are measure in the depth maps.',
-                           choices=['depth_to_point', 'depth_to_plane'], default='depth_to_plane')
-        group.add_argument('--depth_dtype', type=str, help='The type of the depth values.', default='uint16',
-                           choices=['uint8', 'uint16'])
-        group.add_argument('--depth_estimation_model', type=str,
-                           help="The model to use for estimating depth maps.",
-                           choices=[model.name.lower() for model in DepthOptions.supported_depth_estimation_models],
-                           default=DepthEstimationModel.DPT.name.lower())
-        group.add_argument('--sampling_framerate', type=int,
-                           help='The number of frames to sample every second for the CVDE depth estimation method. '
-                                'Defaults to every frame (this may be very slow depending on the number of frames!)',
-                           default=-1)
-
-    @staticmethod
-    def from_args(args) -> 'DepthOptions':
-        max_depth = args.max_depth
-        dtype = args.depth_dtype
-        depth_format = args.depth_format
-
-        if dtype == 'uint8':
-            dtype = np.uint8
-        elif dtype == 'uint16':
-            dtype = np.uint16
-        else:
-            raise RuntimeError(f"Unsupported data type {dtype}, expected 'uint8' or 'uint16")
-
-        if depth_format == 'depth_to_point':
-            depth_format = DepthFormat.DEPTH_TO_POINT
-        elif depth_format == 'depth_to_plane':
-            depth_format = DepthFormat.DEPTH_TO_PLANE
-        else:
-            raise RuntimeError(f"Unsupported depth format {depth_format}, "
-                               f"expected 'depth_to_point' or 'depth_to_plane'")
-
-        return DepthOptions(max_depth, dtype, depth_format,
-                            DepthEstimationModel.from_string(args.depth_estimation_model), args.sampling_framerate)
-
-
 class COLMAPOptions(Options):
     quality_choices = ('low', 'medium', 'high', 'extreme')
 
-    def __init__(self, is_single_camera=True, dense=False, quality='high', use_raw_pose=False,
+    def __init__(self, is_single_camera=True, dense=False, quality='low', use_raw_pose=False,
                  binary_path='/usr/local/bin/colmap', vocab_path='/root/.cache/colmap/vocab.bin'):
         self.binary_path = binary_path
         self.vocab_path = vocab_path
@@ -349,8 +232,7 @@ class MeshReconstructionMethod(enum.Enum):
 
 
 class StaticMeshOptions(Options):
-    supported_reconstruction_methods = [MeshReconstructionMethod.TSDF_FUSION,
-                                        MeshReconstructionMethod.BUNDLE_FUSION]
+    supported_reconstruction_methods = [MeshReconstructionMethod.TSDF_FUSION, MeshReconstructionMethod.BUNDLE_FUSION]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDF_FUSION, depth_mask_dilation_iterations=32,
                  sdf_volume_size=3.0, sdf_voxel_size=0.02, sdf_num_voxels: Optional[int] = None):
@@ -415,39 +297,32 @@ class StaticMeshOptions(Options):
         )
 
 
-class Video2MeshOptions(Options):
+class PipelineOptions(Options):
 
-    def __init__(self, create_masks=False,
+    def __init__(self,
                  include_background=False, static_background=False,
-                 num_frames=-1,
-                 estimate_depth=False, estimate_camera_params=False,
-                 refine_colmap_poses=False,
+                 num_frames=-1, frame_step=1,
+                 use_estimated_data=False,
                  optimise_camera_trajectory=False,
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
-        :param create_masks: Whether to create masks for dynamic objects
         :param include_background: Include the background in the reconstructed mesh.
         :param static_background: Whether to use the first frame to generate a static background.
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
-        :param estimate_depth: Flag to indicate that depth maps estimated by a neural network model should be used
-                                instead of the ground truth depth maps.
-        :param estimate_camera_params: Flag to indicate that camera intrinsic and extrinsic parameters estimated with
-                                       COLMAP should be used instead of the ground truth parameters (if they exist).
-        :param refine_colmap_poses: Whether to refine estimated pose data from COLMAP with pose data from BundleFusion.
-            Note that this argument is only valid if the flag '--estimate_camera_params' is used and BundleFusion is the
-            specified mesh reconstruction method.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
+        :param use_estimated_data: Use estimated depth maps and camera parameters instead of any
+            existing ground truth data.
         :param optimise_camera_trajectory: Whether to refine the camera trajectory with SIFT features and a
             gradient descent based optimiser.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         """
-        self.create_masks = create_masks
         self.include_background = include_background
         self.static_background = static_background
         self.num_frames = num_frames
-        self.estimate_depth = estimate_depth
-        self.estimate_camera_params = estimate_camera_params
-        self.refine_colmap_poses = refine_colmap_poses
+        self.frame_step = frame_step
+        self.use_estimated_data = use_estimated_data
         self.optimise_camera_trajectory = optimise_camera_trajectory
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
@@ -464,26 +339,20 @@ class Video2MeshOptions(Options):
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('video2mesh')
 
-        group.add_argument('--create_masks', help='Whether to create masks for dynamic objects',
-                           action='store_true')
         group.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
                            action='store_true')
         group.add_argument('--static_background',
                            help='Whether to use the first frame to generate a static background.',
                            action='store_true')
-        group.add_argument('--num_frames', type=int, help='The maximum of frames to process. '
-                                                          'Set to -1 (default) to process all frames.', default=-1)
-        group.add_argument('--estimate_depth', action='store_true',
-                           help='Flag to indicate that depth maps estimated by a neural network model should be used '
-                                'instead of the ground truth depth maps.')
-        group.add_argument('--estimate_camera_params', action='store_true',
-                           help='Flag to indicate that camera intrinsic and extrinsic parameters estimated with COLMAP '
-                                'should be used instead of the ground truth parameters (if they exist).')
-        group.add_argument('--refine_colmap_poses',
-                           help="Whether to refine estimated pose data from COLMAP with pose data from BundleFusion. "
-                                "Note that this argument is only valid if the flag '--estimate_camera_params' is used "
-                                "and BundleFusion is the specified mesh reconstruction method.",
-                           action='store_true')
+        group.add_argument('--num_frames', type=int, default=-1,
+                           help='The maximum of frames to process. Set to -1 (default) to process all frames.')
+        group.add_argument('--frame_step', type=int, default=-1,
+                           help='The frequency to sample frames at for COLMAP and pose optimisation. '
+                                'If set to 1, samples all frames (i.e. no effect). '
+                                'Otherwise if set to n | n > 1, samples every n frames.')
+        group.add_argument('--use_estimated_data', action='store_true',
+                           help='Use estimated depth maps and camera parameters instead of any '
+                                'existing ground truth data.')
         group.add_argument('--optimise_camera_trajectory',
                            help="Whether to refine the camera trajectory with SIFT features and a "
                                 "gradient descent based optimiser.",
@@ -494,15 +363,13 @@ class Video2MeshOptions(Options):
                            default='http://localhost:8080')
 
     @staticmethod
-    def from_args(args: argparse.Namespace) -> 'Video2MeshOptions':
-        return Video2MeshOptions(
-            create_masks=args.create_masks,
+    def from_args(args: argparse.Namespace) -> 'PipelineOptions':
+        return PipelineOptions(
             include_background=args.include_background,
             static_background=args.static_background,
             num_frames=args.num_frames,
-            estimate_depth=args.estimate_depth,
-            estimate_camera_params=args.estimate_camera_params,
-            refine_colmap_poses=args.refine_colmap_poses,
+            frame_step=args.frame_step,
+            use_estimated_data=args.use_estimated_data,
             optimise_camera_trajectory=args.optimise_camera_trajectory,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url

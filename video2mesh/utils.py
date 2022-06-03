@@ -51,7 +51,7 @@ def num2str(num: Optional[int]):
 
     :param num: the number to convert.
 
-    :return: the number as a string, '?' if the the argument is None.
+    :return: the number as a string, '?' if the argument is None.
     """
     return '?' if num is None else str(num)
 

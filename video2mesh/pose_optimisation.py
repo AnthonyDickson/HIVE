@@ -13,11 +13,11 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 
-from Video2mesh.fusion import tsdf_fusion
-from Video2mesh.geometry import Quaternion, pose_vec2mat, invert_trajectory, pose_mat2vec
-from Video2mesh.io import VTMDataset
-from Video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
-from Video2mesh.utils import tqdm_imap, log, temp_seed
+from video2mesh.fusion import tsdf_fusion
+from video2mesh.geometry import Quaternion, invert_trajectory, subtract_pose, add_pose, get_identity_pose
+from video2mesh.io import VTMDataset
+from video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
+from video2mesh.utils import tqdm_imap, log, temp_seed
 
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -667,7 +667,7 @@ class OptimisationParameters(torch.nn.Module):
         super().__init__()
 
         def to_param(a):
-            a_copy = torch.tensor(a, dtype=dtype).clone()
+            a_copy = a.clone().to(dtype)
             return torch.nn.Parameter(a_copy, requires_grad=True)
 
         r, t = initial_camera_poses[:, :4], initial_camera_poses[:, 4:]
@@ -824,8 +824,8 @@ class ResidualType(enum.Enum):
 class OptimisationOptions:
     """Configuration for the `PoseOptimiser` class."""
 
-    def __init__(self, num_epochs=20000, learning_rate=1e-2, l2_regularisation=1e-4,
-                 min_loss_delta=1e-4, lr_scheduler_patience=50, early_stopping_patience=500,
+    def __init__(self, num_epochs=2000, learning_rate=1e-2, l2_regularisation=0.5,
+                 min_loss_delta=1e-4, lr_scheduler_patience=50, early_stopping_patience=75,
                  alignment_type=AlignmentType.Rigid, fine_tune=False):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
@@ -907,10 +907,15 @@ class PoseOptimiser:
         :return: the (N, 7) optimised camera trajectory where each row is a quaternion (scalar last) and a
             translation vector.
         """
+        if num_frames == -1:
+            num_frames = self.dataset.num_frames
+
+        truncated_camera_trajectory = torch.from_numpy(self.dataset.camera_trajectory[:num_frames])
+
         self._setup_debug_folder()
         frame_pairs = self._sample_frame_pairs(self.frame_sampling)
         fixed_parameters = self._extract_feature_points(frame_pairs, self.feature_extraction_options)
-        optimisation_parameters = OptimisationParameters(torch.from_numpy(self.dataset.camera_trajectory),
+        optimisation_parameters = OptimisationParameters(truncated_camera_trajectory,
                                                          alignment_type=self.optimisation_options.alignment_type)
         optimised_parameters = self._optimise_pose(fixed_parameters, optimisation_parameters,
                                                    optimisation_options=self.optimisation_options,
@@ -1025,9 +1030,6 @@ class PoseOptimiser:
             If set to -1, this value is set to the length of the dataset.
         :return: the optimised parameters.
         """
-        if num_frames == -1:
-            num_frames = self.dataset.num_frames
-
         if num_frames != self.dataset.num_frames:
             fixed_parameters = fixed_parameters.sample_at(range(num_frames))
             optimisation_parameters = optimisation_parameters.sample_at(list(range(num_frames)))
@@ -1121,28 +1123,6 @@ class PoseOptimiser:
         pose_data = dict()
         optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP)
         optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET)
-
-        def subtract_pose(pose_a, pose_b) -> np.ndarray:
-            """
-            Get relative pose between two poses (i.e. `pose_b - pose_a`).
-            :param pose_a: The first pose.
-            :param pose_b: The second pose.
-            :return: The (N, 7) relative pose between `pose_a` and `pose_b`.
-            """
-            return pose_mat2vec(np.linalg.inv(pose_vec2mat(pose_b)) @ pose_vec2mat(pose_a))
-
-        def add_pose(pose_a, pose_b) -> np.ndarray:
-            """
-            Accumulate two poses.
-            :param pose_a: The first pose.
-            :param pose_b: The second pose.
-            :return: The (N, 7) pose a + b.
-            """
-            return pose_mat2vec(pose_vec2mat(pose_b) @ pose_vec2mat(pose_a))
-
-        def get_identity_pose():
-            """Get the identity 7-vector pose (quaternion + translation vector)."""
-            return np.asarray([0., 0., 0., 1., 0., 0., 0.])
 
         merged_pose_data = [get_identity_pose()]
         previous_pose = merged_pose_data[0]
@@ -1385,7 +1365,7 @@ class PoseOptimiser:
 
         for chunk in chunks:
             start = max(0, chunk[0] - 1)
-            end = chunk[-1] + 1
+            end = min(chunk[-1] + 1, num_frames - 1)
 
             start_rotation = optimised_camera_trajectory[start, :4]
             end_rotation = optimised_camera_trajectory[end, :4]
@@ -1410,7 +1390,7 @@ def main():
     parser.add_argument('--num_frames', type=int, default=-1,
                         help='Number of frames to optimise. If set to -1 (default), use all frames.')
     parser.add_argument('--fine_tune', action='store_true', help='Whether to perform an additional fine tuning step.')
-    parser.add_argument('--params_init', type=str, choices=['gt', 'random', 'colmap'], default='gt',
+    parser.add_argument('--params_init', type=str, choices=['gt', 'random'], default='gt',
                         help='How to initialise the camera trajectory.')
     parser.add_argument('--random_seed', type=int, default=None,
                         help='Random seed to use when initialising camera trajectory with random data.')
@@ -1420,7 +1400,6 @@ def main():
         raise RuntimeError(f"The path {args.dataset_path} does not point to a valid dataset.")
 
     dataset = VTMDataset(args.dataset_path, overwrite_ok=False)
-    dataset.create_or_find_masks()
 
     num_frames = args.num_frames
 
@@ -1429,9 +1408,7 @@ def main():
     elif num_frames < 2:
         raise RuntimeError(f"--num_frames must at least 2, but got {num_frames}.")
 
-    if args.params_init == 'colmap':
-        dataset.use_estimated_camera_parameters()
-    elif args.params_init == 'random':
+    if args.params_init == 'random':
         with temp_seed(args.random_seed):
             dataset.camera_trajectory[:, :4] = Rotation.random(len(dataset), random_state=args.random_seed).as_quat()
             dataset.camera_trajectory[:, 4:] = np.random.normal(loc=0., scale=.1, size=(len(dataset), 3))

@@ -6,8 +6,8 @@ masks.
 import cv2
 import numpy as np
 
-from Video2mesh.options import MaskDilationOptions
-from Video2mesh.utils import validate_shape
+from video2mesh.options import MaskDilationOptions
+from video2mesh.utils import validate_shape
 
 
 def dilate_mask(mask, dilation_options: MaskDilationOptions):
