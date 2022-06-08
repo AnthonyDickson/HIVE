@@ -65,6 +65,12 @@ def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
     Process args in parallel with a progress bar.
     Note that this function blocks and the results are not accessible until all `args` have been processed.
 
+    >>> def f(i):
+    >>>     return i ** 2
+    >>> result = tqdm_imap(f, range(10))
+    >>> print(result)
+    [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
     :param func: The function to apply to the given arguments.
     :param args: List of arguments to proces.
     :param num_processes: (optional) Number of processes to spawn.

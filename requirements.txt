@@ -14,6 +14,8 @@ scikit-image==0.19.1
 # trimesh icp
 rtree==0.9.7
 plyfile==0.7.4
+# ICP Alignment
+open3d==0.13.0
 # DPT Depth Estimation
 timm==0.5.4
 # Consistent Video Depth Estimation

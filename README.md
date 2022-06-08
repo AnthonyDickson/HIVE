@@ -144,10 +144,12 @@ file.
 Within each dataset folder, there should be the following 5 items:
 1. The metadata in a JSON formatted file that contains the following fields:
    - `num_frames`: The number of frames in the video sequence.
+   - `frame_step`: The frequency in frames to sample frames for COLMAP and pose optimisation.
    - `fps`: The framerate of the video.
    - `width`: The width of the video frames in pixels.
    - `height`: The height of the video frames in pixels.
-   - `depth_scale`: A scalar that when multiplied with a depth value converts that depth value to meters.
+   - `max_depth`: Depth values are clipped to this value. Roughly corresponds to meters.
+   - `is_gt`: Whether the dataset was created using ground truth camera and depth data.
 2. The camera intrinsics in a text file in the following format:
    ```text
    fx  0 cx
@@ -170,7 +172,7 @@ Within each dataset folder, there should be the following 5 items:
    │   000001.jpg
    │   000002.jpg
    │   ...
-   └───999999.jpg
+   │   999999.jpg
    ```
 5. The depth maps (either JPEG, PNG, or .raw) in a folder with names that preserve the frames' natural ordering, e.g.:
    ```text
@@ -178,10 +180,15 @@ Within each dataset folder, there should be the following 5 items:
    │   000001.jpg
    │   000002.jpg
    │   ...
-   └───999999.jpg
+   │   999999.jpg
    ```
    The depth maps are expected to be stored in a 16-bit grayscale image. The depth values should be in millimeters and increasing from the camera (i.e. depth = 0 at the camera).
 
 ## Output Format
-The generated meshes are saved to a glTF formatted file.
-Each mesh in the glTF file represents the mesh for all objects for a given frame.
+Each 3D video is saved to a folder with the glTF formatted mesh files and JSON metadata:
+```text
+mesh
+│   fg.glb
+│   bg.glb
+│   metadata.json
+```

@@ -330,7 +330,7 @@ class COLMAPProcessor:
 
                 with subprocess.Popen(merge_command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
                     for line in p.stdout:
-                        log(line)
+                        log(line, end='')
 
                         if 'merge failed' in line.lower():
                             merge_successful = False
@@ -351,7 +351,7 @@ class COLMAPProcessor:
                 with subprocess.Popen(bundle_adjustment_command, stdout=subprocess.PIPE, bufsize=1,
                                       universal_newlines=True) as p:
                     for line in p.stdout:
-                        log(line)
+                        log(line, end='')
 
                 p.wait()
 

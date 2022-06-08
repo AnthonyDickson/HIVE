@@ -291,7 +291,6 @@ class DatasetAdaptor(DatasetBase):
         colmap_processor = COLMAPProcessor(image_path=colmap_rgb_path, workspace_path=colmap_workspace_path,
                                            colmap_options=colmap_options)
 
-        # TODO: Fix this. It does not redirect stdout as expected.
         with open(colmap_log_file, 'w') as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
             colmap_processor.run()
 

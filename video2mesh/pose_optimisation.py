@@ -195,7 +195,8 @@ class FeatureSet(torch.nn.Module):
         frame_pairs = torch.from_numpy(np.asarray(frame_pairs))
 
         for frame_pair in frame_pairs:
-            mask |= torch.all(torch.tensor(indices == frame_pair), dim=1)
+            # noinspection PyTypeChecker
+            mask |= torch.all(indices == frame_pair, dim=1)
 
         frame_i = self.frame_i.sample_at(mask)
         frame_j = self.frame_j.sample_at(mask)
@@ -539,7 +540,7 @@ class FeatureExtractor:
         depth_i = np.asarray(depth_i)
         depth_j = np.asarray(depth_j)
 
-        _, mask = cv2.findHomography(points_i, points_j, cv2.RANSAC)
+        _, mask = cv2.findHomography(points_i, points_j, cv2.USAC_MAGSAC)
 
         is_inlier = mask.flatten() > 0
         is_outlier = ~is_inlier
@@ -826,7 +827,7 @@ class OptimisationOptions:
 
     def __init__(self, num_epochs=2000, learning_rate=1e-2, l2_regularisation=0.5,
                  min_loss_delta=1e-4, lr_scheduler_patience=50, early_stopping_patience=75,
-                 alignment_type=AlignmentType.Rigid, fine_tune=False):
+                 alignment_type=AlignmentType.Rigid, position_only=False, fine_tune=False):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
@@ -841,6 +842,7 @@ class OptimisationOptions:
             exiting the optimisation loop early.
         :param alignment_type: The method for aligning the frames and whether to add additional parameters for
             pose optimisation.
+        :param position_only: Whether to optimise the position (translation vector) of the pose only.
         :param fine_tune: Whether to apply a fine-tuning step at the end (another round of optimisation, but with
             Image2D residuals which tend to be a slower to optimise but give slightly more accurate results.
         """
@@ -850,8 +852,9 @@ class OptimisationOptions:
         self.min_loss_delta = min_loss_delta
         self.lr_scheduler_patience = lr_scheduler_patience
         self.early_stopping_patience = early_stopping_patience
-        self.fine_tune = fine_tune
         self.alignment_type = alignment_type
+        self.position_only = position_only
+        self.fine_tune = fine_tune
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
@@ -903,9 +906,10 @@ class PoseOptimiser:
     def run(self, num_frames=-1) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Optimise the pose data.
+
         :param num_frames: (optional) a limit on the number of frames to use. Defaults to -1 which will use all frames.
         :return: the (N, 7) optimised camera trajectory where each row is a quaternion (scalar last) and a
-            translation vector.
+            translation vector; the per frame scale factor; and the per frame shift factor.
         """
         if num_frames == -1:
             num_frames = self.dataset.num_frames
@@ -1185,7 +1189,11 @@ class PoseOptimiser:
 
             # Pin first frames at origin or at least whatever they were initialised to.
             optimisation_parameters.translation_vectors.grad[0] *= 0.0
-            optimisation_parameters.rotation_quaternions.grad[0] *= 0.0
+
+            if self.optimisation_options.position_only:
+                optimisation_parameters.rotation_quaternions.grad[:] *= 0.0
+            else:
+                optimisation_parameters.rotation_quaternions.grad[0] *= 0.0
 
             optimiser.step()
             lr_scheduler.step(loss)

@@ -177,7 +177,7 @@ class MaskDilationOptions(Options):
 class MeshFilteringOptions(Options):
     """Options for filtering mesh faces."""
 
-    def __init__(self, max_pixel_distance=2, max_depth_distance=0.02, min_num_components=5):
+    def __init__(self, max_pixel_distance=2, max_depth_distance=0.1, min_num_components=5):
         """
         :param max_pixel_distance: The maximum distance between vertices of a face in terms of their image space
         coordinates.
@@ -186,6 +186,8 @@ class MeshFilteringOptions(Options):
         Fragments with fewer components will be culled.
         """
         self.max_pixel_distance = max_pixel_distance
+        # Note: the default for max_depth_distance in the paper 'Soccer on Your Tabletop' is 0.02.
+        #  However, the value of 0.1 seemed to produce better results with the TUM dataset.
         self.max_depth_distance = max_depth_distance
         self.min_num_components = min_num_components
 
@@ -210,6 +212,7 @@ class MeshFilteringOptions(Options):
                                     min_num_components=args.min_num_components)
 
 
+# noinspection PyArgumentList
 class MeshReconstructionMethod(enum.Enum):
     TSDF_FUSION = enum.auto()
     BUNDLE_FUSION = enum.auto()
@@ -303,7 +306,6 @@ class PipelineOptions(Options):
                  include_background=False, static_background=False,
                  num_frames=-1, frame_step=1,
                  use_estimated_data=False,
-                 optimise_camera_trajectory=False,
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
         :param include_background: Include the background in the reconstructed mesh.
@@ -313,8 +315,6 @@ class PipelineOptions(Options):
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
         :param use_estimated_data: Use estimated depth maps and camera parameters instead of any
             existing ground truth data.
-        :param optimise_camera_trajectory: Whether to refine the camera trajectory with SIFT features and a
-            gradient descent based optimiser.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         """
@@ -323,7 +323,6 @@ class PipelineOptions(Options):
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.use_estimated_data = use_estimated_data
-        self.optimise_camera_trajectory = optimise_camera_trajectory
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
 
@@ -353,10 +352,6 @@ class PipelineOptions(Options):
         group.add_argument('--use_estimated_data', action='store_true',
                            help='Use estimated depth maps and camera parameters instead of any '
                                 'existing ground truth data.')
-        group.add_argument('--optimise_camera_trajectory',
-                           help="Whether to refine the camera trajectory with SIFT features and a "
-                                "gradient descent based optimiser.",
-                           action='store_true')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
                            default='thirdparty/webxr3dvideo/docs')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
@@ -370,7 +365,6 @@ class PipelineOptions(Options):
             num_frames=args.num_frames,
             frame_step=args.frame_step,
             use_estimated_data=args.use_estimated_data,
-            optimise_camera_trajectory=args.optimise_camera_trajectory,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url
         )
