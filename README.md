@@ -148,7 +148,9 @@ Within each dataset folder, there should be the following 5 items:
    - `fps`: The framerate of the video.
    - `width`: The width of the video frames in pixels.
    - `height`: The height of the video frames in pixels.
+   - `depth_scale`: A scalar that when multiplied with depth map, will transform the depth values to meters.
    - `max_depth`: Depth values are clipped to this value. Roughly corresponds to meters.
+   - `depth_mask_dilation_iterations`: The number of times to apply the dilation filter to the dynamic object masks when creating the masked depth maps.
    - `is_gt`: Whether the dataset was created using ground truth camera and depth data.
 2. The camera intrinsics in a text file in the following format:
    ```text

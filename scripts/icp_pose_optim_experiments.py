@@ -448,48 +448,6 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     with open(pjoin(output_path, 'icp', 'summary.json'), 'w') as f:
         json.dump(icp_results, f)
 
-    # TSDFFusion w/ Our RGB-D Alignment vs BundleFusion
-    recon_folder = pjoin(output_path, 'reconstruction')
-
-    for dataset_name in datasets:
-        mesh_output_path = pjoin(recon_folder, dataset_name)
-        os.makedirs(mesh_output_path, exist_ok=True)
-
-        # TSDFFusion vs BundleFusion on GT data.
-        dataset_gt = TUMAdaptor(
-            base_path=pjoin(data_path, dataset_name),
-            output_path=pjoin(output_path, f"{dataset_name}_gt"),
-            num_frames=num_frames,
-            frame_step=frame_step
-        ).convert_from_ground_truth()
-
-        gt_mesh = tsdf_fusion(dataset_gt, static_mesh_options)
-        gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
-
-        tsdf_fusion_mesh = tsdf_fusion(dataset_gt, static_mesh_options)
-        tsdf_fusion_mesh.export(pjoin(mesh_output_path, 'tsdf.ply'))
-
-        bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset_gt, options=static_mesh_options)
-        bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
-
-        # TSDFFusion vs TSDFFusion w/ Our Alignment vs BundleFusion on Estimated Data.
-        dataset_estimated = TUMAdaptor(
-            base_path=pjoin(data_path, dataset_name),
-            output_path=pjoin(output_path, f"{dataset_name}_est"),
-            num_frames=num_frames,
-            frame_step=frame_step
-        ).convert_from_rgb()
-
-        with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
-            gt_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
-            gt_mesh_est.export(pjoin(mesh_output_path, 'gt_est.ply'))
-
-        tsdf_fusion_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
-        tsdf_fusion_mesh_est.export(pjoin(mesh_output_path, 'tsdf_est.ply'))
-        bf_mesh_est = bundle_fusion(output_folder='bundle_fusion', dataset=dataset_estimated,
-                                    options=static_mesh_options)
-        bf_mesh_est.export(pjoin(mesh_output_path, 'bf_est.ply'))
-
     # Ours vs NeRF based methods
     # TODO: Run on same clips as the examples in the NeRF papers
     # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
@@ -508,7 +466,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             debug=False
         ).run()[0]
 
-        np.savetxt(pjoin(experiment_output_path, "camera_trajectory.txt"))
+        np.savetxt(pjoin(experiment_output_path, "camera_trajectory.txt"), cam_traj)
 
         rpe_r, rpe_t = calculate_rpe(dataset.camera_trajectory, cam_traj)
         # noinspection PyTypeChecker
@@ -574,7 +532,49 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
         json.dump(ablation_results, f)
 
-    pass
+    # TSDFFusion w/ Our RGB-D Alignment vs BundleFusion
+    recon_folder = pjoin(output_path, 'reconstruction')
+
+    for dataset_name in datasets:
+        mesh_output_path = pjoin(recon_folder, dataset_name)
+        os.makedirs(mesh_output_path, exist_ok=True)
+
+        # TSDFFusion vs BundleFusion on GT data.
+        dataset_gt = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_gt"),
+            num_frames=num_frames,
+            frame_step=frame_step
+        ).convert_from_ground_truth()
+
+        gt_mesh = tsdf_fusion(dataset_gt, static_mesh_options)
+        gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
+
+        tsdf_fusion_mesh = tsdf_fusion(dataset_gt, static_mesh_options)
+        tsdf_fusion_mesh.export(pjoin(mesh_output_path, 'tsdf.ply'))
+
+        bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset_gt, options=static_mesh_options)
+        bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
+
+        # TSDFFusion vs TSDFFusion w/ Our Alignment vs BundleFusion on Estimated Data.
+        dataset_estimated = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
+            num_frames=num_frames,
+            frame_step=frame_step
+        ).convert_from_rgb()
+
+        with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
+            gt_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
+            gt_mesh_est.export(pjoin(mesh_output_path, 'gt_est.ply'))
+
+        tsdf_fusion_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
+        tsdf_fusion_mesh_est.export(pjoin(mesh_output_path, 'tsdf_est.ply'))
+        bf_mesh_est = bundle_fusion(output_folder='bundle_fusion', dataset=dataset_estimated,
+                                    options=static_mesh_options)
+        bf_mesh_est.export(pjoin(mesh_output_path, 'bf_est.ply'))
+
+    return
 
 
 if __name__ == '__main__':

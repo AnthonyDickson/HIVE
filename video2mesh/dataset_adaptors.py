@@ -21,7 +21,7 @@ from thirdparty.dpt import dpt
 from video2mesh.geometry import normalise_trajectory
 from video2mesh.io import DatasetBase, File, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, Size, VideoMetadata, InvalidDatasetFormatError
-from video2mesh.options import COLMAPOptions
+from video2mesh.options import COLMAPOptions, StaticMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions
 from video2mesh.utils import log, tqdm_imap
 
@@ -520,8 +520,13 @@ class TUMAdaptor(DatasetAdaptor):
         return len(a)
 
     def get_metadata(self, is_gt: bool):
-        return DatasetMetadata(num_frames=self.num_frames, fps=self.fps, frame_step=self.frame_step,
-                               width=self.width, height=self.height, is_gt=is_gt)
+        # This gets the default value for `depth_mask_dilation_iterations`.
+        depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
+
+        return DatasetMetadata(num_frames=self.num_frames, frame_step=self.frame_step,
+                               fps=self.fps, width=self.width, height=self.height, is_gt=is_gt,
+                               depth_mask_dilation_iterations=depth_mask_dilation_iterations,
+                               depth_scale=VTMDataset.depth_scaling_factor)
 
     def get_camera_matrix(self) -> np.ndarray:
         return self.intrinsic_matrix
@@ -600,8 +605,13 @@ class VideoAdaptorBase(DatasetAdaptor):
 
         video_metadata = VideoMetadata(self.video_path, width=width, height=height, num_frames=self.num_frames, fps=fps)
 
-        return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, frame_step=self.frame_step,
-                               width=width, height=height, is_gt=is_gt)
+        # This gets the default value for `depth_mask_dilation_iterations`.
+        depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
+
+        return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width, height=height,
+                               is_gt=is_gt, frame_step=self.frame_step,
+                               depth_mask_dilation_iterations=depth_mask_dilation_iterations,
+                               depth_scale=VTMDataset.depth_scaling_factor)
 
     def get_full_num_frames(self):
         with open_video(self.video_path) as video:

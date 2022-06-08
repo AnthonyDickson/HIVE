@@ -679,24 +679,33 @@ class DatasetBase:
 class DatasetMetadata:
     """Information about a dataset."""
 
-    def __init__(self, num_frames: int, fps: float, width: int, height: int, is_gt: bool, max_depth=10.0, frame_step=1):
+    def __init__(self, num_frames: int, fps: float, width: int, height: int, is_gt: bool,
+                 depth_mask_dilation_iterations: int, depth_scale: float, max_depth=10.0, frame_step=1):
         """
         :param num_frames: The number of frames in the video sequence.
         :param fps: The framerate at which the video was captured.
         :param width: The width of a frame (pixels).
         :param height: The height of a frame (pixels).
         :param is_gt: Whether the dataset was created using ground truth data for the camera parameters and depth maps.
+        :param depth_scale: A scalar that when multiplied with depth map, will transform the depth values to meters.
         :param max_depth: The maximum depth allowed in a depth map. Values exceeding this threshold will be set to zero.
         :param frame_step: The frequency that frames were sampled at for COLMAP and pose optimisation
             (only applicable if using estimated data).
+        :param depth_mask_dilation_iterations: The number of times to apply the dilation filter to the dynamic object
+            masks when creating the masked depth maps.
         """
         self.num_frames = num_frames
         self.fps = fps
         self.frame_step = frame_step
         self.width = width
         self.height = height
+        self.depth_scale = depth_scale
         self.max_depth = max_depth
+        self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.is_gt = is_gt
+
+        if not isinstance(is_gt, bool):
+            raise ValueError(f"is_gt must be a boolean, got {type(is_gt)}.")
 
         if not isinstance(num_frames, int) or num_frames < 1:
             raise ValueError(f"num_frames must be a positive integer, got {num_frames}.")
@@ -710,18 +719,32 @@ class DatasetMetadata:
         if not isinstance(height, int) or height < 1:
             raise ValueError(f"height must be a positive integer, got {height}.")
 
+        if not isinstance(depth_scale, float):
+            raise ValueError(f"depth_scale must be a real number (float), got {type(depth_scale)}.")
+
+        if not isinstance(max_depth, float) or max_depth < 0.0:
+            raise ValueError(f"max_depth must be a positive, real number (float), got {max_depth} ({type(max_depth)}).")
+
+        if not isinstance(depth_mask_dilation_iterations, int) or depth_mask_dilation_iterations < 1:
+            raise ValueError(f"depth_mask_dilation_iterations must be a positive integer, "
+                             f"got {depth_mask_dilation_iterations}.")
+
     def __eq__(self, other: 'DatasetMetadata') -> bool:
         return self.num_frames == other.num_frames and \
                np.isclose(self.fps, other.fps) and \
                self.frame_step == other.frame_step and \
                self.width == other.width and \
                self.height == other.height and \
+               np.isclose(self.depth_scale, other.depth_scale) and \
                np.isclose(self.max_depth, other.max_depth) and \
+               self.depth_mask_dilation_iterations == other.depth_mask_dilation_iterations and \
                self.is_gt == other.is_gt
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, frame_step={self.frame_step}" \
-               f"width={self.width}, height={self.height}, is_gt={self.is_gt})"
+        return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
+               f"frame_step={self.frame_step}, width={self.width}, height={self.height}, " \
+               f"max_depth={self.max_depth}, is_gt={self.is_gt}, " \
+               f"depth_mask_dilation_iterations={self.depth_mask_dilation_iterations}, depth_scale={self.depth_scale})"
 
     def __str__(self):
         return f"Dataset info: {self.num_frames} frames, " \
@@ -760,7 +783,15 @@ class DatasetMetadata:
         else:
             kwargs = json.load(f)
 
-        return DatasetMetadata(**kwargs)
+        return DatasetMetadata(num_frames=int(kwargs['num_frames']),
+                               frame_step=int(kwargs['frame_step']),
+                               fps=float(kwargs['fps']),
+                               width=int(kwargs['width']),
+                               height=int(kwargs['height']),
+                               is_gt=bool(kwargs['is_gt']),
+                               depth_scale=float(kwargs['depth_scale']),
+                               max_depth=float(kwargs['max_depth']),
+                               depth_mask_dilation_iterations=int(kwargs['depth_mask_dilation_iterations']))
 
 
 class VTMDataset(DatasetBase):
@@ -778,6 +809,10 @@ class VTMDataset(DatasetBase):
     masked_depth_folder = 'masked_depth'
 
     required_folders = [rgb_folder, depth_folder]
+
+    # Dataset adaptors are expected to convert depth maps to mm.
+    # This scaling factor converts the mm depth values to meters.
+    depth_scaling_factor = 1. / 1000.
 
     def __init__(self, base_path, overwrite_ok=False):
         """
@@ -846,10 +881,6 @@ class VTMDataset(DatasetBase):
         else:
             raise RuntimeError(f"Masked depth maps have not been created for this dataset yet. "
                                f"Please make sure you have called `.create_masked_depth()` beforehand.")
-
-    @property
-    def depth_scaling_factor(self):
-        return 1. / 1000.
 
     @property
     def fx(self) -> float:
