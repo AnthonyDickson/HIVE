@@ -291,8 +291,6 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
     mesh_path = pjoin(bundle_fusion_output_path, 'mesh.ply')
 
     with open(mesh_path, 'rb') as mesh_file:
-        mesh_data = trimesh.load(mesh_file)
-
-    mesh = trimesh.Trimesh(**mesh_data)
+        mesh = trimesh.load(mesh_file, file_type='ply')
 
     return mesh
