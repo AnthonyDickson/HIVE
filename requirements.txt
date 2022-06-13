@@ -23,6 +23,8 @@ wget==3.2
 gdown==4.4.0
 h5py==3.6.0
 pypng==0.0.21
+# Creating Excel spreadsheets with Pandas
+openpyxl==3.0.10
 # Needs to be this version in order to run the FlowNet2 install.sh script.
 # Later versions will error on CUDA version mismatch instead of warn.
 setuptools==59.5.0

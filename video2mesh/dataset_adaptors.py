@@ -152,6 +152,7 @@ class DatasetAdaptor(DatasetBase):
 
         :return: The newly created dataset object.
         """
+        # TODO: Add way to pass arguments to PoseOptimiser object.
         return self._convert(from_gt=False, colmap_options=colmap_options)
 
     def _convert(self, from_gt: bool, colmap_options=COLMAPOptions()) -> VTMDataset:

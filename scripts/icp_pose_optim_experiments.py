@@ -4,44 +4,47 @@ import json
 import os.path
 import shutil
 import warnings
+from collections import defaultdict
 from os.path import join as pjoin
 from typing import Tuple, Optional
 
-import matplotlib
-
-from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.options import StaticMeshOptions, PipelineOptions, StorageOptions
-from video2mesh.utils import log, tqdm_imap
-
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
+import pandas as pd
 
 from video2mesh.dataset_adaptors import TUMAdaptor
+from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
-    get_identity_pose, add_pose
+    get_identity_pose, add_pose, invert_trajectory
 from video2mesh.io import VTMDataset
-from video2mesh.pipeline import Pipeline
-from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
+from video2mesh.options import StaticMeshOptions
+from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, FrameSamplingMode
+from video2mesh.utils import log, tqdm_imap
 
 
 def setup(output_path: str, overwrite_ok: bool):
     if os.path.isdir(output_path):
-        if not overwrite_ok:
-            user_input = input(f"The output folder at {output_path} already exists, "
-                               f"do you want to delete this folder before continuing? (y/n):")
-            should_delete = user_input == 'y'
-        else:
-            should_delete = True
+        user_input = input(f"The output folder at {output_path} already exists, "
+                           f"do you want to delete this folder before continuing? (y/n):")
+        should_delete = user_input.lower() == 'y'
 
         if should_delete:
             shutil.rmtree(output_path)
-        else:
+        elif not overwrite_ok:
             raise RuntimeError(f"The output folder at {output_path} already exists. "
                                "Either change the output path or delete the existing folder.")
+        else:
+            user_input = input(f"The output folder at {output_path} already exists.\n"
+                               f"Since `overwrite_ok` has been set to True, any existing results will be overwritten "
+                               f"but the created datasets will be left as-is.\n"
+                               f"This could lead to results from previous runs mixed up with the new results.\n"
+                               f"Are you sure you want to continue? (y/n):")
 
-    os.makedirs(output_path)
+            if user_input.lower() != 'y':
+                exit(0)
+
+    os.makedirs(output_path, exist_ok=overwrite_ok)
 
 
 def align_for_ate(gt_trajectory, pred_trajectory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -173,13 +176,11 @@ def similarity_transform(from_points, to_points):
     return c * R, t
 
 
-def create_point_cloud_o3d(dataset: VTMDataset, index: int):
+def create_point_cloud(dataset: VTMDataset, index: int):
     rgb = dataset.rgb_dataset[index]
     depth = dataset.depth_dataset[index]
     mask = dataset.mask_dataset[index] > 0
     depth[mask] = 0.0
-
-    pose = pose_vec2mat(dataset.camera_trajectory[index])
 
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
         o3d.geometry.RGBDImage.create_from_color_and_depth(
@@ -190,8 +191,7 @@ def create_point_cloud_o3d(dataset: VTMDataset, index: int):
             convert_rgb_to_intensity=False
         ),
         intrinsic=o3d.camera.PinholeCameraIntrinsic(dataset.frame_width, dataset.frame_height, dataset.fx, dataset.fy,
-                                                    dataset.cx, dataset.cy),
-        extrinsic=pose
+                                                    dataset.cx, dataset.cy)
     )
 
     return pcd
@@ -233,7 +233,7 @@ def register_with_ransac(source_down, target_down, source_fpfh,
     return result
 
 
-def icp_o3d(source, target):
+def icp(source, target):
     # colored pointcloud registration
     # From: http://www.open3d.org/docs/release/tutorial/pipelines/colored_pointcloud_registration.html
     # This is implementation of following paper
@@ -295,10 +295,10 @@ def get_icp_trajectory(dataset: VTMDataset):
     def align(frame_indices):
         frame_i, frame_j = frame_indices
 
-        source = create_point_cloud_o3d(dataset, frame_i)
-        target = create_point_cloud_o3d(dataset, frame_j)
+        source = create_point_cloud(dataset, frame_i)
+        target = create_point_cloud(dataset, frame_j)
 
-        pose = icp_o3d(source, target)
+        pose = icp(source, target)
 
         return pose_mat2vec(pose)
 
@@ -311,18 +311,15 @@ def get_icp_trajectory(dataset: VTMDataset):
 
 
 def merge_trajectory(relative_poses: np.ndarray) -> np.ndarray:
-    merged_pose_data = [get_identity_pose()]
-    previous_pose = merged_pose_data[0]
+    # Assumes relative_poses[0] == get_identity_pose()
+    merged_pose_data = []
+    previous_pose = get_identity_pose()
 
-    num_frames = len(relative_poses)
+    for pose in relative_poses:
+        new_pose = add_pose(pose, previous_pose)
 
-    for i, j in zip(range(num_frames - 1), range(1, num_frames)):
-        pose_i, pose_j = relative_poses[[i, j]]
-        j_rel_to_i = subtract_pose(pose_i, pose_j)
-        j_rel_to_world_origin = add_pose(previous_pose, j_rel_to_i)
-
-        merged_pose_data.append(j_rel_to_world_origin)
-        previous_pose = j_rel_to_world_origin
+        merged_pose_data.append(new_pose)
+        previous_pose = new_pose
 
     return np.asarray(merged_pose_data)
 
@@ -339,14 +336,42 @@ def temp_traj(dataset: VTMDataset, trajectory: np.ndarray):
         dataset.camera_trajectory = traj_backup
 
 
+def export_results(output_path):
+    def read_results(path):
+        with open(path, 'r') as f:
+            results = json.load(f)
+            pd_results_dict = defaultdict(lambda: defaultdict(float))
+
+            for metric in results:
+                for dataset in results[metric]:
+                    for method in results[metric][dataset]:
+                        if metric == 'rpe':
+                            for sub_metric in results[metric][dataset][method]:
+                                pd_results_dict[dataset, method][metric, sub_metric] = results[metric][dataset][method][
+                                    sub_metric]
+                        else:
+                            pd_results_dict[dataset, method][metric, '-'] = results[metric][dataset][method]
+
+            return pd.DataFrame.from_dict(pd_results_dict, orient='index')
+
+    with pd.ExcelWriter(pjoin(output_path, 'results.xlsx')) as writer:
+        icp_results_df = read_results(pjoin(output_path, 'icp', 'summary.json'))
+        icp_results_df.to_excel(writer, sheet_name='ICP_BY_DATASET')
+        icp_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='ICP_BY_METHOD')
+
+        ablation_results_df = read_results(pjoin(output_path, 'ablation', 'summary.json'))
+        ablation_results_df.to_excel(writer, sheet_name='ABLATION_BY_DATASET')
+        ablation_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='ABLATION_BY_METHOD')
+
+
 def main(output_path: str, data_path: str, random_seed: Optional[int] = None, overwrite_ok=False):
     setup(output_path=output_path, overwrite_ok=overwrite_ok)
 
     # TODO: Make the dataset list configurable.
     # TODO: Download any missing TUM datasets.
-    datasets = ['rgbd_dataset_freiburg3_walking_xyz',
-                'rgbd_dataset_freiburg3_sitting_xyz',
-                'rgbd_dataset_freiburg1_desk']
+    datasets = ['rgbd_dataset_freiburg1_desk',
+                'rgbd_dataset_freiburg3_walking_xyz',
+                'rgbd_dataset_freiburg3_sitting_xyz']
     # ICP vs Our RGB-D Alignment
     num_frames = 150
     frame_step = 1
@@ -361,18 +386,30 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         experiment_path = pjoin(icp_results_path, dataset_name, pred_label)
         os.makedirs(experiment_path, exist_ok=True)
 
+        def add_key(key):
+            if key not in icp_results:
+                icp_results[key] = dict()
+
+            if dataset_name not in icp_results[key]:
+                icp_results[key][dataset_name] = dict()
+
+            if pred_label not in icp_results[key][dataset_name]:
+                icp_results[key][dataset_name][pred_label] = dict()
+
+        add_key('rpe')
+        add_key('ate')
+
+        np.savetxt(pjoin(experiment_path, 'trajectory.txt'), pred_trajectory)
+
         translational_error, aligned_trajectory = calculate_ate(gt_trajectory, pred_trajectory)
         visualise_ate(gt_trajectory[:, 4:], aligned_trajectory,
                       output_path=pjoin(experiment_path, 'ate.png'))
+        visualise_ate(gt_trajectory[:, 4:], pred_trajectory[:, 4:],
+                      output_path=pjoin(experiment_path, 'trajectory_comparison.png'))
+
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, 'ate.txt'), translational_error)
         log(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}: ATE: {np.mean(translational_error):.2f}m")
-
-        if 'ate' not in icp_results:
-            icp_results['ate'] = dict()
-
-        if dataset_name not in icp_results['ate']:
-            icp_results['ate'][dataset_name] = dict()
 
         icp_results['ate'][dataset_name][pred_label] = np.mean(translational_error)
 
@@ -386,14 +423,8 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_t.txt"), error_t)
 
-        if 'rpe' not in icp_results:
-            icp_results['rpe'] = dict()
-
-        if dataset_name not in icp_results['rpe']:
-            icp_results['rpe'][dataset_name] = dict()
-
-        icp_results['rpe'][dataset_name]['rotation'] = np.mean(error_r)
-        icp_results['rpe'][dataset_name]['translation'] = np.mean(error_t)
+        icp_results['rpe'][dataset_name][pred_label]['rotation'] = np.mean(error_r)
+        icp_results['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
 
     for dataset_name in datasets:
         dataset_gt = TUMAdaptor(
@@ -436,7 +467,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             mesh = tsdf_fusion(dataset_estimated, static_mesh_options)
             mesh.export(pjoin(gt_est_output_path, 'mesh.ply'))
 
-        icp_trajectory_est = merge_trajectory(get_icp_trajectory(dataset_estimated))
+        icp_trajectory_est = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_estimated)))
         run_trajectory_comparisons(dataset_estimated, icp_trajectory_est, dataset_gt.camera_trajectory,
                                    pred_label='icp_est', gt_label='gt')
 
@@ -466,6 +497,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             debug=False
         ).run()[0]
 
+        # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_output_path, "camera_trajectory.txt"), cam_traj)
 
         rpe_r, rpe_t = calculate_rpe(dataset.camera_trajectory, cam_traj)
@@ -489,12 +521,15 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             if dataset_name not in ablation_results[key]:
                 ablation_results[key][dataset_name] = dict()
 
+            if pred_label not in ablation_results[key][dataset_name]:
+                ablation_results[key][dataset_name][pred_label] = dict()
+
         add_key('rpe')
         add_key('ate')
 
-        ablation_results['rpe'][dataset_name]['rotation'] = np.mean(rpe_r)
-        ablation_results['rpe'][dataset_name]['translation'] = np.mean(rpe_t)
-        ablation_results['ate'][dataset_name] = np.mean(ate)
+        ablation_results['rpe'][dataset_name][pred_label]['rotation'] = np.mean(rpe_r)
+        ablation_results['rpe'][dataset_name][pred_label]['translation'] = np.mean(rpe_t)
+        ablation_results['ate'][dataset_name][pred_label] = np.mean(ate)
 
     for dataset_name in datasets:
         rgbd_alignment_experiment_path = pjoin(output_path, 'ablation', dataset_name)
@@ -546,6 +581,8 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             num_frames=num_frames,
             frame_step=frame_step
         ).convert_from_ground_truth()
+        # This is needed in case BundleFusion has already been run with the dataset.
+        dataset_gt.overwrite_ok = overwrite_ok
 
         gt_mesh = tsdf_fusion(dataset_gt, static_mesh_options)
         gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
@@ -563,6 +600,8 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             num_frames=num_frames,
             frame_step=frame_step
         ).convert_from_rgb()
+        # This is needed in case BundleFusion has already been run with the dataset.
+        dataset_gt.overwrite_ok = overwrite_ok
 
         with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
             gt_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
@@ -574,7 +613,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                                     options=static_mesh_options)
         bf_mesh_est.export(pjoin(mesh_output_path, 'bf_est.ply'))
 
-    return
+    export_results(output_path)
 
 
 if __name__ == '__main__':
@@ -586,7 +625,7 @@ if __name__ == '__main__':
     parser.add_argument('--random_seed', help='(optional) The seed to use for anything dealing with RNGs. '
                                               'If None, the random seed is not modified in any way.',
                         required=False, default=None, type=int)
-    parser.add_argument('-y', dest='overwrite_ok', action='store_true', help='Whether to overwrite any1 old results.')
+    parser.add_argument('-y', dest='overwrite_ok', action='store_true', help='Whether to overwrite any old results.')
     args = parser.parse_args()
 
     main(output_path=args.output_path, data_path=args.data_path, random_seed=args.random_seed,
