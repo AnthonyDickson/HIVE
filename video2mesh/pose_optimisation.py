@@ -1,6 +1,7 @@
 import argparse
 import enum
 import os.path
+from os.path import join as pjoin
 import shutil
 import warnings
 from typing import Tuple, List, Optional, Iterable, Union
@@ -352,9 +353,9 @@ class FeatureExtractor:
         if self.debug_path is None:
             return
 
-        self.match_viz_path = os.path.join(self.debug_path, 'match_viz')
-        self.frame_pairs_path = os.path.join(self.debug_path, 'frame_pairs.txt')
-        self.feature_set_path = os.path.join(self.debug_path, 'feature_set.pth')
+        self.match_viz_path = pjoin(self.debug_path, 'match_viz')
+        self.frame_pairs_path = pjoin(self.debug_path, 'frame_pairs.txt')
+        self.feature_set_path = pjoin(self.debug_path, 'feature_set.pth')
 
         os.makedirs(self.debug_path, exist_ok=True)
 
@@ -606,7 +607,7 @@ class FeatureExtractor:
 
         kp_matches_viz = cv2.cvtColor(kp_matches_viz, cv2.COLOR_BGR2RGB)
 
-        plt.imsave(os.path.join(self.match_viz_path, f"{i:06d}-{j:06d}.jpg"), kp_matches_viz)
+        plt.imsave(pjoin(self.match_viz_path, f"{i:06d}-{j:06d}.jpg"), kp_matches_viz)
 
     def _print_results_stats(self, index_i: torch.Tensor, index_j: torch.Tensor, num_good_frame_pairs: int):
         """
@@ -933,16 +934,16 @@ class PoseOptimiser:
         scale = to_numpy(optimised_parameters.scale)
         shift = to_numpy(optimised_parameters.shift)
 
-        if self.debug_path:
+        if self.debug:
             # noinspection PyTypeChecker
-            np.savetxt(os.path.join(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
+            np.savetxt(pjoin(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
 
             should_reshape = self.optimisation_options.alignment_type == AlignmentType.Deformable
 
-            np.savetxt(os.path.join(self.debug_path, 'scale.txt'),
+            np.savetxt(pjoin(self.debug_path, 'scale.txt'),
                        scale.reshape((num_frames, -1)) if should_reshape else scale)
 
-            np.savetxt(os.path.join(self.debug_path, 'shift.txt'),
+            np.savetxt(pjoin(self.debug_path, 'shift.txt'),
                        shift.reshape((num_frames, -1)) if should_reshape else shift)
 
         return final_camera_trajectory, scale, shift
@@ -950,7 +951,7 @@ class PoseOptimiser:
     def _setup_debug_folder(self):
         """Create the debug folder if in debug mode and the folder doesn't already exist."""
         if self.debug:
-            self.debug_path = os.path.join(self.dataset.base_path, self.DEBUG_FOLDER)
+            self.debug_path = pjoin(self.dataset.base_path, self.DEBUG_FOLDER)
 
             os.makedirs(self.debug_path, exist_ok=True)
 
@@ -1017,7 +1018,10 @@ class PoseOptimiser:
         feature_extractor = FeatureExtractor(self.dataset, frame_pairs, feature_extraction_options,
                                              debug_path=self.debug_path)
 
-        return feature_extractor.extract_feature_points()
+        feature_set = feature_extractor.extract_feature_points()
+        feature_set = feature_set.subset_from(frame_pairs)
+
+        return feature_set
 
     def _optimise_pose(self, fixed_parameters: FeatureSet,
                        optimisation_parameters: OptimisationParameters,
@@ -1052,6 +1056,9 @@ class PoseOptimiser:
                                                       num_frames=num_frames)
         pairwise_parameters = pairwise_parameters.to(device)
 
+        if self.debug:
+            self.visualise_solution(pairwise_parameters, 'pair_wise')
+
         # Second round of alignment to get a more globally optimal alignment.
         # If using the frame sampling method `HIERARCHICAL`, this will introduce new constraints from non-adjacent
         # frames. These new constraints should help improve the robustness of the estimated poses.
@@ -1060,6 +1067,9 @@ class PoseOptimiser:
                                                     optimisation_parameters=pairwise_parameters,
                                                     optimisation_options=optimisation_options)
         global_parameters = global_parameters.to(device)
+
+        if self.debug:
+            self.visualise_solution(global_parameters, 'global')
 
         if optimisation_options.fine_tune:
             # The final and optional round of optimisation uses a different residual type for calculating the loss -
@@ -1075,6 +1085,9 @@ class PoseOptimiser:
                                                         optimisation_options=optimisation_options,
                                                         residual_type=ResidualType.Image2D)
             optimisation_options.learning_rate = lr
+
+            if self.debug:
+                self.visualise_solution(global_parameters, 'fine_tune')
 
         return global_parameters.cpu()
 
@@ -1391,6 +1404,35 @@ class PoseOptimiser:
 
         return interpolated_poses
 
+    def visualise_solution(self, solution: OptimisationParameters, label: str):
+        # The inverse transform is needed so that the trajectories are comparable to the ground truth ones and
+        # the final trajectories.
+        trajectory = invert_trajectory(solution.get_trajectory())[:, 4:]
+        output_path = pjoin(self.debug_path, f"{label}.png")
+
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 4.8))
+
+        def plot_trajectory(plot_axis, secondary_axis='y'):
+            if secondary_axis == 'y':
+                axis = 1
+            elif secondary_axis == 'z':
+                axis = 2
+            else:
+                raise RuntimeError(f"secondary_axis must be one of ('y', 'z').")
+
+            plot_axis.plot(trajectory[:, 0], trajectory[:, axis], '-', color="black", label="trajectory")
+            plot_axis.legend()
+
+            plot_axis.set_xlabel("x [m]")
+            plot_axis.set_ylabel(f"{secondary_axis} [m]")
+            plot_axis.set_title(f"Trajectory on X{secondary_axis.upper()} Plane")
+
+        plot_trajectory(ax1, secondary_axis='y')
+        plot_trajectory(ax2, secondary_axis='z')
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=90)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1441,12 +1483,12 @@ def main():
                                                    sdf_num_voxels=80000000)
         log("Running TSDFFusion on initial pose data...")
         mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
-        mesh_before.export(os.path.join(optimiser.debug_path, 'before.ply'))
+        mesh_before.export(pjoin(optimiser.debug_path, 'before.ply'))
 
         dataset.camera_trajectory = camera_trajectory
         log("Running TSDFFusion on final pose data..")
         mesh_after = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
-        mesh_after.export(os.path.join(optimiser.debug_path, 'after.ply'))
+        mesh_after.export(pjoin(optimiser.debug_path, 'after.ply'))
 
 
 if __name__ == '__main__':
