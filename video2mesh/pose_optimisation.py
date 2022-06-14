@@ -46,16 +46,16 @@ class FrameSamplingMode(enum.Enum):
     """Method for sampling frame pairs from a video sequence."""
 
     # All unique pairs of frames, e.g. [(0, 1), (0, 1), ..., (0, n - 1), (1, 2), (1, 3), ..., (n - 2, n - 1)]
-    EXHAUSTIVE = enum.auto()
+    Exhaustive = enum.auto()
     # All consecutive pairs, e.g. [(0, 1), (1, 2), (2, 3)]
-    CONSECUTIVE = enum.auto()
+    Consecutive = enum.auto()
     # Consecutive pairs that do not overlap, e.g. [(0, 1), (2, 3), (4, 5)]
-    CONSECUTIVE_NO_OVERLAP = enum.auto()
+    ConsecutiveNoOverlap = enum.auto()
     # Consecutive pairs that do not overlap and start at 1 (compare CONSECUTIVE_NO_OVERLAP),
     # e.g. [(1, 2), (3, 4), (5, 6)]
-    CONSECUTIVE_NO_OVERLAP_OFFSET = enum.auto()
+    ConsecutiveNoOverlapOffset = enum.auto()
     # Consecutive pairs + increasingly distant pairs, e.g. [(0, 1), (0, 2), (0, 4), ..., (1, 2)]
-    HIERARCHICAL = enum.auto()
+    Hierarchical = enum.auto()
 
 
 """A pair of frame indices."""
@@ -886,7 +886,7 @@ class PoseOptimiser:
 
     DEBUG_FOLDER = 'pose_optim'
 
-    def __init__(self, dataset: VTMDataset, frame_sampling=FrameSamplingMode.HIERARCHICAL,
+    def __init__(self, dataset: VTMDataset, frame_sampling=FrameSamplingMode.Hierarchical,
                  feature_extraction_options=FeatureExtractionOptions(),
                  optimisation_options=OptimisationOptions(), debug=True):
         """
@@ -967,20 +967,20 @@ class PoseOptimiser:
         num_frames = self.dataset.num_frames if num_frames == -1 else num_frames
         frame_pairs = []
 
-        if frame_sampling_mode == FrameSamplingMode.EXHAUSTIVE:
+        if frame_sampling_mode == FrameSamplingMode.Exhaustive:
             for i in range(num_frames):
                 for j in range(i + 1, num_frames):
                     frame_pairs.append((i, j))
 
-        elif frame_sampling_mode in (FrameSamplingMode.CONSECUTIVE, FrameSamplingMode.CONSECUTIVE_NO_OVERLAP,
-                                     FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET):
-            if frame_sampling_mode == FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET:
+        elif frame_sampling_mode in (FrameSamplingMode.Consecutive, FrameSamplingMode.ConsecutiveNoOverlap,
+                                     FrameSamplingMode.ConsecutiveNoOverlapOffset):
+            if frame_sampling_mode == FrameSamplingMode.ConsecutiveNoOverlapOffset:
                 start = 1
             else:
                 start = 0
 
-            if frame_sampling_mode in (FrameSamplingMode.CONSECUTIVE_NO_OVERLAP,
-                                       FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET):
+            if frame_sampling_mode in (FrameSamplingMode.ConsecutiveNoOverlap,
+                                       FrameSamplingMode.ConsecutiveNoOverlapOffset):
                 step = 2
             else:
                 step = 1
@@ -988,7 +988,7 @@ class PoseOptimiser:
             for i in range(start, num_frames - 1, step):
                 frame_pairs.append((i, i + 1))
 
-        elif frame_sampling_mode == FrameSamplingMode.HIERARCHICAL:
+        elif frame_sampling_mode == FrameSamplingMode.Hierarchical:
             # Adapted from https://github.com/facebookresearch/consistent_depth/blob/e2c9b724d3221aa7c0bf89aa9449ae33b418d943/utils/frame_sampling.py#L78
             max_level = int(np.floor(np.log2(num_frames - 1)))
 
@@ -1138,8 +1138,8 @@ class PoseOptimiser:
         # Combining the optimised poses from both runs gives us overlapping frames (0, 1) -> (1, 2) -> (2, 3) which can
         # be chained to give us the absolute pose for all the frames (unless some frame pairs could not be matched).
         pose_data = dict()
-        optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP)
-        optimise_frame_pairs(FrameSamplingMode.CONSECUTIVE_NO_OVERLAP_OFFSET)
+        optimise_frame_pairs(FrameSamplingMode.ConsecutiveNoOverlap)
+        optimise_frame_pairs(FrameSamplingMode.ConsecutiveNoOverlapOffset)
 
         merged_pose_data = [get_identity_pose()]
         previous_pose = merged_pose_data[0]
@@ -1479,7 +1479,7 @@ def main():
     camera_trajectory, _, _ = optimiser.run(num_frames)
 
     if optimiser.debug_path:
-        reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDF_FUSION,
+        reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
                                                    sdf_num_voxels=80000000)
         log("Running TSDFFusion on initial pose data...")
         mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)

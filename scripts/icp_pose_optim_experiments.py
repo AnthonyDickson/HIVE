@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 import pandas as pd
+from tqdm import tqdm
 
 from video2mesh.dataset_adaptors import TUMAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
@@ -19,8 +20,8 @@ from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, invert_trajectory
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions
-from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, FrameSamplingMode
-from video2mesh.utils import log, tqdm_imap
+from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
+from video2mesh.utils import log
 
 
 def setup(output_path: str, overwrite_ok: bool):
@@ -292,20 +293,17 @@ def icp(source, target):
 
 
 def get_icp_trajectory(dataset: VTMDataset):
-    def align(frame_indices):
-        frame_i, frame_j = frame_indices
+    log(f"Aligning point clouds with ICP...")
+    num_frames = dataset.num_frames
+    relative_poses = []
 
+    for frame_i, frame_j in tqdm(zip(range(num_frames - 1), range(1, num_frames)), total=num_frames):
         source = create_point_cloud(dataset, frame_i)
         target = create_point_cloud(dataset, frame_j)
 
         pose = icp(source, target)
 
-        return pose_mat2vec(pose)
-
-    num_frames = dataset.num_frames
-
-    log(f"Aligning point clouds with ICP...")
-    relative_poses = tqdm_imap(align, list(zip(range(num_frames - 1), range(1, num_frames))))
+        relative_poses.append(pose_mat2vec(pose))
 
     return np.asarray([get_identity_pose()] + relative_poses)
 
@@ -382,26 +380,25 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     icp_results_path = pjoin(output_path, 'icp')
     os.makedirs(icp_results_path, exist_ok=True)
 
-    def run_trajectory_comparisons(dataset, pred_trajectory, gt_trajectory, pred_label: str, gt_label: str):
-        experiment_path = pjoin(icp_results_path, dataset_name, pred_label)
+    def add_key(key, dataset_name, pred_label, results_dict):
+        if key not in results_dict:
+            results_dict[key] = dict()
+
+        if dataset_name not in results_dict[key]:
+            results_dict[key][dataset_name] = dict()
+
+        if pred_label not in results_dict[key][dataset_name]:
+            results_dict[key][dataset_name][pred_label] = dict()
+
+    def run_trajectory_comparisons(dataset, pred_trajectory, gt_trajectory, pred_label: str, gt_label: str,
+                                   results_dict: dict, output_folder: str):
+        experiment_path = pjoin(output_folder, dataset_name, pred_label)
         os.makedirs(experiment_path, exist_ok=True)
-
-        def add_key(key):
-            if key not in icp_results:
-                icp_results[key] = dict()
-
-            if dataset_name not in icp_results[key]:
-                icp_results[key][dataset_name] = dict()
-
-            if pred_label not in icp_results[key][dataset_name]:
-                icp_results[key][dataset_name][pred_label] = dict()
-
-        add_key('rpe')
-        add_key('ate')
 
         np.savetxt(pjoin(experiment_path, 'trajectory.txt'), pred_trajectory)
 
         translational_error, aligned_trajectory = calculate_ate(gt_trajectory, pred_trajectory)
+
         visualise_ate(gt_trajectory[:, 4:], aligned_trajectory,
                       output_path=pjoin(experiment_path, 'ate.png'))
         visualise_ate(gt_trajectory[:, 4:], pred_trajectory[:, 4:],
@@ -410,8 +407,6 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, 'ate.txt'), translational_error)
         log(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}: ATE: {np.mean(translational_error):.2f}m")
-
-        icp_results['ate'][dataset_name][pred_label] = np.mean(translational_error)
 
         with temp_traj(dataset, pred_trajectory):
             mesh = tsdf_fusion(dataset, static_mesh_options)
@@ -423,8 +418,12 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_t.txt"), error_t)
 
-        icp_results['rpe'][dataset_name][pred_label]['rotation'] = np.mean(error_r)
-        icp_results['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
+        add_key('rpe', dataset_name, pred_label, results_dict)
+        add_key('ate', dataset_name, pred_label, results_dict)
+
+        results_dict['ate'][dataset_name][pred_label] = np.mean(translational_error)
+        results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(error_r)
+        results_dict['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
 
     for dataset_name in datasets:
         dataset_gt = TUMAdaptor(
@@ -434,15 +433,13 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_ground_truth()
 
-        gt_output_path = pjoin(icp_results_path, dataset_name, 'gt')
-        os.makedirs(gt_output_path, exist_ok=True)
+        run_trajectory_comparisons(dataset_gt, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,
+                                   pred_label='gt', gt_label='gt',
+                                   results_dict=icp_results, output_folder=icp_results_path)
 
-        mesh = tsdf_fusion(dataset_gt, static_mesh_options)
-        mesh.export(pjoin(gt_output_path, 'mesh.ply'))
-
-        icp_trajectory = merge_trajectory(get_icp_trajectory(dataset_gt))
+        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt)))
         run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp',
-                                   gt_label='gt')
+                                   gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
         optimiser = PoseOptimiser(
             dataset_gt,
@@ -451,7 +448,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         )
         optimised_trajectory, _, _ = optimiser.run(num_frames=dataset_gt.num_frames)
         run_trajectory_comparisons(dataset_gt, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours',
-                                   gt_label='gt')
+                                   gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
         dataset_estimated = TUMAdaptor(
             base_path=pjoin(data_path, dataset_name),
@@ -460,19 +457,18 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_rgb()
 
-        with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
-            gt_est_output_path = pjoin(icp_results_path, dataset_name, 'gt_est')
-            os.makedirs(gt_est_output_path, exist_ok=True)
-
-            mesh = tsdf_fusion(dataset_estimated, static_mesh_options)
-            mesh.export(pjoin(gt_est_output_path, 'mesh.ply'))
+        run_trajectory_comparisons(dataset_estimated, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,
+                                   pred_label='gt_est', gt_label='gt',
+                                   results_dict=icp_results, output_folder=icp_results_path)
 
         icp_trajectory_est = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_estimated)))
         run_trajectory_comparisons(dataset_estimated, icp_trajectory_est, dataset_gt.camera_trajectory,
-                                   pred_label='icp_est', gt_label='gt')
+                                   pred_label='icp_est', gt_label='colmap', results_dict=icp_results,
+                                   output_folder=icp_results_path)
 
         run_trajectory_comparisons(dataset_estimated, dataset_estimated.camera_trajectory, dataset_gt.camera_trajectory,
-                                   pred_label='ours_est', gt_label='gt')
+                                   pred_label='ours_est', gt_label='colmap', results_dict=icp_results,
+                                   output_folder=icp_results_path)
 
         # TODO: Real world video for ICP vs Ours?
 
@@ -486,10 +482,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     # Our RGB-D Alignment
     ablation_results = dict()
 
-    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str):
-        experiment_output_path = pjoin(output_path, 'ablation', dataset_name, pred_label)
-        os.makedirs(experiment_output_path, exist_ok=True)
-
+    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str, gt_label: str):
         cam_traj = PoseOptimiser(
             dataset,
             feature_extraction_options=FeatureExtractionOptions(min_features=40),
@@ -497,39 +490,8 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             debug=False
         ).run()[0]
 
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_output_path, "camera_trajectory.txt"), cam_traj)
-
-        rpe_r, rpe_t = calculate_rpe(dataset.camera_trajectory, cam_traj)
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_output_path, "rpe_r.txt"), rpe_r)
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_output_path, "rpe_t.txt"), rpe_t)
-
-        ate, _ = calculate_ate(dataset.camera_trajectory, cam_traj)
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_output_path, "ate.txt"), ate)
-
-        with temp_traj(dataset, cam_traj):
-            mesh = tsdf_fusion(dataset, static_mesh_options)
-            mesh.export(pjoin(experiment_output_path, "mesh.ply"))
-
-        def add_key(key):
-            if key not in ablation_results:
-                ablation_results[key] = dict()
-
-            if dataset_name not in ablation_results[key]:
-                ablation_results[key][dataset_name] = dict()
-
-            if pred_label not in ablation_results[key][dataset_name]:
-                ablation_results[key][dataset_name][pred_label] = dict()
-
-        add_key('rpe')
-        add_key('ate')
-
-        ablation_results['rpe'][dataset_name][pred_label]['rotation'] = np.mean(rpe_r)
-        ablation_results['rpe'][dataset_name][pred_label]['translation'] = np.mean(rpe_t)
-        ablation_results['ate'][dataset_name][pred_label] = np.mean(ate)
+        run_trajectory_comparisons(dataset, cam_traj, dataset.camera_trajectory, pred_label, gt_label=gt_label,
+                                   results_dict=ablation_results, output_folder=pjoin(output_path, 'ablation'))
 
     for dataset_name in datasets:
         rgbd_alignment_experiment_path = pjoin(output_path, 'ablation', dataset_name)
@@ -550,19 +512,26 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_rgb()
 
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=True), pred_label='pos_only')
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=False), pred_label='pos_rot')
+        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=True),
+                                  pred_label='pos_only', gt_label='gt')
+        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=False),
+                                  pred_label='pos_rot', gt_label='gt')
 
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=True), pred_label='pos_only_est')
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=False), pred_label='pos_rot_est')
+        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=True),
+                                  pred_label='pos_only_est', gt_label='colmap')
+        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=False),
+                                  pred_label='pos_rot_est', gt_label='colmap')
 
         # Compare with and without a final fine-tuning step that uses the image-to-image projection residuals.
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=True), pred_label='fine_tune')
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=False), pred_label='no_fine_tune')
+        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=True),
+                                  pred_label='fine_tune', gt_label='gt')
+        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=False),
+                                  pred_label='no_fine_tune', gt_label='gt')
 
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(fine_tune=True), pred_label='fine_tune_est')
+        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(fine_tune=True),
+                                  pred_label='fine_tune_est', gt_label='colmap')
         run_pose_optim_experiment(dataset_estimated, OptimisationOptions(fine_tune=False),
-                                  pred_label='no_fine_tune_est')
+                                  pred_label='no_fine_tune_est', gt_label='colmap')
 
     with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
         json.dump(ablation_results, f)
@@ -601,7 +570,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_rgb()
         # This is needed in case BundleFusion has already been run with the dataset.
-        dataset_gt.overwrite_ok = overwrite_ok
+        dataset_estimated.overwrite_ok = overwrite_ok
 
         with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
             gt_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
@@ -609,6 +578,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
 
         tsdf_fusion_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
         tsdf_fusion_mesh_est.export(pjoin(mesh_output_path, 'tsdf_est.ply'))
+
         bf_mesh_est = bundle_fusion(output_folder='bundle_fusion', dataset=dataset_estimated,
                                     options=static_mesh_options)
         bf_mesh_est.export(pjoin(mesh_output_path, 'bf_est.ply'))

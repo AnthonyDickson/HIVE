@@ -226,7 +226,7 @@ class BundleFusionConfig:
 
 
 def bundle_fusion(output_folder: str, dataset: VTMDataset,
-                  options=StaticMeshOptions(MeshReconstructionMethod.BUNDLE_FUSION), num_frames: int = -1) \
+                  options=StaticMeshOptions(MeshReconstructionMethod.BundleFusion), num_frames: int = -1) \
         -> trimesh.Trimesh:
     """
     Run the BundleFusion 3D reconstruction algorithm (http://graphics.stanford.edu/projects/bundlefusion/) on a dataset.

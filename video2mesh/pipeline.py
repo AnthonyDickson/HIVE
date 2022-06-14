@@ -124,7 +124,7 @@ class Pipeline:
         foreground_scene.apply_transform(centering_transform)
         background_scene.apply_transform(centering_transform)
 
-        if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+        if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
             background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
         scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
@@ -448,9 +448,9 @@ class Pipeline:
         if num_frames < 1:
             num_frames = dataset.num_frames
 
-        if options.reconstruction_method == MeshReconstructionMethod.BUNDLE_FUSION:
+        if options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
             mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)
-        elif options.reconstruction_method == MeshReconstructionMethod.TSDF_FUSION:
+        elif options.reconstruction_method == MeshReconstructionMethod.TSDFFusion:
             mesh = tsdf_fusion(dataset, options, num_frames, frame_set=frame_set)
         else:
             raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")

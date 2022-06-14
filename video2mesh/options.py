@@ -214,14 +214,14 @@ class MeshFilteringOptions(Options):
 
 # noinspection PyArgumentList
 class MeshReconstructionMethod(enum.Enum):
-    TSDF_FUSION = enum.auto()
-    BUNDLE_FUSION = enum.auto()
+    TSDFFusion = enum.auto()
+    BundleFusion = enum.auto()
 
     @classmethod
     def get_choices(cls):
         return {
-            'tsdf_fusion': cls.TSDF_FUSION,
-            'bundle_fusion': cls.BUNDLE_FUSION
+            'tsdf_fusion': cls.TSDFFusion,
+            'bundle_fusion': cls.BundleFusion
         }
 
     @classmethod
@@ -235,9 +235,9 @@ class MeshReconstructionMethod(enum.Enum):
 
 
 class StaticMeshOptions(Options):
-    supported_reconstruction_methods = [MeshReconstructionMethod.TSDF_FUSION, MeshReconstructionMethod.BUNDLE_FUSION]
+    supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion]
 
-    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDF_FUSION, depth_mask_dilation_iterations=32,
+    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
                  sdf_volume_size=3.0, sdf_voxel_size=0.02, sdf_num_voxels: Optional[int] = None):
         """
         :param reconstruction_method: The method to use for reconstructing the static mesh.
