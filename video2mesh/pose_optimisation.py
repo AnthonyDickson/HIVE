@@ -668,7 +668,7 @@ class OptimisationParameters(torch.nn.Module):
         """
         super().__init__()
 
-        def to_param(a):
+        def to_param(a: torch.Tensor):
             a_copy = a.clone().to(dtype)
             return torch.nn.Parameter(a_copy, requires_grad=True)
 
@@ -823,12 +823,40 @@ class ResidualType(enum.Enum):
     Image2D = enum.auto()
 
 
+# noinspection PyArgumentList
+class OptimisationStep(enum.Enum):
+    """Represents steps in the pose optimisation pipeline."""
+
+    """Local, pair-wise, frame alignment using residuals calculated over 3D correspondences."""
+    PairWise3D = enum.auto()
+
+    """Global (all frames) frame alignment using residuals calculated over 3D correspondences."""
+    Global3D = enum.auto()
+    # If using the frame sampling method `HIERARCHICAL`, running this step after `PairWise` will introduce
+    # new constraints from non-adjacent frames. These new constraints should help improve the robustness of the
+    # estimated poses.
+
+    # The below steps are same as their 3D counterparts except a different residual type is used for calculating the
+    # loss - the `Image2D` residuals. This projects the points from frame A into the 3D world coordinate system,
+    # and then onto the image plane of frame B and measures the pixel distance between correspondences.
+    # This step takes much longer than the `Global` and `PairWise` steps that use the `World3D` residuals, but also
+    # produces slightly better alignments.
+
+    """Local, pair-wise, frame alignment using residuals calculated over 2D correspondences."""
+    PairWise2D = enum.auto()
+
+    """Global (all frames) frame alignment using residuals calculated over 2D correspondences."""
+    Global2D = enum.auto()
+
+
 class OptimisationOptions:
     """Configuration for the `PoseOptimiser` class."""
 
-    def __init__(self, num_epochs=2000, learning_rate=1e-2, l2_regularisation=0.5,
-                 min_loss_delta=1e-4, lr_scheduler_patience=50, early_stopping_patience=75,
-                 alignment_type=AlignmentType.Rigid, position_only=False, fine_tune=False):
+    default_pipeline = (OptimisationStep.PairWise3D, OptimisationStep.Global3D)
+
+    def __init__(self, num_epochs=4000, learning_rate=1e-2, l2_regularisation=0.5, min_loss_delta=1e-4,
+                 lr_scheduler_patience=50, early_stopping_patience=75, alignment_type=AlignmentType.Rigid,
+                 position_only=False, steps=default_pipeline):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
@@ -844,8 +872,7 @@ class OptimisationOptions:
         :param alignment_type: The method for aligning the frames and whether to add additional parameters for
             pose optimisation.
         :param position_only: Whether to optimise the position (translation vector) of the pose only.
-        :param fine_tune: Whether to apply a fine-tuning step at the end (another round of optimisation, but with
-            Image2D residuals which tend to be a slower to optimise but give slightly more accurate results.
+        :param steps: Use to configure the optimisation pipeline (which steps/operations to perform and in what order).
         """
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
@@ -855,7 +882,7 @@ class OptimisationOptions:
         self.early_stopping_patience = early_stopping_patience
         self.alignment_type = alignment_type
         self.position_only = position_only
-        self.fine_tune = fine_tune
+        self.steps = steps
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
@@ -864,21 +891,17 @@ class OptimisationOptions:
                f"min_loss_delta={self.min_loss_delta}, " \
                f"lr_scheduler_patience={self.lr_scheduler_patience}, " \
                f"early_stopping_patience={self.early_stopping_patience}, " \
-               f"fine_time={self.fine_tune}, " \
-               f"alignment_type={self.alignment_type})"
+               f"alignment_type={self.alignment_type}, " \
+               f"position_only={self.position_only}, " \
+               f"steps={self.steps})"
 
     def copy(self) -> 'OptimisationOptions':
         """Make a copy of the optimisation options."""
-        return OptimisationOptions(
-            num_epochs=self.num_epochs,
-            learning_rate=self.learning_rate,
-            l2_regularisation=self.l2_regularisation,
-            min_loss_delta=self.min_loss_delta,
-            lr_scheduler_patience=self.lr_scheduler_patience,
-            early_stopping_patience=self.early_stopping_patience,
-            fine_tune=self.fine_tune,
-            alignment_type=self.alignment_type
-        )
+        return OptimisationOptions(num_epochs=self.num_epochs, learning_rate=self.learning_rate,
+                                   l2_regularisation=self.l2_regularisation, min_loss_delta=self.min_loss_delta,
+                                   lr_scheduler_patience=self.lr_scheduler_patience,
+                                   early_stopping_patience=self.early_stopping_patience,
+                                   alignment_type=self.alignment_type)
 
 
 class PoseOptimiser:
@@ -1043,66 +1066,59 @@ class PoseOptimiser:
             optimisation_parameters = optimisation_parameters.sample_at(list(range(num_frames)))
 
         if torch.cuda.is_available():
-            # Why is this not in-place like optimisation_parameters.cuda()?
+            # TODO: Why is this not in-place like optimisation_parameters.cuda()?
             fixed_parameters = fixed_parameters.cuda()
             optimisation_parameters.cuda()
 
         device = fixed_parameters.device
 
-        # First round, align frame pairs independently to get locally optimal alignments.
-        pairwise_parameters = self._optimise_pairwise(fixed_parameters=fixed_parameters,
-                                                      optimisation_parameters=optimisation_parameters,
-                                                      optimisation_options=optimisation_options,
-                                                      num_frames=num_frames)
-        pairwise_parameters = pairwise_parameters.to(device)
+        for i, step in enumerate(self.optimisation_options.steps):
+            log(f"Step {i + 1}/{len(self.optimisation_options.steps)}: {step.name} Alignment...")
 
-        if self.debug:
-            self.visualise_solution(pairwise_parameters, 'pair_wise')
+            if step == OptimisationStep.PairWise2D or step == OptimisationStep.PairWise3D:
+                residual_type = ResidualType.Image2D if step == OptimisationStep.PairWise2D else ResidualType.World3D
 
-        # Second round of alignment to get a more globally optimal alignment.
-        # If using the frame sampling method `HIERARCHICAL`, this will introduce new constraints from non-adjacent
-        # frames. These new constraints should help improve the robustness of the estimated poses.
-        log("Aligning all frame pairs...")
-        global_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
-                                                    optimisation_parameters=pairwise_parameters,
-                                                    optimisation_options=optimisation_options)
-        global_parameters = global_parameters.to(device)
+                optimisation_parameters = self._optimise_pairwise(fixed_parameters=fixed_parameters,
+                                                                  optimisation_parameters=optimisation_parameters,
+                                                                  optimisation_options=optimisation_options,
+                                                                  residual_type=residual_type,
+                                                                  num_frames=num_frames)
+            elif step == OptimisationStep.Global2D or step == OptimisationStep.Global3D:
+                residual_type = ResidualType.Image2D if step == OptimisationStep.Global2D else ResidualType.World3D
 
-        if self.debug:
-            self.visualise_solution(global_parameters, 'global')
-
-        if optimisation_options.fine_tune:
-            # The final and optional round of optimisation uses a different residual type for calculating the loss -
-            # the `Image2D` residuals. This projects the points from frame A into the 3D world coordinate system,
-            # and then onto the image plane of frame B and measures the pixel distance between correspondences.
-            # This final step takes much longer than the previous two steps that use the `World3D` residuals, but also
-            # produces slightly better alignments.
-            log("Fine tuning...")
-            lr = optimisation_options.learning_rate
-            # optimisation_options.learning_rate = 1e-3
-            global_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
-                                                        optimisation_parameters=global_parameters,
-                                                        optimisation_options=optimisation_options,
-                                                        residual_type=ResidualType.Image2D)
-            optimisation_options.learning_rate = lr
+                optimisation_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
+                                                                  optimisation_parameters=optimisation_parameters,
+                                                                  optimisation_options=optimisation_options,
+                                                                  residual_type=residual_type)
+            else:
+                raise RuntimeError(f"Unsupported optimisation step: {step}.")
 
             if self.debug:
-                self.visualise_solution(global_parameters, 'fine_tune')
+                step_name = f"{i}_{step.name}"
+                self.visualise_solution(optimisation_parameters, step_name)
 
-        return global_parameters.cpu()
+            optimisation_parameters = optimisation_parameters.to(device)
+
+        return optimisation_parameters.cpu()
 
     def _optimise_pairwise(self, fixed_parameters: FeatureSet,
                            optimisation_parameters: OptimisationParameters,
                            optimisation_options=OptimisationOptions(),
+                           residual_type=ResidualType.World3D,
                            num_frames=-1) -> OptimisationParameters:
         """
-        Optimise poses over each unique consecutive frame pair in isolation and merge the resulting pose data.
+        Optimise poses over each unique consecutive frame pair in isolation and merge the resulting pose data
+         to get locally optimal alignments.
         Note: Rigid alignment is used regardless of what is specified in `optimisation_options`.
 
         :param fixed_parameters: Object containing the paired sets of correspondence data and the
             camera intrinsics matrix K.
         :param optimisation_parameters: The pose and depth scaling parameters to optimise.
         :param optimisation_options: The options for the optimisation algorithm.
+        :param residual_type: The type of residuals to use. Either: `World3D` which projects both frames of a frame pair
+            into the world coordinate system and measures the geometric distance between correspondences in 3D space;
+            or `Image2D` which projects the points of one frame onto the other and measures the pixel distance between
+            the correspondences.
         :param num_frames: (optional) The frame index to stop at.
             If set to -1, this value is set to the length of the dataset.
         :return: the optimised parameters.
@@ -1110,20 +1126,17 @@ class PoseOptimiser:
         if num_frames == -1:
             num_frames = self.dataset.num_frames
 
-        device = optimisation_parameters.device
         options = optimisation_options.copy()
         # First align pose data alone and not scale+shift data, so force `Rigid` alignment.
+        # This avoids the problem of how to combine scale+shift for frames shared between frame pairs.
         options.alignment_type = AlignmentType.Rigid
-
-        log("Pairwise frame alignment...")
 
         def optimise_frame_pairs(frame_sampling_mode: FrameSamplingMode):
             frame_pairs = self._sample_frame_pairs(frame_sampling_mode, num_frames)
             feature_set = fixed_parameters.subset_from(frame_pairs)
-            # Clone parameters to avoid side-effects in subsequent calls.
-            optimised_parameters = self._optimisation_loop(feature_set, optimisation_parameters.clone().to(device),
-                                                           options)
-            trajectory = optimised_parameters.get_trajectory()
+            pair_wise_parameters = self._optimisation_loop(feature_set, optimisation_parameters, options,
+                                                           residual_type=residual_type)
+            trajectory = pair_wise_parameters.get_trajectory()
 
             for frame_pair in frame_pairs:
                 key = tuple(frame_pair)
@@ -1177,6 +1190,9 @@ class PoseOptimiser:
         :return: the optimised parameters object.
         """
         options = optimisation_options
+
+        # Clone parameters to avoid side effects from this method.
+        optimisation_parameters = optimisation_parameters.clone().to(optimisation_parameters.device)
 
         optimiser = torch.optim.Adam(optimisation_parameters.parameters(), lr=options.learning_rate)
         lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, patience=options.lr_scheduler_patience,
@@ -1268,7 +1284,6 @@ class PoseOptimiser:
 
             return p - q
         elif residual_type == ResidualType.Image2D:
-            # TODO: Should the scale + shift params be applied to the world to image projection?
             q_ = self._project_to_image_coords(p, fixed_parameters.frame_j, fixed_parameters.camera_matrix,
                                                optimisation_parameters)
 
@@ -1469,12 +1484,7 @@ def main():
             min_features=40,
             max_features=2048
         ),
-        optimisation_options=OptimisationOptions(
-            num_epochs=20000,
-            learning_rate=1e-2,
-            lr_scheduler_patience=50,
-            fine_tune=args.fine_tune
-        )
+        optimisation_options=OptimisationOptions(num_epochs=20000, learning_rate=1e-2, lr_scheduler_patience=50)
     )
     camera_trajectory, _, _ = optimiser.run(num_frames)
 

@@ -20,7 +20,7 @@ from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, invert_trajectory
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions
-from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
+from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
 from video2mesh.utils import log
 
 
@@ -48,17 +48,25 @@ def setup(output_path: str, overwrite_ok: bool):
     os.makedirs(output_path, exist_ok=overwrite_ok)
 
 
-def align_for_ate(gt_trajectory, pred_trajectory) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def calculate_ate(gt_trajectory, pred_trajectory) -> Tuple[np.ndarray, np.ndarray]:
     """
     Align two trajectories using the method of Horn (closed-form).
     Adapted from https://svncvpr.in.tum.de/cvpr-ros-pkg/trunk/rgbd_benchmark/rgbd_benchmark_tools/src/rgbd_benchmark_tools/evaluate_ate.py
 
-    :param gt_trajectory: first trajectory (3xn)
-    :param pred_trajectory: second trajectory (3xn)
+    :param gt_trajectory: first trajectory (Nx3)
+    :param pred_trajectory: second trajectory (Nx3)
 
-    :return rot -- rotation matrix (3x3), translation -- translation vector (3x1),
-        trans_error -- translational error per point (1xn)
+    :return translational error per point (Nx1), aligned pred_trajectory (Nx3)
     """
+    assert len(pred_trajectory.shape) == 2, \
+        "trajectories must be a m x n array"
+    assert pred_trajectory.shape[1] == 3, "trajectories must be a 3xN matrix."
+    assert pred_trajectory.shape == gt_trajectory.shape, \
+        "gt_trajectory and pred_trajectory must have the same shape"
+
+    gt_trajectory = gt_trajectory.T
+    pred_trajectory = pred_trajectory.T
+
     model_zero_centered = pred_trajectory - pred_trajectory.mean(axis=1).reshape((-1, 1))
     data_zero_centered = gt_trajectory - gt_trajectory.mean(axis=1).reshape((-1, 1))
 
@@ -83,16 +91,7 @@ def align_for_ate(gt_trajectory, pred_trajectory) -> Tuple[np.ndarray, np.ndarra
 
     translational_error = np.sqrt(np.sum(np.square(alignment_error), axis=0))
 
-    return rotation, translation, translational_error
-
-
-def calculate_ate(gt_trajectory, pred_trajectory) -> Tuple[np.ndarray, np.ndarray]:
-    # 3xN matrix
-    rotation, translation, translational_error = align_for_ate(gt_trajectory[:, 4:].T, pred_trajectory[:, 4:].T)
-
-    aligned_trajectory = (np.matmul(rotation, pred_trajectory[:, 4:].T) + translation).T
-
-    return translational_error, aligned_trajectory
+    return translational_error.T, pred_trajectory_aligned.T
 
 
 def visualise_ate(gt_trajectory, pred_trajectory, output_path):
@@ -139,42 +138,6 @@ def calculate_rpe(gt_trajectory, pred_trajectory):
         rotational_error.append(angle)
 
     return np.asarray(rotational_error), np.asarray(translational_error)
-
-
-def similarity_transform(from_points, to_points):
-    # https://gist.github.com/dboyliao/f7f862172ed811032ba7cc368701b1e8
-    assert len(from_points.shape) == 2, \
-        "from_points must be a m x n array"
-    assert from_points.shape == to_points.shape, \
-        "from_points and to_points must have the same shape"
-
-    N, m = from_points.shape
-
-    mean_from = from_points.mean(axis=0)
-    mean_to = to_points.mean(axis=0)
-
-    delta_from = from_points - mean_from  # N x m
-    delta_to = to_points - mean_to  # N x m
-
-    sigma_from = (delta_from * delta_from).sum(axis=1).mean()
-    sigma_to = (delta_to * delta_to).sum(axis=1).mean()
-
-    cov_matrix = delta_to.T.dot(delta_from) / N
-
-    U, d, V_t = np.linalg.svd(cov_matrix, full_matrices=True)
-    cov_rank = np.linalg.matrix_rank(cov_matrix)
-    S = np.eye(m)
-
-    if cov_rank >= m - 1 and np.linalg.det(cov_matrix) < 0:
-        S[m - 1, m - 1] = -1
-    elif cov_rank < m - 1:
-        raise ValueError("colinearility detected in covariance matrix:\n{}".format(cov_matrix))
-
-    R = U.dot(S).dot(V_t)
-    c = (d * S.diagonal()).sum() / sigma_from
-    t = mean_to - c * R.dot(mean_from)
-
-    return c * R, t
 
 
 def create_point_cloud(dataset: VTMDataset, index: int):
@@ -390,14 +353,15 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         if pred_label not in results_dict[key][dataset_name]:
             results_dict[key][dataset_name][pred_label] = dict()
 
-    def run_trajectory_comparisons(dataset, pred_trajectory, gt_trajectory, pred_label: str, gt_label: str,
+    def run_trajectory_comparisons(dataset, pred_trajectory, gt_trajectory,
+                                   pred_label: str, gt_label: str,
                                    results_dict: dict, output_folder: str):
         experiment_path = pjoin(output_folder, dataset_name, pred_label)
         os.makedirs(experiment_path, exist_ok=True)
 
         np.savetxt(pjoin(experiment_path, 'trajectory.txt'), pred_trajectory)
 
-        translational_error, aligned_trajectory = calculate_ate(gt_trajectory, pred_trajectory)
+        ate, aligned_trajectory = calculate_ate(gt_trajectory[:, 4:], pred_trajectory[:, 4:])
 
         visualise_ate(gt_trajectory[:, 4:], aligned_trajectory,
                       output_path=pjoin(experiment_path, 'ate.png'))
@@ -405,8 +369,11 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                       output_path=pjoin(experiment_path, 'trajectory_comparison.png'))
 
         # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_path, 'ate.txt'), translational_error)
-        log(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}: ATE: {np.mean(translational_error):.2f}m")
+        np.savetxt(pjoin(experiment_path, 'ate.txt'), ate)
+
+        trajectory_error = gt_trajectory[:, 4:] - pred_trajectory[:, 4:]
+        # noinspection PyTypeChecker
+        np.savetxt(pjoin(experiment_path, 'trajectory_error.txt'), trajectory_error)
 
         with temp_traj(dataset, pred_trajectory):
             mesh = tsdf_fusion(dataset, static_mesh_options)
@@ -418,12 +385,32 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_t.txt"), error_t)
 
+        log(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}:")
+        log(f"\tATE: {np.mean(ate):.2f}m")
+        log(f"\tMATE: {np.mean(np.abs(trajectory_error)):.2f}m")
+        log(f"\tRPE (rot): {np.mean(np.rad2deg(error_r)):.2f}\N{DEGREE SIGN}")
+        log(f"\tRPE (tra): {np.mean(error_t):.2f}m")
+
         add_key('rpe', dataset_name, pred_label, results_dict)
         add_key('ate', dataset_name, pred_label, results_dict)
+        add_key('mate', dataset_name, pred_label, results_dict)
 
-        results_dict['ate'][dataset_name][pred_label] = np.mean(translational_error)
-        results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(error_r)
+        results_dict['ate'][dataset_name][pred_label] = np.mean(ate)
+        results_dict['mate'][dataset_name][pred_label] = np.mean(np.abs(trajectory_error))
+        results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(np.rad2deg(error_r))
         results_dict['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
+
+    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str, gt_label: str):
+        cam_traj = PoseOptimiser(
+            dataset,
+            feature_extraction_options=FeatureExtractionOptions(min_features=40),
+            optimisation_options=options,
+            debug=False
+        ).run()[0]
+
+        run_trajectory_comparisons(dataset, cam_traj, dataset.camera_trajectory,
+                                   pred_label=pred_label, gt_label=gt_label,
+                                   results_dict=ablation_results, output_folder=pjoin(output_path, 'ablation'))
 
     for dataset_name in datasets:
         dataset_gt = TUMAdaptor(
@@ -482,56 +469,54 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     # Our RGB-D Alignment
     ablation_results = dict()
 
-    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str, gt_label: str):
-        cam_traj = PoseOptimiser(
-            dataset,
-            feature_extraction_options=FeatureExtractionOptions(min_features=40),
-            optimisation_options=options,
-            debug=False
-        ).run()[0]
-
-        run_trajectory_comparisons(dataset, cam_traj, dataset.camera_trajectory, pred_label, gt_label=gt_label,
-                                   results_dict=ablation_results, output_folder=pjoin(output_path, 'ablation'))
-
     for dataset_name in datasets:
-        rgbd_alignment_experiment_path = pjoin(output_path, 'ablation', dataset_name)
-        os.makedirs(rgbd_alignment_experiment_path, exist_ok=True)
-
-        # Compare optimising just the camera position vs the entire pose (position + orientation).
         dataset_gt = TUMAdaptor(
-            base_path=pjoin(data_path, datasets[0]),
-            output_path=pjoin(output_path, f"{datasets[0]}_gt"),
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_gt"),
             num_frames=num_frames,
             frame_step=frame_step
         ).convert_from_ground_truth()
 
         dataset_estimated = TUMAdaptor(
-            base_path=pjoin(data_path, datasets[0]),
-            output_path=pjoin(output_path, f"{datasets[0]}_est"),
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
             num_frames=num_frames,
             frame_step=frame_step
         ).convert_from_rgb()
 
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=True),
-                                  pred_label='pos_only', gt_label='gt')
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(position_only=False),
-                                  pred_label='pos_rot', gt_label='gt')
+        default_pipeline = (OptimisationStep.PairWise3D, OptimisationStep.Global3D)
+        global_only_pipeline = (OptimisationStep.Global3D,)
+        loop_pipeline = default_pipeline + default_pipeline
+        pipeline_2d = (OptimisationStep.PairWise2D, OptimisationStep.Global2D)
+        pipeline_fine_tuning = (OptimisationStep.PairWise3D, OptimisationStep.PairWise2D,
+                                OptimisationStep.Global3D, OptimisationStep.Global2D)
+        pipeline_fine_tuning_3d_2d = (OptimisationStep.PairWise3D, OptimisationStep.Global3D,
+                                      OptimisationStep.PairWise2D, OptimisationStep.Global2D)
 
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=True),
-                                  pred_label='pos_only_est', gt_label='colmap')
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(position_only=False),
-                                  pred_label='pos_rot_est', gt_label='colmap')
+        for dataset, gt_label, pred_label_suffix in \
+                zip((dataset_gt, dataset_estimated), ('gt', 'colmap'), ('', '_est')):
+            run_pose_optim_experiment(dataset, OptimisationOptions(),
+                                      pred_label=f"baseline{pred_label_suffix}", gt_label=gt_label)
 
-        # Compare with and without a final fine-tuning step that uses the image-to-image projection residuals.
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=True),
-                                  pred_label='fine_tune', gt_label='gt')
-        run_pose_optim_experiment(dataset_gt, OptimisationOptions(fine_tune=False),
-                                  pred_label='no_fine_tune', gt_label='gt')
+            run_pose_optim_experiment(dataset, OptimisationOptions(steps=global_only_pipeline),
+                                      pred_label=f"global_only{pred_label_suffix}", gt_label=gt_label)
 
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(fine_tune=True),
-                                  pred_label='fine_tune_est', gt_label='colmap')
-        run_pose_optim_experiment(dataset_estimated, OptimisationOptions(fine_tune=False),
-                                  pred_label='no_fine_tune_est', gt_label='colmap')
+            run_pose_optim_experiment(dataset, OptimisationOptions(steps=loop_pipeline),
+                                      pred_label=f"loop{pred_label_suffix}", gt_label=gt_label)
+
+            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_2d),
+                                      pred_label=f"2d_residuals{pred_label_suffix}", gt_label=gt_label)
+
+            # Compare with and without a final fine-tuning step that uses the image-to-image projection residuals.
+            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning),
+                                      pred_label=f"fine_tune{pred_label_suffix}", gt_label=gt_label)
+
+            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning_3d_2d),
+                                      pred_label=f"fine_tune_3d_to_2d{pred_label_suffix}", gt_label=gt_label)
+
+            # Compare optimising just the camera position vs the entire pose (position + orientation).
+            run_pose_optim_experiment(dataset, OptimisationOptions(position_only=True),
+                                      pred_label=f"pos_only{pred_label_suffix}", gt_label=gt_label)
 
     with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
         json.dump(ablation_results, f)
