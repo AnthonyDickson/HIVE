@@ -856,7 +856,7 @@ class OptimisationOptions:
 
     def __init__(self, num_epochs=4000, learning_rate=1e-2, l2_regularisation=0.5, min_loss_delta=1e-4,
                  lr_scheduler_patience=50, early_stopping_patience=75, alignment_type=AlignmentType.Rigid,
-                 position_only=False, steps=default_pipeline):
+                 position_only=False, steps=default_pipeline, pose_t_reg=0.5, pose_r_reg=1.0):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
@@ -873,6 +873,8 @@ class OptimisationOptions:
             pose optimisation.
         :param position_only: Whether to optimise the position (translation vector) of the pose only.
         :param steps: Use to configure the optimisation pipeline (which steps/operations to perform and in what order).
+        :param pose_t_reg: The regularisation weight for the distance between translation vectors or adjacent frames.
+        :param pose_r_reg: The regularisation weight for the distance between quaternions or adjacent frames.
         """
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
@@ -883,6 +885,8 @@ class OptimisationOptions:
         self.alignment_type = alignment_type
         self.position_only = position_only
         self.steps = steps
+        self.pose_t_reg = pose_t_reg
+        self.pose_r_reg = pose_r_reg
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
@@ -893,15 +897,23 @@ class OptimisationOptions:
                f"early_stopping_patience={self.early_stopping_patience}, " \
                f"alignment_type={self.alignment_type}, " \
                f"position_only={self.position_only}, " \
+               f"pose_t_reg={self.pose_t_reg}, " \
+               f"pose_r_reg={self.pose_r_reg}, " \
                f"steps={self.steps})"
 
     def copy(self) -> 'OptimisationOptions':
         """Make a copy of the optimisation options."""
-        return OptimisationOptions(num_epochs=self.num_epochs, learning_rate=self.learning_rate,
-                                   l2_regularisation=self.l2_regularisation, min_loss_delta=self.min_loss_delta,
+        return OptimisationOptions(num_epochs=self.num_epochs,
+                                   learning_rate=self.learning_rate,
+                                   l2_regularisation=self.l2_regularisation,
+                                   min_loss_delta=self.min_loss_delta,
                                    lr_scheduler_patience=self.lr_scheduler_patience,
                                    early_stopping_patience=self.early_stopping_patience,
-                                   alignment_type=self.alignment_type)
+                                   alignment_type=self.alignment_type,
+                                   position_only=self.position_only,
+                                   steps=self.steps,
+                                   pose_t_reg=self.pose_t_reg,
+                                   pose_r_reg=self.pose_r_reg)
 
 
 class PoseOptimiser:
@@ -950,9 +962,10 @@ class PoseOptimiser:
                                                    num_frames=num_frames)
         interpolated_trajectory = self._interpolate_poses_without_matches(fixed_parameters,
                                                                           optimised_parameters.get_trajectory())
+        smoothed_trajectory = self._smooth_trajectory(trajectory=interpolated_trajectory)
 
         # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
-        final_camera_trajectory = invert_trajectory(interpolated_trajectory)
+        final_camera_trajectory = invert_trajectory(smoothed_trajectory)
 
         scale = to_numpy(optimised_parameters.scale)
         shift = to_numpy(optimised_parameters.shift)
@@ -1246,6 +1259,19 @@ class PoseOptimiser:
     def _calculate_loss(self, residuals: torch.Tensor, optimisation_parameters: OptimisationParameters):
         loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
 
+        t = optimisation_parameters.translation_vectors
+
+        order_one_grad = t[:-1] - t[1:]
+        order_two_grad = order_one_grad[:-1] - order_one_grad[1:]
+        order_three_grad = order_two_grad[:-1] - order_two_grad[1:]
+        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_one_grad, dim=1))
+        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_two_grad, dim=1))
+        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_three_grad, dim=1))
+
+        r = optimisation_parameters.rotation_quaternions
+        rotational_distance = torch.mean(1 - torch.square(torch.einsum('ij,ij->i', r[:-1], r[1:])))
+        loss += self.optimisation_options.pose_r_reg * rotational_distance
+
         if self.optimisation_options.alignment_type != AlignmentType.Rigid:
             l2_reg = self.optimisation_options.l2_regularisation
             # noinspection PyTypeChecker
@@ -1418,6 +1444,27 @@ class PoseOptimiser:
             interpolated_poses[start:end + 1, :4] = slerp(times_to_interpolate).as_quat()
 
         return interpolated_poses
+
+    @staticmethod
+    def _smooth_trajectory(trajectory: np.ndarray, weight=0.9) -> np.ndarray:
+        """
+        Smooths the translation vectors of the given trajectory.
+        This is done by calculating the exponential moving averages (EMA) for the translation vectors.
+
+        :param trajectory: The Nx7 camera trajectory to smooth.
+        :param weight: The weight alpha for the EMA.
+        :return: The smoothed trajectory.
+        """
+        smoothed_positions = np.zeros_like(trajectory[:, 4:])
+
+        smoothed_positions[0] = trajectory[0, 4:]
+
+        for i in range(1, len(smoothed_positions)):
+            smoothed_positions[i] = weight * trajectory[i, 4:] + (1 - weight) * smoothed_positions[i - 1]
+
+        smoothed_trajectory = np.hstack((trajectory[:, :4], smoothed_positions))
+
+        return smoothed_trajectory
 
     def visualise_solution(self, solution: OptimisationParameters, label: str):
         # The inverse transform is needed so that the trajectories are comparable to the ground truth ones and
