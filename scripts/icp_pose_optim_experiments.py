@@ -19,32 +19,23 @@ from video2mesh.dataset_adaptors import TUMAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, invert_trajectory
-from video2mesh.io import VTMDataset
+from video2mesh.io import VTMDataset, COLMAPProcessor
 from video2mesh.options import StaticMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
 from video2mesh.utils import log
 
 
 def setup(output_path: str, overwrite_ok: bool):
-    if os.path.isdir(output_path):
+    if os.path.isdir(output_path) and not overwrite_ok:
         user_input = input(f"The output folder at {output_path} already exists, "
                            f"do you want to delete this folder before continuing? (y/n):")
         should_delete = user_input.lower() == 'y'
 
         if should_delete:
             shutil.rmtree(output_path)
-        elif not overwrite_ok:
+        else:  # elif not overwrite_ok:
             raise RuntimeError(f"The output folder at {output_path} already exists. "
                                "Either change the output path or delete the existing folder.")
-        else:
-            user_input = input(f"The output folder at {output_path} already exists.\n"
-                               f"Since `overwrite_ok` has been set to True, any existing results will be overwritten "
-                               f"but the created datasets will be left as-is.\n"
-                               f"This could lead to results from previous runs mixed up with the new results.\n"
-                               f"Are you sure you want to continue? (y/n):")
-
-            if user_input.lower() != 'y':
-                exit(0)
 
     os.makedirs(output_path, exist_ok=overwrite_ok)
 
@@ -376,10 +367,6 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, 'trajectory_error.txt'), trajectory_error)
 
-        with temp_traj(dataset, pred_trajectory):
-            mesh = tsdf_fusion(dataset, static_mesh_options)
-            mesh.export(pjoin(experiment_path, f"mesh.ply"))
-
         error_r, error_t = calculate_rpe(gt_trajectory, pred_trajectory)
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_r.txt"), error_r)
@@ -401,6 +388,10 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(np.rad2deg(error_r))
         results_dict['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
 
+        with temp_traj(dataset, pred_trajectory):
+            mesh = tsdf_fusion(dataset, static_mesh_options)
+            mesh.export(pjoin(experiment_path, f"mesh.ply"))
+
     def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str):
         cam_traj = PoseOptimiser(
             dataset,
@@ -413,6 +404,70 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                                    pred_label=pred_label, gt_label='gt',
                                    results_dict=ablation_results, output_folder=pjoin(output_path, 'ablation'))
 
+    # Ours vs NeRF based methods
+    # TODO: Run on same clips as the examples in the NeRF papers
+    # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
+
+    # Our RGB-D Alignment
+    ablation_results = dict()
+
+    prng = np.random.default_rng(random_seed)
+
+    base_traj = np.array([
+        np.linspace(0, 1, num_frames),
+        np.zeros(num_frames),
+        np.linspace(0, 1, num_frames),
+    ]).T
+
+    rand_trajectory = np.hstack((
+        Rotation.identity(num_frames).as_quat(),
+        base_traj + prng.normal(scale=0.1, size=(num_frames, 3))
+    ))
+
+    baseline_config = OptimisationOptions()
+    fine_tune_none_config = OptimisationOptions(fine_tune=False)
+    global_only_config = OptimisationOptions(steps=(OptimisationStep.Global3D,))
+    smoothing_medium_config = OptimisationOptions(trajectory_smoothing=0.5)
+    t_reg_high_config = OptimisationOptions(pose_t_reg=1.0)
+
+    for dataset_name in datasets:
+        dataset_gt = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_gt"),
+            num_frames=num_frames,
+            frame_step=frame_step,
+            overwrite_ok=True
+        ).convert_from_ground_truth()
+
+        dataset_rand = VTMDataset(dataset_gt.base_path)
+        dataset_rand.camera_trajectory = rand_trajectory.copy()
+
+        dataset_estimated = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
+            num_frames=num_frames,
+            frame_step=frame_step,
+            overwrite_ok=True
+        ).convert_from_rgb()
+
+        dataset_cm = VTMDataset(dataset_gt.base_path)
+        dataset_cm.camera_matrix, dataset_cm.camera_trajectory = COLMAPProcessor(
+            pjoin(dataset_estimated.path_to_rgb_frames),
+            workspace_path=pjoin(dataset_estimated.base_path, 'debug', 'colmap', 'workspace')
+        ).load_camera_params()
+
+        for dataset, pred_label_suffix in \
+                zip((dataset_gt, dataset_rand, dataset_cm, dataset_estimated), ('_gt', '_rand', '_cm', '_est')):
+            run_pose_optim_experiment(dataset, baseline_config, pred_label=f"baseline{pred_label_suffix}")
+            run_pose_optim_experiment(dataset, fine_tune_none_config, pred_label=f"fine_tune_none{pred_label_suffix}")
+            run_pose_optim_experiment(dataset, global_only_config, pred_label=f"global_only{pred_label_suffix}")
+            run_pose_optim_experiment(dataset, smoothing_medium_config,
+                                      pred_label=f"smoothing_medium{pred_label_suffix}")
+            run_pose_optim_experiment(dataset, t_reg_high_config, pred_label=f"t_reg_high{pred_label_suffix}")
+
+    with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
+        json.dump(ablation_results, f)
+
     for dataset_name in datasets:
         dataset_gt = TUMAdaptor(
             base_path=pjoin(data_path, dataset_name),
@@ -421,6 +476,20 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_ground_truth()
 
+        dataset_estimated = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
+            num_frames=num_frames,
+            frame_step=frame_step
+        ).convert_from_rgb()
+
+        dataset_cm = VTMDataset(dataset_gt.base_path)
+        dataset_cm.camera_matrix, dataset_cm.camera_trajectory = COLMAPProcessor(
+            pjoin(dataset_estimated.path_to_rgb_frames),
+            workspace_path=pjoin(dataset_estimated.base_path, 'debug', 'colmap', 'workspace')
+        ).load_camera_params()
+
+        # Trajectory comparisons on ground truth
         run_trajectory_comparisons(dataset_gt, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,
                                    pred_label='gt', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
@@ -429,22 +498,22 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
-        optimiser = PoseOptimiser(
-            dataset_gt,
-            feature_extraction_options=FeatureExtractionOptions(min_features=40),
-            debug=True
-        )
+        optimiser = PoseOptimiser(dataset_gt, debug=True)
         optimised_trajectory, _, _ = optimiser.run(num_frames=dataset_gt.num_frames)
         run_trajectory_comparisons(dataset_gt, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
-        dataset_estimated = TUMAdaptor(
-            base_path=pjoin(data_path, dataset_name),
-            output_path=pjoin(output_path, f"{dataset_name}_est"),
-            num_frames=num_frames,
-            frame_step=frame_step
-        ).convert_from_rgb()
+        # Trajectory comparisons on estimated pose
+        run_trajectory_comparisons(dataset_cm, dataset_cm.camera_trajectory, dataset_gt.camera_trajectory,
+                                   pred_label='gt_cm', gt_label='colmap',
+                                   results_dict=icp_results, output_folder=icp_results_path)
 
+        optimiser = PoseOptimiser(dataset_cm, debug=True)
+        optimised_trajectory, _, _ = optimiser.run(num_frames=dataset_cm.num_frames)
+        run_trajectory_comparisons(dataset_cm, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours_cm',
+                                   gt_label='colmap', results_dict=icp_results, output_folder=icp_results_path)
+
+        # Trajectory comparisons on estimated pose + depth
         run_trajectory_comparisons(dataset_estimated, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,
                                    pred_label='gt_est', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
@@ -462,72 +531,6 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
 
     with open(pjoin(output_path, 'icp', 'summary.json'), 'w') as f:
         json.dump(icp_results, f)
-
-    # Ours vs NeRF based methods
-    # TODO: Run on same clips as the examples in the NeRF papers
-    # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
-
-    # Our RGB-D Alignment
-    ablation_results = dict()
-
-    prng = np.random.default_rng(random_seed)
-
-    default_pipeline = (OptimisationStep.PairWise3D, OptimisationStep.Global3D)
-    global_only_pipeline = (OptimisationStep.Global3D,)
-    loop_pipeline = default_pipeline + default_pipeline
-    pipeline_2d = (OptimisationStep.PairWise2D, OptimisationStep.Global2D)
-    pipeline_fine_tuning = (OptimisationStep.PairWise3D, OptimisationStep.PairWise2D,
-                            OptimisationStep.Global3D, OptimisationStep.Global2D)
-    pipeline_fine_tuning_3d_2d = (OptimisationStep.PairWise3D, OptimisationStep.Global3D,
-                                  OptimisationStep.PairWise2D, OptimisationStep.Global2D)
-
-    for dataset_name in datasets:
-        dataset_gt = TUMAdaptor(
-            base_path=pjoin(data_path, dataset_name),
-            output_path=pjoin(output_path, f"{dataset_name}_gt"),
-            num_frames=num_frames,
-            frame_step=frame_step
-        ).convert_from_ground_truth()
-
-        dataset_rand = VTMDataset(dataset_gt.base_path)
-        dataset_rand.camera_trajectory = np.hstack((
-            Rotation.random(len(dataset_gt.camera_trajectory), prng).as_quat(),
-            prng.normal(size=(len(dataset_gt.camera_trajectory), 3))
-        ))
-
-        dataset_estimated = TUMAdaptor(
-            base_path=pjoin(data_path, dataset_name),
-            output_path=pjoin(output_path, f"{dataset_name}_est"),
-            num_frames=num_frames,
-            frame_step=frame_step
-        ).convert_from_rgb()
-
-        for dataset, pred_label_suffix in zip((dataset_gt, dataset_rand, dataset_estimated), ('_gt', '_rand', '_est')):
-            run_pose_optim_experiment(dataset, OptimisationOptions(),
-                                      pred_label=f"baseline{pred_label_suffix}")
-
-            run_pose_optim_experiment(dataset, OptimisationOptions(steps=global_only_pipeline),
-                                      pred_label=f"global_only{pred_label_suffix}")
-
-            run_pose_optim_experiment(dataset, OptimisationOptions(steps=loop_pipeline),
-                                      pred_label=f"loop{pred_label_suffix}")
-
-            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_2d),
-                                      pred_label=f"2d_residuals{pred_label_suffix}")
-
-            # Compare with and without a final fine-tuning step that uses the image-to-image projection residuals.
-            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning),
-                                      pred_label=f"fine_tune{pred_label_suffix}")
-
-            run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning_3d_2d),
-                                      pred_label=f"fine_tune_3d_to_2d{pred_label_suffix}")
-
-            # Compare optimising just the camera position vs the entire pose (position + orientation).
-            run_pose_optim_experiment(dataset, OptimisationOptions(position_only=True),
-                                      pred_label=f"pos_only{pred_label_suffix}")
-
-    with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
-        json.dump(ablation_results, f)
 
     # TSDFFusion w/ Our RGB-D Alignment vs BundleFusion
     recon_folder = pjoin(output_path, 'reconstruction')

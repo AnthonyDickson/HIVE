@@ -219,7 +219,7 @@ class COLMAPProcessor:
     Estimates camera trajectory and intrinsic parameters via COLMAP.
     """
 
-    def __init__(self, image_path: File, workspace_path: File, colmap_options: COLMAPOptions,
+    def __init__(self, image_path: File, workspace_path: File, colmap_options=COLMAPOptions(),
                  colmap_mask_folder='masks'):
         self.image_path = image_path
         self.workspace_path = workspace_path

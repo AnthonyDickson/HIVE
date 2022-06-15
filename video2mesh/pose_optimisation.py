@@ -856,7 +856,8 @@ class OptimisationOptions:
 
     def __init__(self, num_epochs=4000, learning_rate=1e-2, l2_regularisation=0.5, min_loss_delta=1e-4,
                  lr_scheduler_patience=50, early_stopping_patience=75, alignment_type=AlignmentType.Rigid,
-                 position_only=False, steps=default_pipeline, pose_t_reg=0.5, pose_r_reg=1.0):
+                 steps=default_pipeline, position_only=False, fine_tune=True, pose_t_reg=0.5, pose_r_reg=1.0,
+                 trajectory_smoothing: Optional[float] = None):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
@@ -873,8 +874,12 @@ class OptimisationOptions:
             pose optimisation.
         :param position_only: Whether to optimise the position (translation vector) of the pose only.
         :param steps: Use to configure the optimisation pipeline (which steps/operations to perform and in what order).
+        :param fine_tune: Whether to add a step at the end that optimises the poses without the smoothing loss terms.
+            This can remove some blurriness from a 3D reconstruction using the optimised poses.
         :param pose_t_reg: The regularisation weight for the distance between translation vectors or adjacent frames.
         :param pose_r_reg: The regularisation weight for the distance between quaternions or adjacent frames.
+        :param trajectory_smoothing: How much smoothing [0, 1] to apply to the trajectory (positions) after the
+            final optimisation step.
         """
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
@@ -883,10 +888,12 @@ class OptimisationOptions:
         self.lr_scheduler_patience = lr_scheduler_patience
         self.early_stopping_patience = early_stopping_patience
         self.alignment_type = alignment_type
-        self.position_only = position_only
         self.steps = steps
+        self.position_only = position_only
         self.pose_t_reg = pose_t_reg
         self.pose_r_reg = pose_r_reg
+        self.fine_tune = fine_tune
+        self.trajectory_smoothing = trajectory_smoothing
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
@@ -896,24 +903,23 @@ class OptimisationOptions:
                f"lr_scheduler_patience={self.lr_scheduler_patience}, " \
                f"early_stopping_patience={self.early_stopping_patience}, " \
                f"alignment_type={self.alignment_type}, " \
+               f"steps={self.steps}, " \
                f"position_only={self.position_only}, " \
                f"pose_t_reg={self.pose_t_reg}, " \
                f"pose_r_reg={self.pose_r_reg}, " \
-               f"steps={self.steps})"
+               f"fine_tune={self.fine_tune}, " \
+               f"trajectory_smoothing={self.trajectory_smoothing})"
 
     def copy(self) -> 'OptimisationOptions':
         """Make a copy of the optimisation options."""
-        return OptimisationOptions(num_epochs=self.num_epochs,
-                                   learning_rate=self.learning_rate,
-                                   l2_regularisation=self.l2_regularisation,
-                                   min_loss_delta=self.min_loss_delta,
+        return OptimisationOptions(num_epochs=self.num_epochs, learning_rate=self.learning_rate,
+                                   l2_regularisation=self.l2_regularisation, min_loss_delta=self.min_loss_delta,
                                    lr_scheduler_patience=self.lr_scheduler_patience,
                                    early_stopping_patience=self.early_stopping_patience,
-                                   alignment_type=self.alignment_type,
-                                   position_only=self.position_only,
-                                   steps=self.steps,
-                                   pose_t_reg=self.pose_t_reg,
-                                   pose_r_reg=self.pose_r_reg)
+                                   alignment_type=self.alignment_type, steps=self.steps,
+                                   position_only=self.position_only, fine_tune=self.fine_tune,
+                                   pose_t_reg=self.pose_t_reg, pose_r_reg=self.pose_r_reg,
+                                   trajectory_smoothing=self.trajectory_smoothing)
 
 
 class PoseOptimiser:
@@ -962,10 +968,12 @@ class PoseOptimiser:
                                                    num_frames=num_frames)
         interpolated_trajectory = self._interpolate_poses_without_matches(fixed_parameters,
                                                                           optimised_parameters.get_trajectory())
-        smoothed_trajectory = self._smooth_trajectory(trajectory=interpolated_trajectory)
+        if self.optimisation_options.trajectory_smoothing:
+            interpolated_trajectory = self._smooth_trajectory(trajectory=interpolated_trajectory,
+                                                              weight=self.optimisation_options.trajectory_smoothing)
 
         # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
-        final_camera_trajectory = invert_trajectory(smoothed_trajectory)
+        final_camera_trajectory = invert_trajectory(interpolated_trajectory)
 
         scale = to_numpy(optimised_parameters.scale)
         shift = to_numpy(optimised_parameters.shift)
@@ -1084,9 +1092,13 @@ class PoseOptimiser:
             optimisation_parameters.cuda()
 
         device = fixed_parameters.device
+        num_steps = len(self.optimisation_options.steps)
+
+        if self.optimisation_options.fine_tune:
+            num_steps += 1
 
         for i, step in enumerate(self.optimisation_options.steps):
-            log(f"Step {i + 1}/{len(self.optimisation_options.steps)}: {step.name} Alignment...")
+            log(f"Step {i + 1}/{num_steps}: {step.name} Alignment...")
 
             if step == OptimisationStep.PairWise2D or step == OptimisationStep.PairWise3D:
                 residual_type = ResidualType.Image2D if step == OptimisationStep.PairWise2D else ResidualType.World3D
@@ -1111,6 +1123,19 @@ class PoseOptimiser:
                 self.visualise_solution(optimisation_parameters, step_name)
 
             optimisation_parameters = optimisation_parameters.to(device)
+
+        if self.optimisation_options.fine_tune:
+            log(f"Step {num_steps}/{num_steps}: Fine tuning...")
+
+            optimisation_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
+                                                              optimisation_parameters=optimisation_parameters,
+                                                              optimisation_options=optimisation_options,
+                                                              residual_type=ResidualType.World3D,
+                                                              smooth_trajectory=False)
+
+            if self.debug:
+                step_name = f"{num_steps}_FineTune"
+                self.visualise_solution(optimisation_parameters, step_name)
 
         return optimisation_parameters.cpu()
 
@@ -1188,7 +1213,8 @@ class PoseOptimiser:
     def _optimisation_loop(self, fixed_parameters: FeatureSet,
                            optimisation_parameters: OptimisationParameters,
                            optimisation_options=OptimisationOptions(),
-                           residual_type=ResidualType.World3D) -> OptimisationParameters:
+                           residual_type=ResidualType.World3D,
+                           smooth_trajectory=True) -> OptimisationParameters:
         """
         Run the full optimisation loop.
 
@@ -1200,6 +1226,9 @@ class PoseOptimiser:
             into the world coordinate system and measures the geometric distance between correspondences in 3D space;
             or `Image2D` which projects the points of one frame onto the other and measures the pixel distance between
             the correspondences.
+        :param smooth_trajectory: Whether to add loss terms to smooth the trajectory and also encourage smaller
+            changes in pose. While this helps discourage 'clustering' and noisy trajectories, it may lead to blurrier
+            reconstructions.
         :return: the optimised parameters object.
         """
         options = optimisation_options
@@ -1226,7 +1255,7 @@ class PoseOptimiser:
             optimiser.zero_grad()
             residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type,
                                                   optimisation_options.alignment_type)
-            loss = self._calculate_loss(residuals, optimisation_parameters)
+            loss = self._calculate_loss(residuals, optimisation_parameters, smooth_trajectory)
             loss.backward()
 
             # Pin first frames at origin or at least whatever they were initialised to.
@@ -1256,21 +1285,23 @@ class PoseOptimiser:
 
         return optimisation_parameters
 
-    def _calculate_loss(self, residuals: torch.Tensor, optimisation_parameters: OptimisationParameters):
+    def _calculate_loss(self, residuals: torch.Tensor, optimisation_parameters: OptimisationParameters,
+                        smooth_trajectory: bool):
         loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
 
-        t = optimisation_parameters.translation_vectors
+        if smooth_trajectory:
+            t = optimisation_parameters.translation_vectors
 
-        order_one_grad = t[:-1] - t[1:]
-        order_two_grad = order_one_grad[:-1] - order_one_grad[1:]
-        order_three_grad = order_two_grad[:-1] - order_two_grad[1:]
-        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_one_grad, dim=1))
-        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_two_grad, dim=1))
-        loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_three_grad, dim=1))
+            order_one_grad = t[:-2] - 2 * t[1:-1] + t[2:]
+            order_two_grad = order_one_grad[:-1] - order_one_grad[1:]
+            order_three_grad = order_two_grad[:-1] - order_two_grad[1:]
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_one_grad, dim=1))
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_two_grad, dim=1))
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_three_grad, dim=1))
 
-        r = optimisation_parameters.rotation_quaternions
-        rotational_distance = torch.mean(1 - torch.square(torch.einsum('ij,ij->i', r[:-1], r[1:])))
-        loss += self.optimisation_options.pose_r_reg * rotational_distance
+            r = optimisation_parameters.rotation_quaternions
+            rotational_distance = torch.mean(1 - torch.square(torch.einsum('ij,ij->i', r[:-1], r[1:])))
+            loss += self.optimisation_options.pose_r_reg * rotational_distance
 
         if self.optimisation_options.alignment_type != AlignmentType.Rigid:
             l2_reg = self.optimisation_options.l2_regularisation

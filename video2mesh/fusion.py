@@ -280,7 +280,7 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
         for line in p.stdout:
             f.write(line)
 
-            if line.startswith("processing frame ") and int(line.split()[-1][:-3]) <= num_frames:
+            if line.startswith("processing frame ") and progress_bar.n + 1 < num_frames:
                 progress_bar.update()
 
     if p.returncode != 0:
