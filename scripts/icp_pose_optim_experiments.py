@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 import pandas as pd
+from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from video2mesh.dataset_adaptors import TUMAdaptor
@@ -400,16 +401,16 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(np.rad2deg(error_r))
         results_dict['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
 
-    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str, gt_label: str):
+    def run_pose_optim_experiment(dataset: VTMDataset, options: OptimisationOptions, pred_label: str):
         cam_traj = PoseOptimiser(
             dataset,
-            feature_extraction_options=FeatureExtractionOptions(min_features=40),
+            feature_extraction_options=FeatureExtractionOptions(min_features=20),
             optimisation_options=options,
             debug=False
         ).run()[0]
 
-        run_trajectory_comparisons(dataset, cam_traj, dataset.camera_trajectory,
-                                   pred_label=pred_label, gt_label=gt_label,
+        run_trajectory_comparisons(dataset, cam_traj, dataset_gt.camera_trajectory,
+                                   pred_label=pred_label, gt_label='gt',
                                    results_dict=ablation_results, output_folder=pjoin(output_path, 'ablation'))
 
     for dataset_name in datasets:
@@ -469,6 +470,17 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     # Our RGB-D Alignment
     ablation_results = dict()
 
+    prng = np.random.default_rng(random_seed)
+
+    default_pipeline = (OptimisationStep.PairWise3D, OptimisationStep.Global3D)
+    global_only_pipeline = (OptimisationStep.Global3D,)
+    loop_pipeline = default_pipeline + default_pipeline
+    pipeline_2d = (OptimisationStep.PairWise2D, OptimisationStep.Global2D)
+    pipeline_fine_tuning = (OptimisationStep.PairWise3D, OptimisationStep.PairWise2D,
+                            OptimisationStep.Global3D, OptimisationStep.Global2D)
+    pipeline_fine_tuning_3d_2d = (OptimisationStep.PairWise3D, OptimisationStep.Global3D,
+                                  OptimisationStep.PairWise2D, OptimisationStep.Global2D)
+
     for dataset_name in datasets:
         dataset_gt = TUMAdaptor(
             base_path=pjoin(data_path, dataset_name),
@@ -477,6 +489,12 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_ground_truth()
 
+        dataset_rand = VTMDataset(dataset_gt.base_path)
+        dataset_rand.camera_trajectory = np.hstack((
+            Rotation.random(len(dataset_gt.camera_trajectory), prng).as_quat(),
+            prng.normal(size=(len(dataset_gt.camera_trajectory), 3))
+        ))
+
         dataset_estimated = TUMAdaptor(
             base_path=pjoin(data_path, dataset_name),
             output_path=pjoin(output_path, f"{dataset_name}_est"),
@@ -484,39 +502,29 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_rgb()
 
-        default_pipeline = (OptimisationStep.PairWise3D, OptimisationStep.Global3D)
-        global_only_pipeline = (OptimisationStep.Global3D,)
-        loop_pipeline = default_pipeline + default_pipeline
-        pipeline_2d = (OptimisationStep.PairWise2D, OptimisationStep.Global2D)
-        pipeline_fine_tuning = (OptimisationStep.PairWise3D, OptimisationStep.PairWise2D,
-                                OptimisationStep.Global3D, OptimisationStep.Global2D)
-        pipeline_fine_tuning_3d_2d = (OptimisationStep.PairWise3D, OptimisationStep.Global3D,
-                                      OptimisationStep.PairWise2D, OptimisationStep.Global2D)
-
-        for dataset, gt_label, pred_label_suffix in \
-                zip((dataset_gt, dataset_estimated), ('gt', 'colmap'), ('', '_est')):
+        for dataset, pred_label_suffix in zip((dataset_gt, dataset_rand, dataset_estimated), ('_gt', '_rand', '_est')):
             run_pose_optim_experiment(dataset, OptimisationOptions(),
-                                      pred_label=f"baseline{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"baseline{pred_label_suffix}")
 
             run_pose_optim_experiment(dataset, OptimisationOptions(steps=global_only_pipeline),
-                                      pred_label=f"global_only{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"global_only{pred_label_suffix}")
 
             run_pose_optim_experiment(dataset, OptimisationOptions(steps=loop_pipeline),
-                                      pred_label=f"loop{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"loop{pred_label_suffix}")
 
             run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_2d),
-                                      pred_label=f"2d_residuals{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"2d_residuals{pred_label_suffix}")
 
             # Compare with and without a final fine-tuning step that uses the image-to-image projection residuals.
             run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning),
-                                      pred_label=f"fine_tune{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"fine_tune{pred_label_suffix}")
 
             run_pose_optim_experiment(dataset, OptimisationOptions(steps=pipeline_fine_tuning_3d_2d),
-                                      pred_label=f"fine_tune_3d_to_2d{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"fine_tune_3d_to_2d{pred_label_suffix}")
 
             # Compare optimising just the camera position vs the entire pose (position + orientation).
             run_pose_optim_experiment(dataset, OptimisationOptions(position_only=True),
-                                      pred_label=f"pos_only{pred_label_suffix}", gt_label=gt_label)
+                                      pred_label=f"pos_only{pred_label_suffix}")
 
     with open(pjoin(output_path, 'ablation', 'summary.json'), 'w') as f:
         json.dump(ablation_results, f)
