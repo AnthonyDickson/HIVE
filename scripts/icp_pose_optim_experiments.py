@@ -189,7 +189,7 @@ def register_with_ransac(source_down, target_down, source_fpfh,
     return result
 
 
-def icp(source, target):
+def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud, initial_transform: np.ndarray=None):
     # colored pointcloud registration
     # From: http://www.open3d.org/docs/release/tutorial/pipelines/colored_pointcloud_registration.html
     # This is implementation of following paper
@@ -198,6 +198,10 @@ def icp(source, target):
     voxel_radius = [0.04, 0.02, 0.01]
     max_iter = [60, 40, 20]
     times_skipped = 0
+
+    if initial_transform is not None:
+        source = source.copy()
+        source.transform(initial_transform)
 
     # Use RANSAC to provide a good initial estimate.
     # If this step is skipped, this ICP algorithm sometimes fails on estimated depth.
@@ -244,10 +248,13 @@ def icp(source, target):
         warnings.warn("Could not find correspondences between the source and target point clouds. "
                       "Using initial global alignment found with RANSAC.")
 
+    if initial_transform is not None:
+        current_transformation = current_transformation @ initial_transform
+
     return current_transformation.copy()
 
 
-def get_icp_trajectory(dataset: VTMDataset):
+def get_icp_trajectory(dataset: VTMDataset, init_with_gt=False):
     log(f"Aligning point clouds with ICP...")
     num_frames = dataset.num_frames
     relative_poses = []
@@ -256,7 +263,12 @@ def get_icp_trajectory(dataset: VTMDataset):
         source = create_point_cloud(dataset, frame_i)
         target = create_point_cloud(dataset, frame_j)
 
-        pose = icp(source, target)
+        if init_with_gt:
+            initial_transform = subtract_pose(dataset.camera_trajectory[frame_j], dataset.camera_trajectory[frame_i])
+        else:
+            initial_transform = None
+
+        pose = icp(source, target, initial_transform)
 
         relative_poses.append(pose_mat2vec(pose))
 
@@ -494,13 +506,17 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                                    pred_label='gt', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
 
-        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt)))
-        run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp',
+        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=True)))
+        run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp_gt',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
         optimiser = PoseOptimiser(dataset_gt, debug=True)
         optimised_trajectory, _, _ = optimiser.run(num_frames=dataset_gt.num_frames)
-        run_trajectory_comparisons(dataset_gt, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours',
+        run_trajectory_comparisons(dataset_gt, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours_gt',
+                                   gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
+
+        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=False)))
+        run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
         # Trajectory comparisons on estimated pose
@@ -518,7 +534,8 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                                    pred_label='gt_est', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
 
-        icp_trajectory_est = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_estimated)))
+        icp_trajectory_est = \
+            invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_estimated, init_with_gt=False)))
         run_trajectory_comparisons(dataset_estimated, icp_trajectory_est, dataset_gt.camera_trajectory,
                                    pred_label='icp_est', gt_label='colmap', results_dict=icp_results,
                                    output_folder=icp_results_path)
