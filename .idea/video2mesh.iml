@@ -5,6 +5,7 @@
       <excludeFolder url="file://$MODULE_DIR$/data" />
       <excludeFolder url="file://$MODULE_DIR$/results" />
       <excludeFolder url="file://$MODULE_DIR$/ismar_experiment_results" />
+      <excludeFolder url="file://$MODULE_DIR$/experiment_results" />
     </content>
     <orderEntry type="jdk" jdkName="Remote Python 3.8.10 Docker (eight0153/video2mesh:cu116)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

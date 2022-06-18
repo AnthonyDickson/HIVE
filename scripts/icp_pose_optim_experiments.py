@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import copy
 import json
 import os.path
 import shutil
@@ -189,7 +190,7 @@ def register_with_ransac(source_down, target_down, source_fpfh,
     return result
 
 
-def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud, initial_transform: np.ndarray=None):
+def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud):
     # colored pointcloud registration
     # From: http://www.open3d.org/docs/release/tutorial/pipelines/colored_pointcloud_registration.html
     # This is implementation of following paper
@@ -198,10 +199,6 @@ def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud, initia
     voxel_radius = [0.04, 0.02, 0.01]
     max_iter = [60, 40, 20]
     times_skipped = 0
-
-    if initial_transform is not None:
-        source = source.copy()
-        source.transform(initial_transform)
 
     # Use RANSAC to provide a good initial estimate.
     # If this step is skipped, this ICP algorithm sometimes fails on estimated depth.
@@ -248,9 +245,6 @@ def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud, initia
         warnings.warn("Could not find correspondences between the source and target point clouds. "
                       "Using initial global alignment found with RANSAC.")
 
-    if initial_transform is not None:
-        current_transformation = current_transformation @ initial_transform
-
     return current_transformation.copy()
 
 
@@ -264,25 +258,26 @@ def get_icp_trajectory(dataset: VTMDataset, init_with_gt=False):
         target = create_point_cloud(dataset, frame_j)
 
         if init_with_gt:
-            initial_transform = subtract_pose(dataset.camera_trajectory[frame_j], dataset.camera_trajectory[frame_i])
-        else:
-            initial_transform = None
+            source.transform(pose_vec2mat(dataset.camera_trajectory[frame_i]))
+            target.transform(pose_vec2mat(dataset.camera_trajectory[frame_j]))
 
-        pose = icp(source, target, initial_transform)
+        pose = icp(source, target)
 
         relative_poses.append(pose_mat2vec(pose))
 
     return np.asarray([get_identity_pose()] + relative_poses)
 
 
-def merge_trajectory(relative_poses: np.ndarray) -> np.ndarray:
+def merge_trajectory(relative_poses: np.ndarray, dataset: Optional[VTMDataset] = None) -> np.ndarray:
     # Assumes relative_poses[0] == get_identity_pose()
     merged_pose_data = []
     previous_pose = get_identity_pose()
 
-    for pose in relative_poses:
-        new_pose = add_pose(pose, previous_pose)
+    for i, pose in enumerate(relative_poses):
+        if dataset is not None:
+            previous_pose = dataset.camera_trajectory[i]
 
+        new_pose = add_pose(pose, previous_pose)
         merged_pose_data.append(new_pose)
         previous_pose = new_pose
 
@@ -334,6 +329,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
 
     # TODO: Make the dataset list configurable.
     # TODO: Download any missing TUM datasets.
+    # TODO: Refactor code so datasets are loaded before all experiments.
     datasets = ['rgbd_dataset_freiburg1_desk',
                 'rgbd_dataset_freiburg3_walking_xyz',
                 'rgbd_dataset_freiburg3_sitting_xyz']
@@ -500,13 +496,15 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             pjoin(dataset_estimated.path_to_rgb_frames),
             workspace_path=pjoin(dataset_estimated.base_path, 'debug', 'colmap', 'workspace')
         ).load_camera_params()
+        dataset_cm.camera_trajectory = dataset_cm.camera_trajectory[:len(dataset_gt)]
 
         # Trajectory comparisons on ground truth
         run_trajectory_comparisons(dataset_gt, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,
                                    pred_label='gt', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
 
-        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=True)))
+        # TODO: Not sure why, but the ICP trajectory acquired this way does not need to be inverted.
+        icp_trajectory = merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=True), dataset_gt)
         run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp_gt',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
