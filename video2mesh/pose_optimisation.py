@@ -15,10 +15,11 @@ from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 
 from video2mesh.fusion import tsdf_fusion
-from video2mesh.geometry import Quaternion, invert_trajectory, subtract_pose, add_pose, get_identity_pose
+from video2mesh.geometry import Quaternion, invert_trajectory, subtract_pose, add_pose, get_identity_pose, \
+    point_cloud_from_depth
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
-from video2mesh.utils import tqdm_imap, log, temp_seed
+from video2mesh.utils import tqdm_imap, log, temp_seed, Domain, check_domain
 
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -857,7 +858,7 @@ class OptimisationOptions:
     def __init__(self, num_epochs=4000, learning_rate=1e-2, l2_regularisation=0.5, min_loss_delta=1e-4,
                  lr_scheduler_patience=50, early_stopping_patience=75, alignment_type=AlignmentType.Rigid,
                  steps=default_pipeline, position_only=False, fine_tune=True, pose_t_reg=0.5, pose_r_reg=1.0,
-                 trajectory_smoothing: Optional[float] = None):
+                 trajectory_smoothing: Optional[float] = None, clip_distance: Optional[float] = 1.0):
         """
         :param num_epochs: The maximum number of iterations to run the optimisation algorithm for.
         :param learning_rate: How much the optimisation parameters are adjusted each step. Higher values (>0.1) may
@@ -878,8 +879,10 @@ class OptimisationOptions:
             This can remove some blurriness from a 3D reconstruction using the optimised poses.
         :param pose_t_reg: The regularisation weight for the distance between translation vectors or adjacent frames.
         :param pose_r_reg: The regularisation weight for the distance between quaternions or adjacent frames.
-        :param trajectory_smoothing: How much smoothing [0, 1] to apply to the trajectory (positions) after the
-            final optimisation step.
+        :param trajectory_smoothing: (optional) How much smoothing [0, 1] to apply to the trajectory (positions) after
+            the final optimisation step. Setting this to `None` disables smoothing.
+        :param clip_distance: (optional) The maximum distance allowed between frames.
+            Set to `None` to disable hard constraint on frame distance.
         """
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
@@ -894,6 +897,26 @@ class OptimisationOptions:
         self.pose_r_reg = pose_r_reg
         self.fine_tune = fine_tune
         self.trajectory_smoothing = trajectory_smoothing
+        self.clip_distance = clip_distance
+
+        check_domain(num_epochs, 'num_epochs', int, Domain.Positive)
+        check_domain(learning_rate, 'learning_rate', float, Domain.Positive)
+        check_domain(l2_regularisation, 'l2_regularisation', float, Domain.NonNegative)
+        check_domain(min_loss_delta, 'min_loss_delta', float, Domain.Positive)
+        check_domain(lr_scheduler_patience, 'lr_scheduler_patience', int, Domain.Positive)
+        check_domain(early_stopping_patience, 'early_stopping_patience', int, Domain.Positive)
+        check_domain(pose_t_reg, 'pose_t_reg', float, Domain.NonNegative)
+        check_domain(pose_r_reg, 'pose_r_reg', float, Domain.NonNegative)
+        check_domain(trajectory_smoothing, 'trajectory_smoothing', float, Domain.NonNegative, nullable=True)
+        check_domain(clip_distance, 'clip_distance', float, Domain.NonNegative, nullable=True)
+
+        if not isinstance(steps, (tuple, list)) or len(steps) == 0:
+            for step in steps:
+                if not isinstance(step, OptimisationStep):
+                    raise ValueError(f"steps must only contain values of type {OptimisationStep}, "
+                                     f"but found a value of type {type(step)}")
+
+            raise ValueError(f"steps must a tuple or list with at least one element, got {type(steps)} instead.")
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_epochs={self.num_epochs}, " \
@@ -908,7 +931,8 @@ class OptimisationOptions:
                f"pose_t_reg={self.pose_t_reg}, " \
                f"pose_r_reg={self.pose_r_reg}, " \
                f"fine_tune={self.fine_tune}, " \
-               f"trajectory_smoothing={self.trajectory_smoothing})"
+               f"trajectory_smoothing={self.trajectory_smoothing}, " \
+               f"clip_distance={self.clip_distance})"
 
     def copy(self) -> 'OptimisationOptions':
         """Make a copy of the optimisation options."""
@@ -1245,12 +1269,21 @@ class PoseOptimiser:
         progress_bar = tqdm(range(options.num_epochs))
 
         for _ in progress_bar:
-            # TODO: Any way of speeding this step up?
-            # This step helps prevent quaternion rotations' norms becoming zero.
             with torch.no_grad():
+                # TODO: Any way of speeding this step up?
+                # This step helps prevent quaternion rotations' norms becoming zero.
                 r = optimisation_parameters.rotation_quaternions
                 r = r / torch.linalg.norm(r, ord=2, dim=1).reshape((-1, 1))
                 optimisation_parameters.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True)
+
+                # This puts a hard limit on the distance between frames.
+                if self.optimisation_options.clip_distance is not None:
+                    position_vectors = self._clip_distance_between_frames(
+                        optimisation_parameters,
+                        max_displacement_per_sec=self.optimisation_options.clip_distance
+                    )
+                    optimisation_parameters.translation_vectors = torch.nn.Parameter(position_vectors,
+                                                                                     requires_grad=True)
 
             optimiser.zero_grad()
             residuals = self._calculate_residuals(fixed_parameters, optimisation_parameters, residual_type,
@@ -1285,6 +1318,46 @@ class PoseOptimiser:
 
         return optimisation_parameters
 
+    def _clip_distance_between_frames(self, parameters: OptimisationParameters, max_displacement_per_sec=1.0) \
+            -> torch.FloatTensor:
+        """
+        Enforce a maximum distance (Euclidean) between all pairs of adjacent frames in a trajectory.
+
+        **Note:** Make sure this method is called within a `torch.no_grad()` context to ensure
+        no side effects (gradients) and the best performance.
+
+        :param parameters: The optimisation parameters with the trajectory to clip.
+        :param max_displacement_per_sec: The maximum distance (meters) the camera position is allowed to change in
+            one millisecond.
+        :return: The clipped trajectory.
+        """
+        position_vectors = parameters.translation_vectors.clone()
+        num_frames = len(position_vectors)
+        max_frame_distance = max_displacement_per_sec * (1.0 / self.dataset.fps)
+
+        # TODO: Speed this up. Try vectorising the calculations?
+        for i in range(1, num_frames):
+            pos_curr = position_vectors[i]
+            pos_prev = position_vectors[i - 1]
+
+            pos_diff = pos_curr - pos_prev
+            distance = torch.linalg.norm(pos_diff)
+
+            if distance > max_frame_distance:
+                direction = pos_diff / distance
+                new_pos = pos_prev + max_frame_distance * direction
+
+                position_vectors[i] = new_pos
+
+                final_diff = position_vectors[i] - pos_curr
+
+                next_i = i + 1
+
+                if next_i < num_frames:
+                    position_vectors[i + 1:] += final_diff
+
+        return position_vectors
+
     def _calculate_loss(self, residuals: torch.Tensor, optimisation_parameters: OptimisationParameters,
                         smooth_trajectory: bool):
         loss = torch.mean(torch.linalg.norm(residuals, ord=2, dim=0))
@@ -1292,12 +1365,12 @@ class PoseOptimiser:
         if smooth_trajectory:
             t = optimisation_parameters.translation_vectors
 
-            order_one_grad = t[:-2] - 2 * t[1:-1] + t[2:]
-            order_two_grad = order_one_grad[:-1] - order_one_grad[1:]
+            order_one_grad = t[:-1] - t[1:]
+            order_two_grad = t[:-2] - 2 * t[1:-1] + t[2:]
             order_three_grad = order_two_grad[:-1] - order_two_grad[1:]
-            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_one_grad, dim=1))
-            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_two_grad, dim=1))
-            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.linalg.norm(order_three_grad, dim=1))
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.sum(torch.square(order_one_grad), dim=1))
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.sum(torch.square(order_two_grad), dim=1))
+            loss += self.optimisation_options.pose_t_reg * torch.mean(torch.sum(torch.square(order_three_grad), dim=1))
 
             r = optimisation_parameters.rotation_quaternions
             rotational_distance = torch.mean(1 - torch.square(torch.einsum('ij,ij->i', r[:-1], r[1:])))

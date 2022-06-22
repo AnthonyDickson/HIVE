@@ -2,8 +2,9 @@
 
 import contextlib
 import datetime
+import enum
 from multiprocessing.pool import ThreadPool
-from typing import Optional
+from typing import Optional, Any, Union, Type
 
 import numpy as np
 import psutil
@@ -118,3 +119,52 @@ def cudnn():
     finally:
         torch.backends.cudnn.enabled = cudnn_enabled
         torch.backends.cudnn.benchmark = cudnn_benchmark
+
+
+# noinspection PyArgumentList
+class Domain(enum.Enum):
+    """The domain of a value (positive, non-negative or negative)."""
+
+    # < 0
+    Negative = enum.auto()
+    # > 0
+    Positive = enum.auto()
+    # >= 0
+    NonNegative = enum.auto()
+
+
+def check_domain(value: Any, name: str, value_type: Union[Type[int], Type[float]], domain: Optional[Domain] = None,
+                 nullable=False):
+    """
+    Check whether the given value is within the specified domain, e.g. whether the variable `x` is a positive integer.
+    Raises `ValueError` if the value is not in the specified domain.
+
+    :param value: The value to check.
+    :param name: The name of the variable/value that is being checked. Used in the exception text.
+    :param value_type: Should the value be an integer or float?
+    :param domain: Should the value be positive, non-negative or negative?
+    :param nullable: Can this value be `None`?
+
+    :raises: ValueError if the value is outside the specified domain.
+    """
+    if nullable and value is None:
+        return
+
+    if domain is not None:
+        domain_name = f" {domain.name.lower()} "
+
+        if domain == Domain.Negative:
+            in_domain = value < 0.0
+        elif domain == Domain.NonNegative:
+            in_domain = value >= 0.0
+            domain_name = ' non-negative '
+        elif domain == Domain.Positive:
+            in_domain = value > 0.0
+        else:
+            raise RuntimeError(f"Unsupported domain type {domain}.")
+    else:
+        domain_name = ''
+        in_domain = True
+
+    if not isinstance(value, value_type) or not in_domain:
+        raise ValueError(f"{name} must be a {domain_name}{value_type}, but got {value} ({type(value)}) instead")

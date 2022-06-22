@@ -421,15 +421,9 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
 
     prng = np.random.default_rng(random_seed)
 
-    base_traj = np.array([
-        np.linspace(0, 1, num_frames),
-        np.zeros(num_frames),
-        np.linspace(0, 1, num_frames),
-    ]).T
-
     rand_trajectory = np.hstack((
         Rotation.identity(num_frames).as_quat(),
-        base_traj + prng.normal(scale=0.1, size=(num_frames, 3))
+        np.zeros((num_frames, 3)) + prng.normal(scale=0.01, size=(num_frames, 3))
     ))
 
     baseline_config = OptimisationOptions()

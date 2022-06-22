@@ -25,7 +25,7 @@ from tqdm import tqdm
 from video2mesh.geometry import pose_vec2mat, normalise_trajectory
 from video2mesh.image_processing import dilate_mask
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
-from video2mesh.utils import log, tqdm_imap
+from video2mesh.utils import log, tqdm_imap, check_domain, Domain
 from thirdparty.colmap.scripts.python.read_write_model import read_model
 
 File = Union[str, Path]
@@ -707,27 +707,13 @@ class DatasetMetadata:
         if not isinstance(is_gt, bool):
             raise ValueError(f"is_gt must be a boolean, got {type(is_gt)}.")
 
-        if not isinstance(num_frames, int) or num_frames < 1:
-            raise ValueError(f"num_frames must be a positive integer, got {num_frames}.")
-
-        if not isinstance(frame_step, int) or frame_step < 1:
-            raise ValueError(f"frame_step must be a positive integer, got {frame_step}.")
-
-        if not isinstance(width, int) or width < 1:
-            raise ValueError(f"width must be a positive integer, got {width}.")
-
-        if not isinstance(height, int) or height < 1:
-            raise ValueError(f"height must be a positive integer, got {height}.")
-
-        if not isinstance(depth_scale, float):
-            raise ValueError(f"depth_scale must be a real number (float), got {type(depth_scale)}.")
-
-        if not isinstance(max_depth, float) or max_depth < 0.0:
-            raise ValueError(f"max_depth must be a positive, real number (float), got {max_depth} ({type(max_depth)}).")
-
-        if not isinstance(depth_mask_dilation_iterations, int) or depth_mask_dilation_iterations < 1:
-            raise ValueError(f"depth_mask_dilation_iterations must be a positive integer, "
-                             f"got {depth_mask_dilation_iterations}.")
+        check_domain(num_frames, 'num_frames', int, Domain.Positive)
+        check_domain(frame_step, 'frame_step', int, Domain.Positive)
+        check_domain(width, 'width', int, Domain.Positive)
+        check_domain(height, 'height', int, Domain.Positive)
+        check_domain(depth_scale, 'depth_scale', float)
+        check_domain(max_depth, 'max_depth', float, Domain.Positive)
+        check_domain(depth_mask_dilation_iterations, 'depth_mask_dilation_iterations', int, Domain.Positive)
 
     def __eq__(self, other: 'DatasetMetadata') -> bool:
         return self.num_frames == other.num_frames and \
