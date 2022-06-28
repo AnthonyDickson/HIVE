@@ -650,8 +650,9 @@ class VideoAdaptor(VideoAdaptorBase):
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         """
-        base_path = Path(base_path).parent
-        video_filename = Path(base_path).name
+        path = Path(base_path)
+        base_path = path.parent
+        video_filename = path.name
         video_path = pjoin(base_path, video_filename)
 
         super().__init__(base_path=base_path, output_path=output_path, video_path=video_path, resize_to=resize_to,
@@ -670,7 +671,8 @@ class VideoAdaptor(VideoAdaptorBase):
             return
         if os.path.isdir(base_path):
             items = os.listdir(base_path)
-            files = list(filter(os.path.isfile, items))
+            paths = [os.path.join(base_path, item) for item in items]
+            files = list(filter(os.path.isfile, paths))
 
             if len(files) < 1:
                 raise InvalidDatasetFormatError(f"The folder {base_path} contains no files.")
@@ -955,12 +957,12 @@ def calculate_target_resolution(source_hw, target_hw):
             f"but they are being resized to what appears to be "
             f"{target_orientation} ({target_hw[1]}x{target_hw[0]})")
 
-    source_aspect = source_hw[1] / source_hw[0]
-    target_aspect = target_hw[1] / target_hw[0]
+    source_aspect = np.round(source_hw[1] / source_hw[0], decimals=2)
+    target_aspect = np.round(target_hw[1] / target_hw[0], decimals=2)
 
     if not np.isclose(source_aspect, target_aspect):
-        warnings.warn(f"The aspect ratio of the source video is {source_aspect.as_integer_ratio()}, "
-                      f"however the aspect ratio of the target resolution is {target_aspect}. "
+        warnings.warn(f"The aspect ratio of the source video is {source_aspect:.2f}, "
+                      f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
                       f"This may lead to stretching in the images.")
 
     return target_hw

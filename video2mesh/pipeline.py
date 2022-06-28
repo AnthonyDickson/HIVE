@@ -107,14 +107,16 @@ class Pipeline:
                 camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
             )
 
-            if self.options.frame_step > 1:
-                # frame_set = list(range(0, self.num_frames, self.options.frame_step))
-                frame_set = list(range(0, self.num_frames, self.options.frame_step))
+            if self.num_frames >= 1:
+                if self.options.frame_step > 1:
+                    frame_set = list(range(0, self.num_frames, self.options.frame_step))
 
-                if frame_set[-1] != self.num_frames - 1:
-                    frame_set.append(self.num_frames - 1)
+                    if frame_set[-1] != self.num_frames - 1:
+                        frame_set.append(self.num_frames - 1)
+                else:
+                    frame_set = list(range(self.num_frames))
             else:
-                frame_set = list(range(self.num_frames))
+                frame_set = None
 
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
                                                    options=self.static_mesh_options, frame_set=frame_set)
@@ -461,6 +463,9 @@ class Pipeline:
         """
         if num_frames < 1:
             num_frames = dataset.num_frames
+
+        if frame_set is not None and len(frame_set) < 1:
+            raise RuntimeError(f"`frame_set`, if not set to `None`, must be a list with at least one element.")
 
         if options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
             mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)

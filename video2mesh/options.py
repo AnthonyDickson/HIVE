@@ -374,7 +374,7 @@ class PipelineOptions(Options):
                            action='store_true')
         group.add_argument('--num_frames', type=int, default=-1,
                            help='The maximum of frames to process. Set to -1 (default) to process all frames.')
-        group.add_argument('--frame_step', type=int, default=-1,
+        group.add_argument('--frame_step', type=int, default=1,
                            help='The frequency to sample frames at for COLMAP and pose optimisation. '
                                 'If set to 1, samples all frames (i.e. no effect). '
                                 'Otherwise if set to n | n > 1, samples every n frames.')
