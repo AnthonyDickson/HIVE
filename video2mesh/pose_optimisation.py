@@ -1,9 +1,9 @@
 import argparse
 import enum
 import os.path
-from os.path import join as pjoin
 import shutil
 import warnings
+from os.path import join as pjoin
 from typing import Tuple, List, Optional, Iterable, Union
 
 import cv2
@@ -1598,6 +1598,101 @@ class PoseOptimiser:
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=90)
+
+
+class ForegroundPoseOptimiser:
+    def __init__(self, dataset: VTMDataset, learning_rate=1e-5, num_epochs=100):
+        self.dataset = dataset
+        self.learning_rate = learning_rate
+        self.num_epochs = num_epochs
+
+    def run(self) -> np.ndarray:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        num_frames = self.dataset.num_frames
+
+        def get_point_cloud(index):
+            depth = self.dataset.depth_dataset[index]
+            mask = self.dataset.mask_dataset[index]
+            # TODO: Track instances between frames and calculate loss per instance
+            mask = mask > 0
+
+            point_cloud = point_cloud_from_depth(depth, mask, self.dataset.camera_matrix)
+
+            return point_cloud
+
+        # (N, M, 3) tensor where: N is the number of frames;
+        #  and M is the number of pixels belonging to dynamic objects in each depth map.
+        point_clouds = tqdm_imap(get_point_cloud, list(range(num_frames)))
+        trajectory_torch = torch.from_numpy(self.dataset.camera_trajectory.copy())
+        params = OptimisationParameters(trajectory_torch, AlignmentType.Rigid).to(device)
+
+        optimiser = torch.optim.Adam(params.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+
+        chunks = []
+        chunk = []
+        min_chunk_size = 3
+
+        centroids = np.zeros((num_frames, 3), dtype=float)
+
+        for i, point_cloud in enumerate(point_clouds):
+            if len(point_cloud) > 0:
+                chunk.append(i)
+                centroids[i] = np.mean(point_cloud, axis=0)
+            else:
+                if len(chunk) >= min_chunk_size:
+                    chunks.append(chunk)
+
+                chunk = []
+
+        if len(chunk) >= min_chunk_size:
+            chunks.append(chunk)
+
+        centroids_camera_space = torch.from_numpy(centroids).to(device)
+
+        with torch.no_grad():
+            centroids_world_space_gt = Quaternion(params.rotation_quaternions.T)\
+                .normalise()\
+                .conjugate()\
+                .apply((centroids_camera_space - params.translation_vectors).T).T
+
+        with tqdm(range(self.num_epochs), total=self.num_epochs) as progress_bar:
+            for _ in progress_bar:
+                optimiser.zero_grad()
+
+                loss = torch.tensor(0.0, device=device)
+
+                for chunk in chunks:
+                    r = params.rotation_quaternions[chunk]
+                    t = params.translation_vectors[chunk]
+
+                    centroids_world_space = Quaternion(r.T) \
+                        .normalise() \
+                        .conjugate() \
+                        .apply((centroids_camera_space - t).T).T
+
+                    error_geom = torch.mean(torch.norm(centroids_world_space_gt - centroids_world_space, dim=1))
+                    error_temp = torch.mean(torch.norm(t[:-2] - 2 * t[1:-1] + t[2:]))
+                    error_vel = torch.mean(torch.norm(t[:-1] - t[1:]))
+
+                    w_geom = 0.01
+                    w_temp = 0.1
+                    w_vel = 0.1
+                    loss += w_geom * error_geom + w_temp * error_temp + w_vel * error_vel
+
+                loss.backward()
+                optimiser.step()
+
+                loss_value = loss.detach().cpu().item()
+
+                lr = float('nan')
+
+                for param_group in optimiser.param_groups:
+                    lr = param_group['lr']
+                    break
+
+                progress_bar.set_postfix_str(f"Loss: {loss_value:<7.4f} - LR: {lr:,.2e}")
+
+        return params.get_trajectory()
 
 
 def main():

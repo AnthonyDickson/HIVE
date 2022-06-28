@@ -145,8 +145,9 @@ def invert_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
     return matrix_trajectory_to_vector_trajectory(T)
 
 
-def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1))):
     """
+    Create a point cloud from a depth map.
 
     :param depth: A depth map.
     :param mask: A binary mask the same shape as the depth maps.
@@ -154,24 +155,37 @@ def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scal
     :param K: The camera intrinsics matrix.
     :param R: The (3, 3) rotation matrix.
     :param t: The (3, 1) translation vector.
-    :param scale_factor:
-    :return:
+
+    :return: the (N, 3) point cloud.
     """
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
     points2d = np.array([U, V]).T
 
-    points = image2world(points2d, depth[valid_pixels], K, R, t, scale_factor)
+    points = image2world(points2d, depth[valid_pixels], K, R, t)
 
     return points
 
 
-def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1))):
+    """
+    Create a point cloud with vertex colours from an RGB-D frame.
+
+    :param rgb: A colour image.
+    :param depth: A depth map.
+    :param mask: A binary mask the same shape as the depth maps.
+        Truthy values indicate parts of the depth maps that should be kept.
+    :param K: The camera intrinsics matrix.
+    :param R: The (3, 3) rotation matrix.
+    :param t: The (3, 1) translation vector.
+
+    :return: the (N, 3) point cloud.
+    """
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
     points2d = np.array([U, V]).T
 
-    points = image2world(points2d, depth[valid_pixels], K, R, t, scale_factor)
+    points = image2world(points2d, depth[valid_pixels], K, R, t)
     colour = np.zeros(shape=(len(points), 4), dtype=rgb.dtype)
     colour[:, :3] = rgb[valid_pixels]
     colour[:, 3] = 255
@@ -211,14 +225,14 @@ def image2world(points, depth, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=
     """
     Convert 2D image coordinates to 3D world coordinates.
 
-    :param points: The (?, 2) array of image coordinates.
-    :param depth: The (?,) array of depth values at the given 2D points.
+    :param points: The (N, 2) array of image coordinates.
+    :param depth: The (N,) array of depth values at the given 2D points.
     :param K: The (3, 3) camera intrinsics matrix.
     :param R: The (3, 3) camera rotation matrix.
     :param t: The (3, 1) camera translation column vector.
     :param scale_factor: An optional value that scales the 2D points.
 
-    :return: the (?, 3) 3D points in world space.
+    :return: the (N, 3) 3D points in world space.
     """
     validate_shape(points, 'points', expected_shape=(None, 2))
     validate_shape(depth, 'depth', expected_shape=(points.shape[0],))

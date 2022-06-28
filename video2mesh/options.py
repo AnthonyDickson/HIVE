@@ -300,6 +300,35 @@ class StaticMeshOptions(Options):
         )
 
 
+class ForegroundTrajectorySmoothingOptions(Options):
+    def __init__(self, learning_rate=1e-5, num_epochs=0):
+        """
+
+
+        :param learning_rate: The learning rate/step size to take each epoch when smoothing the trajectory.
+        :param num_epochs: The number of iterations to loop the smoothing algorithm. Set to zero to disable
+            foreground trajectory smoothing.
+        """
+        self.learning_rate = learning_rate
+        self.num_epochs = num_epochs
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('Foreground Trajectory Smoothing')
+        group.add_argument('--fts_learning_rate', type=float, default=1e-5,
+                           help='The learning rate/step size to take each epoch when smoothing the trajectory. ')
+        group.add_argument('--fts_num_epochs', type=int, default=0,
+                           help='The number of iterations to loop the smoothing algorithm. Set to zero to disable '
+                                'foreground trajectory smoothing.')
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'ForegroundTrajectorySmoothingOptions':
+        return ForegroundTrajectorySmoothingOptions(
+            learning_rate=args.fts_learning_rate,
+            num_epochs=args.fts_num_epochs
+        )
+
+
 class PipelineOptions(Options):
 
     def __init__(self,
@@ -336,7 +365,7 @@ class PipelineOptions(Options):
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
-        group = parser.add_argument_group('video2mesh')
+        group = parser.add_argument_group('Pipeline')
 
         group.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
                            action='store_true')

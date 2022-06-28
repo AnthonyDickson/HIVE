@@ -24,9 +24,11 @@ from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAd
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
 from video2mesh.image_processing import dilate_mask
-from video2mesh.io import VTMDataset
+from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
-    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StaticMeshOptions
+    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StaticMeshOptions, \
+    ForegroundTrajectorySmoothingOptions
+from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
 
 
@@ -39,7 +41,8 @@ class Pipeline:
     def __init__(self, options: PipelineOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions()):
+                 colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions(),
+                 fts_options=ForegroundTrajectorySmoothingOptions()):
         """
         :param options: Options pertaining to the core program.
         :param storage_options: Options regarding storage of inputs and outputs.
@@ -48,6 +51,7 @@ class Pipeline:
         :param filtering_options: Options for face filtering.
         :param colmap_options: Options for COLMAP.
         :param static_mesh_options: Options for creating the background static mesh.
+        :param fts_options: Options for foreground trajectory smoothing.
         """
         self.options = options
         self.storage_options = storage_options
@@ -56,6 +60,7 @@ class Pipeline:
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
         self.static_mesh_options = static_mesh_options
+        self.fts_options = fts_options
 
     @property
     def num_frames(self):
@@ -73,12 +78,14 @@ class Pipeline:
     def use_estimated_data(self):
         return self.options.use_estimated_data
 
-    def run(self):
+    def run(self, dataset: Optional[VTMDataset] = None):
         start_time = time.time()
 
         storage_options = self.storage_options
 
-        dataset = self.get_dataset()
+        if dataset is None:
+            dataset = self.get_dataset()
+
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
         log("Configured dataset")
@@ -116,7 +123,14 @@ class Pipeline:
         self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
 
         log("Creating foreground mesh(es)...")
-        foreground_scene = self._create_scene(dataset)
+        if self.fts_options.num_epochs > 0:
+            smoothed_trajectory = ForegroundPoseOptimiser(dataset, learning_rate=self.fts_options.learning_rate,
+                                                          num_epochs=self.fts_options.num_epochs).run()
+
+            with temporary_trajectory(dataset, smoothed_trajectory):
+                foreground_scene = self._create_scene(dataset)
+        else:
+            foreground_scene = self._create_scene(dataset)
 
         self._write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
 

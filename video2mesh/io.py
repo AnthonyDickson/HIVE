@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import json
 import os
@@ -975,3 +976,21 @@ class VTMDataset(DatasetBase):
     @staticmethod
     def index_to_filename(index: int, file_extension="png") -> str:
         return f"{index:06d}.{file_extension}"
+
+
+@contextlib.contextmanager
+def temporary_trajectory(dataset: VTMDataset, trajectory: np.ndarray):
+    """
+    Context manager that temporarily replaces the trajectory of a dataset.
+
+    :param dataset: The dataset.
+    :param trajectory: The trajectory to use.
+    """
+    traj_backup = dataset.camera_trajectory.copy()
+
+    try:
+        dataset.camera_trajectory = trajectory
+
+        yield
+    finally:
+        dataset.camera_trajectory = traj_backup

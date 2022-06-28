@@ -1,6 +1,4 @@
 import argparse
-import contextlib
-import copy
 import json
 import os.path
 import shutil
@@ -20,7 +18,7 @@ from video2mesh.dataset_adaptors import TUMAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, invert_trajectory
-from video2mesh.io import VTMDataset, COLMAPProcessor
+from video2mesh.io import VTMDataset, COLMAPProcessor, temporary_trajectory
 from video2mesh.options import StaticMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
 from video2mesh.utils import log
@@ -284,18 +282,6 @@ def merge_trajectory(relative_poses: np.ndarray, dataset: Optional[VTMDataset] =
     return np.asarray(merged_pose_data)
 
 
-@contextlib.contextmanager
-def temp_traj(dataset: VTMDataset, trajectory: np.ndarray):
-    traj_backup = dataset.camera_trajectory.copy()
-
-    try:
-        dataset.camera_trajectory = trajectory
-
-        yield
-    finally:
-        dataset.camera_trajectory = traj_backup
-
-
 def export_results(output_path):
     def read_results(path):
         with open(path, 'r') as f:
@@ -396,7 +382,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         results_dict['rpe'][dataset_name][pred_label]['rotation'] = np.mean(np.rad2deg(error_r))
         results_dict['rpe'][dataset_name][pred_label]['translation'] = np.mean(error_t)
 
-        with temp_traj(dataset, pred_trajectory):
+        with temporary_trajectory(dataset, pred_trajectory):
             mesh = tsdf_fusion(dataset, static_mesh_options)
             mesh.export(pjoin(experiment_path, f"mesh.ply"))
 
@@ -577,7 +563,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # This is needed in case BundleFusion has already been run with the dataset.
         dataset_estimated.overwrite_ok = overwrite_ok
 
-        with temp_traj(dataset_estimated, dataset_gt.camera_trajectory):
+        with temporary_trajectory(dataset_estimated, dataset_gt.camera_trajectory):
             gt_mesh_est = tsdf_fusion(dataset_estimated, static_mesh_options)
             gt_mesh_est.export(pjoin(mesh_output_path, 'gt_est.ply'))
 
