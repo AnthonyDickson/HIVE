@@ -1664,13 +1664,14 @@ class ForegroundPoseOptimiser:
                 for chunk in chunks:
                     r = params.rotation_quaternions[chunk]
                     t = params.translation_vectors[chunk]
+                    centroids_chunk = centroids_camera_space[chunk]
 
                     centroids_world_space = Quaternion(r.T) \
                         .normalise() \
                         .conjugate() \
-                        .apply((centroids_camera_space - t).T).T
+                        .apply((centroids_chunk - t).T).T
 
-                    error_geom = torch.mean(torch.norm(centroids_world_space_gt - centroids_world_space, dim=1))
+                    error_geom = torch.mean(torch.norm(centroids_world_space_gt[chunk] - centroids_world_space, dim=1))
                     error_temp = torch.mean(torch.norm(t[:-2] - 2 * t[1:-1] + t[2:]))
                     error_vel = torch.mean(torch.norm(t[:-1] - t[1:]))
 
