@@ -97,9 +97,11 @@ class Pipeline:
 
         log("Creating background mesh(es)...")
 
-        if self.include_background:
+        # TODO: Rename `include_background` to something that describes its purpose more accurately.
+        if self.include_background or self.static_background:
+            frame_step = 1 if self.static_background else int(round(dataset.fps))
             background_scene = self._create_scene(dataset, include_background=True, background_only=True,
-                                                  static_background=self.static_background)
+                                                  static_background=self.static_background, frame_step=frame_step)
         else:
             fx, fy, height, width = self._extract_camera_params(dataset.camera_matrix)
 
@@ -330,7 +332,7 @@ class Pipeline:
         return dataset
 
     def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
-                      static_background=False) -> trimesh.Scene:
+                      static_background=False, keyframes_only=False, frame_step=1) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
@@ -338,9 +340,13 @@ class Pipeline:
         :param include_background: Whether to include the background mesh for each frame.
         :param background_only: Whether to exclude dynamic foreground objects.
         :param static_background: Whether to only use the first frame for the background.
+        :param keyframes_only: Only add frames that overlap previous frames less than a specified threshold.
+        :param frame_step: How many frames to advance between each sample (frame added to the scene). 1 = every frame.
 
         :return: The Trimesh scene object.
         """
+        # TODO: Can the various bool flag arguments be combined into a single bit flag?
+
         if static_background:
             num_frames = 1
         elif self.num_frames == -1:
@@ -440,10 +446,43 @@ class Pipeline:
 
             return mesh
 
-        log("Processing frame data...")
-        meshes = tqdm_imap(process_frame, range(num_frames))
+        if keyframes_only:
+            def camera_frustum(camera_pose: np.ndarray):
+                """
+                Calculate the camera frustum (the 3D volume visible to the camera) for a given camera pose.
+                :param camera_pose: The [r, t] pose vector.
+                :return: The camera frustum. TODO: Decide on format for camera frustum.
+                """
+                raise NotImplementedError
 
-        for i, mesh in enumerate(meshes):
+            def overlap(camera_frustum_a, camera_frustum_b) -> float:
+                """
+                Calculate the ratio of overlap between two camera frustums.
+
+                :param camera_frustum_a: The first camera frustum.
+                :param camera_frustum_b: The other camera frustum.
+                :return: The ratio of overlap [0.0, 1.0] between the two volumes.
+                """
+                raise NotImplementedError
+
+            frames = [0]
+            threshold = 0.8
+
+            for pose_i, pose in enumerate(dataset.camera_trajectory):
+                keyframe = frames[-1]
+                keyframe_pose = dataset.camera_trajectory[keyframe]
+
+                if overlap(camera_frustum(keyframe_pose), camera_frustum(pose)) < threshold:
+                    frames.append(pose_i)
+        elif frame_step > 0:
+            frames = range(0, num_frames, frame_step)
+        else:
+            frames = range(num_frames)
+
+        log("Processing frame data...")
+        meshes = tqdm_imap(process_frame, frames)
+
+        for i, mesh in zip(frames, meshes):
             scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene

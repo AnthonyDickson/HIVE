@@ -22,7 +22,7 @@ from video2mesh.geometry import normalise_trajectory
 from video2mesh.io import DatasetBase, File, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, Size, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, StaticMeshOptions
-from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions
+from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
 from video2mesh.utils import log, tqdm_imap
 
 
@@ -342,6 +342,7 @@ class DatasetAdaptor(DatasetBase):
         # TODO: Allow optimisation options to be set via CLI?
         optimiser = PoseOptimiser(
             temp_dataset,
+            optimisation_options=OptimisationOptions(),
             feature_extraction_options=FeatureExtractionOptions(min_features=40),
             debug=True
         )

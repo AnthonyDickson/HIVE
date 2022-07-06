@@ -1121,6 +1121,9 @@ class PoseOptimiser:
         if self.optimisation_options.fine_tune:
             num_steps += 1
 
+        if self.debug:
+            self.visualise_solution(optimisation_parameters, label="initial_trajectory")
+
         for i, step in enumerate(self.optimisation_options.steps):
             log(f"Step {i + 1}/{num_steps}: {step.name} Alignment...")
 
