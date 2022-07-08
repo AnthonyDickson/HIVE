@@ -366,7 +366,7 @@ class COLMAPProcessor:
 
         return cameras, images, points3d
 
-    def load_camera_params(self, raw_pose: Optional[bool] = None):
+    def load_camera_params(self, raw_pose: Optional[bool] = True):
         """
         Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
         :param raw_pose: (optional) Whether to use the raw pose data straight from COLMAP.
@@ -406,7 +406,7 @@ class COLMAPProcessor:
             # According to some comments in the above code, "Note that colmap uses a different coordinate system
             # where y points down and z points to the world." The below rotation apparently puts the poses back into
             # a 'normal' coordinate frame.
-            colmap_to_normal = np.diag([1, -1, -1])
+            colmap_to_normal = np.diag([1, -1, 1])  # I think TUM + TSDFFusion work in X right, Y up and Z forward
 
             for image in images.values():
                 R = image.qvec2rotmat()
@@ -422,72 +422,76 @@ class COLMAPProcessor:
                 extrinsic.append(np.hstack((r, t)))
 
         extrinsic = np.asarray(extrinsic).squeeze()
-        extrinsic = self._adjust_colmap_poses(extrinsic, use_raw_pose=raw_pose)
 
         log(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
 
-    @staticmethod
-    def _adjust_colmap_poses(camera_trajectory: np.ndarray, use_raw_pose=False) -> np.array:
-        t_cmp = camera_trajectory[:, 4:].copy()
-        t_cmp = t_cmp - t_cmp[0]
+    def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: np.ndarray) -> np.ndarray:
+        """
+        Recover sparse depth maps from the COLMAP reconstruction.
 
-        t_cmp[:, 1], t_cmp[:, 2] = -t_cmp[:, 2].copy(), t_cmp[:, 1].copy()
-
-        if use_raw_pose:
-            t_cmp[:, 0] *= -1.
-
-        R_cmp = camera_trajectory[:, :4].copy()
-        R_cmp[:, :3] = R_cmp[:, :3] - R_cmp[0, :3]
-
-        R_cmp[:, 1], R_cmp[:, 2] = -R_cmp[:, 2].copy(), R_cmp[:, 1].copy()
-
-        if use_raw_pose:
-            R_cmp[:, 0] *= -1.
-
-        refined_trajectory = np.zeros(shape=(len(R_cmp), R_cmp.shape[1] + t_cmp.shape[1]))
-
-        refined_trajectory[:, :4] = R_cmp
-        refined_trajectory[:, 4:] = t_cmp
-
-        return refined_trajectory
-
-    def get_sparse_depth_maps(self):
+        :param camera_matrix: 3x3 camera intrinsics matrix.
+        :param camera_poses: Nx7 camera poses matrix (quaterion, position vector).
+        :return: The NxHxW tensor containing the HxW depth maps.
+        """
         cameras, images, points3d = self._load_model()
 
-        camera_matrix, camera_trajectory = self.load_camera_params()
+        K = np.eye(4)
+        K[:3, :3] = camera_matrix.copy()
 
-        source_image_shape = cv2.imread(pjoin(self.image_path, images[1].name)).shape[:2]
+        first_image_id = next(iter(images))
+        first_image = images[first_image_id]
+
+        source_image_shape = cv2.imread(pjoin(self.image_path, first_image.name)).shape[:2]
         depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
 
-        for index_zero_based in range(len(images)):
-            index = index_zero_based + 1
+        indices = sorted(images)
+
+        if len(indices) < len(camera_poses):
+            warnings.warn(f"COLMAP `images` has fewer indices ({len(indices)} than "
+                          f"there are frames in the camera trajectory ({len(camera_poses)}).")
+
+        if min(indices) > 1:
+            warnings.warn(f"COLMAP indices in `images` does not start at 1 (starts at {min(indices)}).")
+
+        if max(indices) < len(camera_poses):
+            warnings.warn(f"COLMAP indices in `images` do not include final frame.")
+
+        if max(indices) > len(camera_poses):
+            warnings.warn(f"COLMAP indices in `images` include frame index greater than the number of camera poses.")
+
+        for index in indices:
             image_data = images[index]
+            # `image_data.name` contains the filename, which in this case is in the format '%06d.png' (e.g. 000001.png).
+            # We can extract the zero-based index of the current frame from the filename.
+            # Note that `index` is not necessarily frame index + 1, so we cannot just take `index - 1`.
+            filename, _ = image_data.name.split('.')
+            index_zero_based = int(filename)
 
-            points2d = np.round(image_data.xys[:, ::-1]).astype(int)
+            if index_zero_based > len(camera_poses):
+                continue
 
-            K = np.eye(4)
-            K[:3, :3] = camera_matrix
-            points = np.zeros((len(points2d), 3))
-            has_3d_points = np.zeros(len(points2d), dtype=bool)
+            num_points = len(image_data.xys)
+
+            points = np.zeros((num_points, 4))
+            has_3d_points = np.zeros(num_points, dtype=bool)
 
             for i, point3d_id in enumerate(image_data.point3D_ids):
                 if point3d_id == -1:
                     continue
 
-                points[i] = points3d[point3d_id].xyz
+                points[i] = [*points3d[point3d_id].xyz, 1.0]
                 has_3d_points[i] = True
 
-            pose = pose_vec2mat(camera_trajectory[index_zero_based])
-            R = pose[:3, :3]
-            t = pose[:3, 3:]
+            pose = pose_vec2mat(camera_poses[index_zero_based])
 
-            points_camera_space = (R @ points.T) + t
-            projected_points = (camera_matrix @ points_camera_space).T
-            projected_points[~has_3d_points] = [0., 0., 0.]
+            projected_points = (K @ pose @ points.T).T
+            projected_points = projected_points[has_3d_points, :3]
+            depth = projected_points[:, 2]
+            u, v = np.round(image_data.xys[has_3d_points]).astype(int).T
 
-            depth_maps[index_zero_based, points2d[:, 0], points2d[:, 1]] = projected_points[:, 2]
+            depth_maps[index_zero_based, v, u] = depth
 
         return depth_maps
 

@@ -394,6 +394,8 @@ class Pipeline:
                 coverage_ratio = mask.mean()
 
                 if coverage_ratio < 0.01:
+                    # TODO: Make minimum coverage ratio configurable?
+                    # TODO: Change this warning to log output that can be filtered by severity/level.
                     warnings.warn(f"Skipping object #{object_id} in frame {i + 1} due to insufficient coverage.")
                     continue
 
@@ -429,6 +431,7 @@ class Pipeline:
 
             if len(texture_atlas) == 0:
                 mesh = trimesh.Trimesh()
+                # TODO: Change this warning to log output that can be filtered by severity/level.
                 warnings.warn(f"Mesh for frame #{i + 1} is empty!")
             else:
                 packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
@@ -483,6 +486,7 @@ class Pipeline:
         meshes = tqdm_imap(process_frame, frames)
 
         for i, mesh in zip(frames, meshes):
+            # TODO: Skip empty meshes so the logs don't get spammed with 'skipping empty mesh'
             scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene

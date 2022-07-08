@@ -5,7 +5,7 @@ import subprocess
 import warnings
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List
 
 import cv2
 import imageio
@@ -18,7 +18,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from thirdparty.dpt import dpt
-from video2mesh.geometry import normalise_trajectory
+from video2mesh.geometry import normalise_trajectory, invert_trajectory
 from video2mesh.io import DatasetBase, File, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, Size, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, StaticMeshOptions
@@ -187,10 +187,8 @@ class DatasetAdaptor(DatasetBase):
             estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
 
             debug_folder = pjoin(self.output_path, 'debug')
-            camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, colmap_options)
-            camera_trajectory = self._refine_estimated_camera_parameters(camera_matrix, camera_trajectory,
-                                                                         debug_folder, output_image_folder,
-                                                                         output_depth_folder, output_mask_folder)
+            camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, colmap_options,
+                                                                                output_depth_folder, metadata)
 
         log(f"Creating camera matrix file.")
         camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
@@ -240,6 +238,11 @@ class DatasetAdaptor(DatasetBase):
                                    f"Possible fix: Delete or rename the file/folder.")
 
     def _setup_folders(self) -> Tuple[str, str, str]:
+        """
+        Create the output folders.
+
+        :return: The paths to the: image folder, depth map folder and instance segmentation masks folder.
+        """
         self._delete_cache()
         os.makedirs(self.output_path, exist_ok=self.overwrite_ok)
 
@@ -251,6 +254,14 @@ class DatasetAdaptor(DatasetBase):
 
     @staticmethod
     def _get_frame_subset(num_frames, frame_step):
+        """
+        Get frame indices for the full set and the subset using `frame_step`.
+
+        :param num_frames: How many frames to include.
+        :param frame_step: The step between frames.
+
+        :return: The list of indices and the list of indices
+        """
         frames = list(range(num_frames))
         frames_subset = frames[::frame_step]
 
@@ -259,7 +270,17 @@ class DatasetAdaptor(DatasetBase):
 
         return frames, frames_subset
 
-    def _estimate_camera_parameters(self, output_folder: str, colmap_options: COLMAPOptions):
+    def _estimate_camera_parameters(self, output_folder: str, colmap_options: COLMAPOptions, output_depth_folder: str,
+                                    metadata: DatasetMetadata) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Estimate the camera parameters (intrinsics and extrinsics) with COLMAP.
+
+        :param output_folder: The folder to save the COLMAP output to.
+        :param colmap_options: The configuration for COLMAP.
+        :param output_depth_folder: Where the estimated depth maps have been saved to.
+        :param metadata: The metadata for the dataset.
+        :return: The 3x3 camera matrix and the Nx7 camera poses.
+        """
         # TODO: Redirect COLMAP output to log file and print some sort of progress bar.
         colmap_log_file = pjoin(output_folder, 'colmap_logs.txt')
 
@@ -295,77 +316,96 @@ class DatasetAdaptor(DatasetBase):
         with open(colmap_log_file, 'w') as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
             colmap_processor.run()
 
-        camera_matrix, camera_trajectory = colmap_processor.load_camera_params()
+        camera_matrix, camera_poses_scaled = self._get_scaled_colmap_camera_params(colmap_processor,
+                                                                                   output_depth_folder,
+                                                                                   metadata, frames_subset)
 
-        return camera_matrix, camera_trajectory
+        if self.frame_step > 1:
+            camera_poses_scaled = self._interpolate_poses(camera_poses_scaled, keyframes=frames_subset)
 
-    def _refine_estimated_camera_parameters(self, camera_matrix: np.ndarray, camera_trajectory: np.ndarray,
-                                            output_folder: str, image_folder: str, depth_folder: str, mask_folder: str):
-        def copy_frame_set(src_path, dst_path):
-            def copy(dst_src_indices):
-                dst_index, src_index = dst_src_indices
+        return camera_matrix, normalise_trajectory(invert_trajectory(camera_poses_scaled))
 
-                src = dataset.image_paths[src_index]
-                dst = pjoin(dst_path, VTMDataset.index_to_filename(dst_index))
-                shutil.copy(src, dst)
+    @staticmethod
+    def _get_scaled_colmap_camera_params(colmap_processor: COLMAPProcessor,
+                                         output_depth_folder: str,
+                                         metadata: DatasetMetadata,
+                                         frames_subset: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Scale the camera poses estimated by COLMAP to match the scale in the estimated depth maps.
 
-            dataset = ImageFolderDataset(src_path)
-            tqdm_imap(copy, list(enumerate(frames_subset)))
+        :param colmap_processor: The COLMAP processor object.
+        :param output_depth_folder: The path to the estimated depth maps.
+        :param metadata: The dataset metadata.
+        :param frames_subset: The subset of frames that were used for COLMAP.
 
-        frames, frames_subset = self._get_frame_subset(self.num_frames, self.frame_step)
+        :return: The estimated 3x3 camera matrix and the scaled Nx7 camera poses.
+        """
+        camera_matrix, camera_poses = colmap_processor.load_camera_params(raw_pose=True)
+        colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
 
-        tmp_dataset_path = create_folder(output_folder, 'pose_optim_vtm')
+        def transform(depth_map):
+            depth_map = VTMDataset.depth_scaling_factor * depth_map.astype(np.float32)
+            depth_map[depth_map > metadata.max_depth] = 0.0
 
-        log("Copying RGB frames for pose optimisation...")
-        tmp_rgb_path = create_folder(tmp_dataset_path, VTMDataset.rgb_folder)
-        copy_frame_set(image_folder, tmp_rgb_path)
+            return depth_map
 
-        log("Copying depth maps for pose optimisation...")
-        tmp_depth_path = create_folder(tmp_dataset_path, VTMDataset.depth_folder)
-        copy_frame_set(depth_folder, tmp_depth_path)
+        depth_dataset = ImageFolderDataset(output_depth_folder, transform=transform)
+        est_depth = np.asarray(tqdm_imap(depth_dataset.__getitem__, frames_subset))
 
-        log("Copying masks for pose optimisation...")
-        tmp_mask_path = create_folder(tmp_dataset_path, VTMDataset.mask_folder)
-        copy_frame_set(mask_folder, tmp_mask_path)
+        num_frames = min(len(colmap_depth), len(est_depth))
 
-        temp_metadata = self.get_metadata(is_gt=False)
-        temp_metadata.num_frames = len(frames_subset)
-        temp_metadata.save(pjoin(tmp_dataset_path, VTMDataset.metadata_filename))
+        colmap_depth = colmap_depth[:num_frames]
+        est_depth = est_depth[:num_frames]
+        nonzero_mask = (colmap_depth > 0.) & (est_depth > 0.)
 
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(tmp_dataset_path, VTMDataset.camera_matrix_filename), camera_matrix)
-        # noinspection PyTypeChecker
-        np.savetxt(pjoin(tmp_dataset_path, VTMDataset.camera_trajectory_filename), camera_trajectory)
+        # Find scale which when applied to the colmap poses, minimises the loss function below.
+        scaling_factor = np.median(est_depth[nonzero_mask] / colmap_depth[nonzero_mask])
+        colmap_depth_scaled = scaling_factor * colmap_depth
 
-        temp_dataset = VTMDataset(tmp_dataset_path, overwrite_ok=True)
+        def loss(pred_depth, gt_depth):
+            return np.exp(np.median(np.log(1. / pred_depth) - np.log(1. / gt_depth))) - 1.0
 
-        # TODO: Allow optimisation options to be set via CLI?
-        optimiser = PoseOptimiser(
-            temp_dataset,
-            optimisation_options=OptimisationOptions(),
-            feature_extraction_options=FeatureExtractionOptions(min_features=40),
-            debug=True
-        )
-        optimised_trajectory, _, _ = optimiser.run(num_frames=temp_dataset.num_frames)
+        sigma_before = loss(est_depth[nonzero_mask], colmap_depth[nonzero_mask])
+        sigma_after = loss(est_depth[nonzero_mask], colmap_depth_scaled[nonzero_mask])
 
-        interpolated_poses = np.zeros((self.num_frames, 7))
-        interpolated_poses[:, 3] = 1.0  # Ensure all quaternions are initialised as unit quaternions.
-        interpolated_poses[frames_subset] = optimised_trajectory
+        log(f"Depth Scale: {scaling_factor:.4f} - Loss Before: {sigma_before:.4f} - Loss After: {sigma_after:.4f}")
 
-        for start, end in zip(frames_subset[:-1], frames_subset[1:]):
-            start_rotation = interpolated_poses[start, :4]
-            end_rotation = interpolated_poses[end, :4]
-            start_position = interpolated_poses[start, 4:]
-            end_position = interpolated_poses[end, 4:]
+        camera_poses_scaled = camera_poses.copy()
+        camera_poses_scaled[:, 4:] *= scaling_factor
+
+        return camera_matrix, camera_poses_scaled
+
+    @staticmethod
+    def _interpolate_poses(poses: np.ndarray, keyframes: List[int]) -> np.ndarray:
+        """
+        Interpolate the pose for frames with missing data (when `frame_step` > 1).
+
+        :param poses: The poses estimated by COLMAP over a subset of frames.
+        :param keyframes: The indices of the frames COLMAP was run over.
+        :return: The interpolated Nx7 camera poses.
+        """
+        src_num_frames = len(poses)
+        dst_num_frames = max(keyframes)
+
+        interpolated_poses = np.zeros((dst_num_frames, poses.shape[1]))
+
+        src_indices = zip(range(src_num_frames - 1), range(1, src_num_frames))
+        dst_indices = zip(keyframes[:-1], keyframes[1:])
+
+        for (src_start, src_end), (dst_start, dst_end) in zip(src_indices, dst_indices):
+            start_rotation = poses[src_start, :4]
+            end_rotation = poses[src_end, :4]
+            start_position = poses[src_start, 4:]
+            end_position = poses[src_end, 4:]
 
             key_frame_times = [0, 1]
-            times_to_interpolate = np.linspace(0, 1, num=end - start + 1)
+            times_to_interpolate = np.linspace(0, 1, num=dst_end - dst_start + 1)
 
             slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
             lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
 
-            interpolated_poses[start:end + 1, 4:] = lerp(times_to_interpolate)
-            interpolated_poses[start:end + 1, :4] = slerp(times_to_interpolate).as_quat()
+            interpolated_poses[dst_start:dst_end + 1, 4:] = lerp(times_to_interpolate)
+            interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
 
         return interpolated_poses
 
@@ -569,7 +609,7 @@ class VideoAdaptorBase(DatasetAdaptor):
         :param output_path: The path to write the new dataset to.
         :param video_path: The path to the RGB video.
         :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
-        :param resize_to: The resolution (width, height) to resize the images to.
+        :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         """
@@ -578,7 +618,7 @@ class VideoAdaptorBase(DatasetAdaptor):
 
         self.video_path = video_path
 
-        with open_video(self.video_path) as video:
+        with self.open_video(self.video_path) as video:
             self.num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) if self.num_frames == -1 else self.num_frames
             self.source_width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.source_height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -586,12 +626,12 @@ class VideoAdaptorBase(DatasetAdaptor):
         if isinstance(resize_to, tuple):
             resize_width, resize_height = resize_to
             self.target_height, self.target_width = \
-                calculate_target_resolution((self.source_height, self.source_width),
-                                            (resize_height, resize_width))
+                self._calculate_target_resolution((self.source_height, self.source_width),
+                                                  (resize_height, resize_width))
         elif isinstance(resize_to, int):
             # noinspection PyTypeChecker
             self.target_height, self.target_width = \
-                calculate_target_resolution((self.source_height, self.source_width), resize_to)
+                self._calculate_target_resolution((self.source_height, self.source_width), resize_to)
         else:
             self.target_height, self.target_width = self.source_height, self.source_width
 
@@ -599,8 +639,68 @@ class VideoAdaptorBase(DatasetAdaptor):
             log(f"Will resize frames from {self.source_width}x{self.source_height} to "
                 f"{self.target_width}x{self.target_height} (width, height).")
 
+    @staticmethod
+    def _calculate_target_resolution(source_hw, target_hw):
+        """
+        Calculate the target resolution and perform some sanity checks.
+
+        :param source_hw: The resolution of the input frames. These are used if the target resolution is given as a
+            single value indicating the desired length of the longest side of the images.
+        :param target_hw: The resolution (height, width) to resize the images to.
+        :return: The target resolution as a 2-tuple (height, width).
+        """
+        if isinstance(target_hw, int):
+            # Cast results to int to avoid warning highlights in IDE.
+            longest_side = int(np.argmax(source_hw))
+            shortest_side = int(np.argmin(source_hw))
+
+            new_size = [0, 0]
+            new_size[longest_side] = target_hw
+
+            scale_factor = new_size[longest_side] / source_hw[longest_side]
+            new_size[shortest_side] = int(source_hw[shortest_side] * scale_factor)
+
+            target_hw = new_size
+        elif isinstance(target_hw, tuple):
+            if len(target_hw) != 2:
+                raise ValueError(f"The target resolution must be a 2-tuple, but got a {len(target_hw)}-tuple.")
+
+            if not isinstance(target_hw[0], int) or not isinstance(target_hw[1], int):
+                raise ValueError(f"Expected target resolution to be a 2-tuple of integers, but got a tuple of"
+                                 f" ({type(target_hw[0])}, {type(target_hw[1])}).")
+
+        target_orientation = 'portrait' if np.argmax(target_hw) == 0 else 'landscape'
+        source_orientation = 'portrait' if np.argmax(source_hw) == 0 else 'landscape'
+
+        if target_orientation != source_orientation:
+            warnings.warn(
+                f"The input images appear to be in {source_orientation} ({source_hw[1]}x{source_hw[0]}), "
+                f"but they are being resized to what appears to be "
+                f"{target_orientation} ({target_hw[1]}x{target_hw[0]})")
+
+        source_aspect = np.round(source_hw[1] / source_hw[0], decimals=2)
+        target_aspect = np.round(target_hw[1] / target_hw[0], decimals=2)
+
+        if not np.isclose(source_aspect, target_aspect):
+            warnings.warn(f"The aspect ratio of the source video is {source_aspect:.2f}, "
+                          f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
+                          f"This may lead to stretching in the images.")
+
+        return target_hw
+
+    @staticmethod
+    @contextlib.contextmanager
+    def open_video(video_path):
+        video = cv2.VideoCapture(video_path)
+
+        try:
+            yield video
+        finally:
+            if video.isOpened():
+                video.release()
+
     def get_metadata(self, is_gt: bool) -> DatasetMetadata:
-        with open_video(self.video_path) as video:
+        with self.open_video(self.video_path) as video:
             fps = float(video.get(cv2.CAP_PROP_FPS))
 
         height, width = self.target_height, self.target_width
@@ -616,11 +716,11 @@ class VideoAdaptorBase(DatasetAdaptor):
                                depth_scale=VTMDataset.depth_scaling_factor)
 
     def get_full_num_frames(self):
-        with open_video(self.video_path) as video:
+        with self.open_video(self.video_path) as video:
             return int(video.get(cv2.CAP_PROP_FRAME_COUNT))
 
     def get_frame(self, index: int) -> np.ndarray:
-        with open_video(self.video_path) as video:
+        with self.open_video(self.video_path) as video:
             video.set(cv2.CAP_PROP_POS_FRAMES, index - 1)
 
             read_frame, frame = video.read()
@@ -633,7 +733,35 @@ class VideoAdaptorBase(DatasetAdaptor):
     def copy_frames(self, output_path: str, num_frames=-1):
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
-        extract_video(self.video_path, output_path, num_frames)
+        self.extract_video(self.video_path, output_path, num_frames)
+
+    @staticmethod
+    def extract_video(path_to_video: str, output_path: str, num_frames: int = -1,
+                      target_resolution: Tuple[int, int] = None):
+        """
+        Extract the frames from a video file.
+
+        :param path_to_video: The path to the video file.
+        :param output_path: The folder to save the frames to.
+        :param num_frames: The maximum number of frames to extract. If set to -1, all frames are extracted.
+        :param target_resolution: The resolution (height, width) to resize frames to.
+        """
+        ffmpeg_command = ['ffmpeg', '-i', path_to_video]
+
+        if num_frames != -1:
+            ffmpeg_command += ['-frames:v', str(num_frames)]
+
+        if target_resolution is not None:
+            height, width = target_resolution
+            ffmpeg_command += ['-s', f"{width}x{height}"]
+
+        ffmpeg_command += ['-start_number', str(0), pjoin(output_path, '%06d.png')]
+
+        process = subprocess.Popen(ffmpeg_command)
+
+        if (return_code := process.wait()) != 0:
+            raise RuntimeError(f"Something went wrong with ffmpeg (return code {return_code}), "
+                               f"check the logs for more details.")
 
 
 class VideoAdaptor(VideoAdaptorBase):
@@ -647,7 +775,7 @@ class VideoAdaptor(VideoAdaptorBase):
         :param base_path: The path to the video file.
         :param output_path: The path to write the new dataset to.
         :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
-        :param resize_to: The resolution (width, height) to resize the images to.
+        :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         """
@@ -816,21 +944,6 @@ def create_folder(*args, exist_ok=False):
     return path
 
 
-def extract_video(path_to_video: str, output_path: str, num_frames: int = -1):
-    ffmpeg_command = ['ffmpeg', '-i', path_to_video]
-
-    if num_frames != -1:
-        ffmpeg_command += ['-frames:v', str(num_frames)]
-
-    ffmpeg_command += ['-start_number', str(0), pjoin(output_path, '%06d.png')]
-
-    process = subprocess.Popen(ffmpeg_command)
-
-    if (return_code := process.wait()) != 0:
-        raise RuntimeError(f"Something went wrong with ffmpeg (return code {return_code}), "
-                           f"check the logs for more details.")
-
-
 def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybrid_nyu.pt', optimize=True):
     # TODO: Fix memory leak that happens after using the DPT model.
     #  Memory only gets released after the script exits. I suspect it has something to do with the timm package or
@@ -909,9 +1022,9 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
                     mode="bicubic",
                     align_corners=False,
                 )
-                    .squeeze()
-                    .cpu()
-                    .numpy()
+                .squeeze()
+                .cpu()
+                .numpy()
             )
 
         depth_map = prediction * 1000.0
@@ -920,61 +1033,3 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
         imageio.imwrite(os.path.join(output_path, f"{i:06d}.png"), depth_map)
 
 
-def calculate_target_resolution(source_hw, target_hw):
-    """
-    Calculate the target resolution and perform some sanity checks.
-
-    :param source_hw: The resolution of the input frames. These are used if the target resolution is given as a
-        single value indicating the desired length of the longest side of the images.
-    :param target_hw: The resolution (width, height) to resize the images to.
-    :return: The target resolution as a 2-tuple (height, width).
-    """
-    if isinstance(target_hw, int):
-        # Cast results to int to avoid warning highlights in IDE.
-        longest_side = int(np.argmax(source_hw))
-        shortest_side = int(np.argmin(source_hw))
-
-        new_size = [0, 0]
-        new_size[longest_side] = target_hw
-
-        scale_factor = target_hw / source_hw[longest_side]
-        new_size[shortest_side] = int(source_hw[shortest_side] * scale_factor)
-
-        target_hw = new_size
-    elif isinstance(target_hw, tuple):
-        if len(target_hw) != 2:
-            raise ValueError(f"The target resolution must be a 2-tuple, but got a {len(target_hw)}-tuple.")
-
-        if not isinstance(target_hw[0], int) or not isinstance(target_hw[1], int):
-            raise ValueError(f"Expected target resolution to be a 2-tuple of integers, but got a tuple of"
-                             f" ({type(target_hw[0])}, {type(target_hw[1])}).")
-
-    target_orientation = 'portrait' if np.argmax(target_hw) == 0 else 'landscape'
-    source_orientation = 'portrait' if np.argmax(source_hw) == 0 else 'landscape'
-
-    if target_orientation != source_orientation:
-        warnings.warn(
-            f"The input images appear to be in {source_orientation} ({source_hw[1]}x{source_hw[0]}), "
-            f"but they are being resized to what appears to be "
-            f"{target_orientation} ({target_hw[1]}x{target_hw[0]})")
-
-    source_aspect = np.round(source_hw[1] / source_hw[0], decimals=2)
-    target_aspect = np.round(target_hw[1] / target_hw[0], decimals=2)
-
-    if not np.isclose(source_aspect, target_aspect):
-        warnings.warn(f"The aspect ratio of the source video is {source_aspect:.2f}, "
-                      f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
-                      f"This may lead to stretching in the images.")
-
-    return target_hw
-
-
-@contextlib.contextmanager
-def open_video(video_path):
-    video = cv2.VideoCapture(video_path)
-
-    try:
-        yield video
-    finally:
-        if video.isOpened():
-            video.release()
