@@ -1,5 +1,6 @@
 import argparse
 import enum
+import logging
 import os.path
 import shutil
 import warnings
@@ -19,7 +20,7 @@ from video2mesh.geometry import Quaternion, invert_trajectory, subtract_pose, ad
     point_cloud_from_depth
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
-from video2mesh.utils import tqdm_imap, log, temp_seed, Domain, check_domain
+from video2mesh.utils import tqdm_imap, temp_seed, Domain, check_domain
 
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -228,11 +229,11 @@ class FeatureExtractionOptions:
                              f"but got {max_features}.")
 
         if min_features < 20:
-            warnings.warn(f"`min_features` was set to {min_features}, however it is recommended to set `min_features` "
+            logging.warning(f"`min_features` was set to {min_features}, however it is recommended to set `min_features` "
                           f"to at least 20. Anything lower than 20 generally leads to a low SNR and bad results.")
 
         if max_features is not None and max_features < 2 * min_features:
-            warnings.warn(f"`max_features` was set to {max_features}, however it is recommended to set `max_features` "
+            logging.warning(f"`max_features` was set to {max_features}, however it is recommended to set `max_features` "
                           f"to at least 2 * `min_features` ({2 * min_features}). This is to increase the likelihood "
                           f"that enough features will remain after filtering to meet the requirement of having "
                           f"at least `min_features` features.")
@@ -303,11 +304,11 @@ class FeatureExtractor:
         :return: A FeatureSet contained the paired feature data (frame index, match coordinates, depth at match
         coordinates) for each frame pair.
         """
-        log(f"Extracting image feature matches...")
+        logging.info(f"Extracting image feature matches...")
         self._setup_folders()
 
         if self.feature_set_path and os.path.isfile(self.feature_set_path):
-            log(f"Found cached feature set at: {self.feature_set_path}")
+            logging.info(f"Found cached feature set at: {self.feature_set_path}")
             return FeatureSet.load(self.feature_set_path)
 
         self.frames, self.depth_maps, self.masks = self._get_frame_data()
@@ -320,7 +321,7 @@ class FeatureExtractor:
         depth_j = torch.empty(0)
         num_good_frame_pairs = 0
 
-        log(f"Extracting matching image feature info...")
+        logging.info(f"Extracting matching image feature info...")
 
         for feature_set in tqdm_imap(self._get_image_features, self.frame_pairs):
             if feature_set is None:
@@ -389,18 +390,18 @@ class FeatureExtractor:
         Load the video frames, depth maps and masks from the dataset into memory.
         :return: A 3-tuple of the RGB frames, depth maps and masks.
         """
-        log(f"Loading frames...")
+        logging.info(f"Loading frames...")
 
         def load_frame(index):
             return cv2.cvtColor(self.dataset.rgb_dataset[index], cv2.COLOR_RGB2GRAY)
 
         frames = tqdm_imap(load_frame, range(self.dataset.num_frames))
 
-        log(f"Loading depth maps...")
+        logging.info(f"Loading depth maps...")
         depth_maps = tqdm_imap(self.dataset.depth_dataset.__getitem__, range(self.dataset.num_frames))
 
         if self.ignore_dynamic_objects:
-            log(f"Loading masks...")
+            logging.info(f"Loading masks...")
 
             def get_mask(index):
                 """Helper function to load a mask at a given index and perform some light processing."""
@@ -620,8 +621,8 @@ class FeatureExtractor:
         frames_with_matched_features = set(torch.hstack((index_i, index_j)).tolist())
         coverage = len(frames_with_matched_features) / self.dataset.num_frames
 
-        log(f"Found {num_good_frame_pairs} good frame pairs ({num_good_frame_pairs}/{len(self.frame_pairs)})")
-        log(f"Frame pairs cover {100 * coverage:.2f}% of the frames.")
+        logging.info(f"Found {num_good_frame_pairs} good frame pairs ({num_good_frame_pairs}/{len(self.frame_pairs)})")
+        logging.info(f"Frame pairs cover {100 * coverage:.2f}% of the frames.")
 
         chunks = []
         chunk = []
@@ -635,7 +636,7 @@ class FeatureExtractor:
         if chunk:
             chunks.append(chunk)
 
-        log(f"Found {len(chunks)} group(s) of consecutive frames.")
+        logging.info(f"Found {len(chunks)} group(s) of consecutive frames.")
 
 
 # noinspection PyArgumentList
@@ -1125,7 +1126,7 @@ class PoseOptimiser:
             self.visualise_solution(optimisation_parameters, label="initial_trajectory")
 
         for i, step in enumerate(self.optimisation_options.steps):
-            log(f"Step {i + 1}/{num_steps}: {step.name} Alignment...")
+            logging.info(f"Step {i + 1}/{num_steps}: {step.name} Alignment...")
 
             if step == OptimisationStep.PairWise2D or step == OptimisationStep.PairWise3D:
                 residual_type = ResidualType.Image2D if step == OptimisationStep.PairWise2D else ResidualType.World3D
@@ -1152,7 +1153,7 @@ class PoseOptimiser:
             optimisation_parameters = optimisation_parameters.to(device)
 
         if self.optimisation_options.fine_tune:
-            log(f"Step {num_steps}/{num_steps}: Fine tuning...")
+            logging.info(f"Step {num_steps}/{num_steps}: Fine tuning...")
 
             optimisation_parameters = self._optimisation_loop(fixed_parameters=fixed_parameters,
                                                               optimisation_parameters=optimisation_parameters,
@@ -1741,12 +1742,12 @@ def main():
     if optimiser.debug_path:
         reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
                                                    sdf_num_voxels=80000000)
-        log("Running TSDFFusion on initial pose data...")
+        logging.info("Running TSDFFusion on initial pose data...")
         mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_before.export(pjoin(optimiser.debug_path, 'before.ply'))
 
         dataset.camera_trajectory = camera_trajectory
-        log("Running TSDFFusion on final pose data..")
+        logging.info("Running TSDFFusion on final pose data..")
         mesh_after = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_after.export(pjoin(optimiser.debug_path, 'after.ply'))
 

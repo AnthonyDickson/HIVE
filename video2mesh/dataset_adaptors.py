@@ -1,8 +1,8 @@
 import contextlib
+import logging
 import os
 import shutil
 import subprocess
-import warnings
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, Union, Tuple, List
@@ -22,8 +22,7 @@ from video2mesh.geometry import normalise_trajectory, invert_trajectory
 from video2mesh.io import DatasetBase, File, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, Size, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, StaticMeshOptions
-from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions
-from video2mesh.utils import log, tqdm_imap
+from video2mesh.utils import tqdm_imap
 
 
 class DatasetAdaptor(DatasetBase):
@@ -157,17 +156,17 @@ class DatasetAdaptor(DatasetBase):
 
     def _convert(self, from_gt: bool, colmap_options=COLMAPOptions()) -> VTMDataset:
         if cached_dataset := self._try_get_cached_dataset(is_gt=from_gt):
-            log(f"Found cached dataset at {self.output_path}.")
+            logging.info(f"Found cached dataset at {self.output_path}.")
             return cached_dataset
 
         output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders()
 
-        log(f"Creating metadata for dataset.")
+        logging.info(f"Creating metadata for dataset.")
         metadata = self.get_metadata(is_gt=from_gt)
         metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
-        log(f"Copying RGB frames.")
+        logging.info(f"Copying RGB frames.")
         self.copy_frames(output_image_folder)
 
         create_masks(
@@ -177,30 +176,30 @@ class DatasetAdaptor(DatasetBase):
         )
 
         if from_gt:
-            log(f"Copying depth maps.")
+            logging.info(f"Copying depth maps.")
             self.copy_depth_maps(output_depth_folder)
 
             camera_matrix = self.get_camera_matrix()
             camera_trajectory = self.get_camera_trajectory()
         else:
-            log(f"Creating depth maps.")
+            logging.info(f"Creating depth maps.")
             estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
 
             debug_folder = pjoin(self.output_path, 'debug')
             camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, colmap_options,
                                                                                 output_depth_folder, metadata)
 
-        log(f"Creating camera matrix file.")
+        logging.info(f"Creating camera matrix file.")
         camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_matrix_path, camera_matrix)
 
-        log(f"Creating camera trajectory file.")
+        logging.info(f"Creating camera trajectory file.")
         camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
         # noinspection PyTypeChecker
         np.savetxt(camera_trajectory_path, camera_trajectory)
 
-        log(f"Created new dataset at {self.output_path}.")
+        logging.info(f"Created new dataset at {self.output_path}.")
 
         return VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
@@ -230,7 +229,7 @@ class DatasetAdaptor(DatasetBase):
     def _delete_cache(self):
         if os.path.isdir(self.output_path):
             if self.overwrite_ok:
-                warnings.warn(f"Found a dataset in {self.output_path} but it was created with different settings."
+                logging.warning(f"Found a dataset in {self.output_path} but it was created with different settings."
                               f"Since `overwrite_ok` is set to `True`, the existing dataset will be deleted.")
                 shutil.rmtree(self.output_path)
             else:
@@ -281,7 +280,6 @@ class DatasetAdaptor(DatasetBase):
         :param metadata: The metadata for the dataset.
         :return: The 3x3 camera matrix and the Nx7 camera poses.
         """
-        # TODO: Redirect COLMAP output to log file and print some sort of progress bar.
         colmap_log_file = pjoin(output_folder, 'colmap_logs.txt')
 
         if os.path.exists(output_folder):
@@ -293,7 +291,7 @@ class DatasetAdaptor(DatasetBase):
 
         frames, frames_subset = self._get_frame_subset(self.get_full_num_frames(), self.frame_step)
 
-        log("Copying RGB frames for COLMAP...")
+        logging.info("Copying RGB frames for COLMAP...")
 
         self.copy_frames(colmap_rgb_path, self.get_full_num_frames())
 
@@ -307,8 +305,8 @@ class DatasetAdaptor(DatasetBase):
 
                 shutil.move(src_path, dst_path)
 
-        log(f"Running COLMAP... This might take a while!")
-        log(f"Check {colmap_log_file} for the logs.")
+        logging.info(f"Running COLMAP... This might take a while!")
+        logging.info(f"Check {colmap_log_file} for the logs.")
 
         colmap_processor = COLMAPProcessor(image_path=colmap_rgb_path, workspace_path=colmap_workspace_path,
                                            colmap_options=colmap_options)
@@ -340,6 +338,9 @@ class DatasetAdaptor(DatasetBase):
 
         :return: The estimated 3x3 camera matrix and the scaled Nx7 camera poses.
         """
+        logging.info("Scaling COLMAP Poses...")
+
+        logging.info("Creating COLMAP depth maps...")
         camera_matrix, camera_poses = colmap_processor.load_camera_params(raw_pose=True)
         colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
 
@@ -349,6 +350,7 @@ class DatasetAdaptor(DatasetBase):
 
             return depth_map
 
+        logging.info("\tLoading estimated depth maps...")
         depth_dataset = ImageFolderDataset(output_depth_folder, transform=transform)
         est_depth = np.asarray(tqdm_imap(depth_dataset.__getitem__, frames_subset))
 
@@ -368,7 +370,8 @@ class DatasetAdaptor(DatasetBase):
         sigma_before = loss(est_depth[nonzero_mask], colmap_depth[nonzero_mask])
         sigma_after = loss(est_depth[nonzero_mask], colmap_depth_scaled[nonzero_mask])
 
-        log(f"Depth Scale: {scaling_factor:.4f} - Loss Before: {sigma_before:.4f} - Loss After: {sigma_after:.4f}")
+        logging.info(f"Depth Scale: {scaling_factor:.4f} - Loss Before: {sigma_before:.4f} - "
+                     f"Loss After: {sigma_after:.4f}")
 
         camera_poses_scaled = camera_poses.copy()
         camera_poses_scaled[:, 4:] *= scaling_factor
@@ -398,14 +401,19 @@ class DatasetAdaptor(DatasetBase):
             start_position = poses[src_start, 4:]
             end_position = poses[src_end, 4:]
 
+            if dst_end == dst_num_frames:
+                dst_end_point = dst_end
+            else:
+                dst_end_point = dst_end + 1
+
             key_frame_times = [0, 1]
-            times_to_interpolate = np.linspace(0, 1, num=dst_end - dst_start + 1)
+            times_to_interpolate = np.linspace(0, 1, num=dst_end_point - dst_start)
 
             slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
             lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
 
-            interpolated_poses[dst_start:dst_end + 1, 4:] = lerp(times_to_interpolate)
-            interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
+            interpolated_poses[dst_start:dst_end_point, 4:] = lerp(times_to_interpolate)
+            interpolated_poses[dst_start:dst_end_point, :4] = slerp(times_to_interpolate).as_quat()
 
         return interpolated_poses
 
@@ -636,8 +644,8 @@ class VideoAdaptorBase(DatasetAdaptor):
             self.target_height, self.target_width = self.source_height, self.source_width
 
         if self.target_height != self.source_height or self.target_width != self.source_width:
-            log(f"Will resize frames from {self.source_width}x{self.source_height} to "
-                f"{self.target_width}x{self.target_height} (width, height).")
+            logging.info(f"Will resize frames from {self.source_width}x{self.source_height} to "
+                         f"{self.target_width}x{self.target_height} (width, height).")
 
     @staticmethod
     def _calculate_target_resolution(source_hw, target_hw):
@@ -673,7 +681,7 @@ class VideoAdaptorBase(DatasetAdaptor):
         source_orientation = 'portrait' if np.argmax(source_hw) == 0 else 'landscape'
 
         if target_orientation != source_orientation:
-            warnings.warn(
+            logging.warning(
                 f"The input images appear to be in {source_orientation} ({source_hw[1]}x{source_hw[0]}), "
                 f"but they are being resized to what appears to be "
                 f"{target_orientation} ({target_hw[1]}x{target_hw[0]})")
@@ -682,9 +690,9 @@ class VideoAdaptorBase(DatasetAdaptor):
         target_aspect = np.round(target_hw[1] / target_hw[0], decimals=2)
 
         if not np.isclose(source_aspect, target_aspect):
-            warnings.warn(f"The aspect ratio of the source video is {source_aspect:.2f}, "
-                          f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
-                          f"This may lead to stretching in the images.")
+            logging.warning(f"The aspect ratio of the source video is {source_aspect:.2f}, "
+                            f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
+                            f"This may lead to stretching in the images.")
 
         return target_hw
 
@@ -1031,5 +1039,3 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
         depth_map = depth_map.astype(np.uint16)
 
         imageio.imwrite(os.path.join(output_path, f"{i:06d}.png"), depth_map)
-
-

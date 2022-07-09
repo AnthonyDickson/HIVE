@@ -1,8 +1,9 @@
 """This module contains various utility functions that can't be stuffed into other modules."""
 
 import contextlib
-import datetime
 import enum
+import logging
+import sys
 from multiprocessing.pool import ThreadPool
 from typing import Optional, Any, Union, Type
 
@@ -55,10 +56,6 @@ def num2str(num: Optional[int]):
     :return: the number as a string, '?' if the argument is None.
     """
     return '?' if num is None else str(num)
-
-
-def log(message, prefix='', end='\n', file=None):
-    print(f"{prefix}[{datetime.datetime.now().time()}] {message}", file=file, end=end)
 
 
 def tqdm_imap(func, args, num_processes: Optional[int] = None) -> list:
@@ -168,3 +165,53 @@ def check_domain(value: Any, name: str, value_type: Union[Type[int], Type[float]
 
     if not isinstance(value, value_type) or not in_domain:
         raise ValueError(f"{name} must be a {domain_name}{value_type}, but got {value} ({type(value)}) instead")
+
+
+def setup_logger(log_path: Optional[str] = None):
+    """
+    Configure the logger.
+
+    :param log_path: (optional) The file to save the logs to. If set to None, logs will not be written to disk.
+    """
+    # TODO: Get rid of logs from installed packages from DEBUG level output.
+    # TODO: Different files for 'simple' and 'detailed' output?
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    detailed_formatter = logging.Formatter(
+        '[%(asctime)s.%(msecs)03d] [%(levelname)s] %(pathname)s:%(lineno)s: %(funcName)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    simple_formatter = logging.Formatter(
+        '[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    if log_path is not None:
+        logging_file_handler = logging.FileHandler(log_path)
+        logging_file_handler.setLevel(logging.DEBUG)
+        logging_file_handler.setFormatter(detailed_formatter)
+        logger.addHandler(logging_file_handler)
+
+    class IgnoreLevelsAbove(logging.Filter):
+        def __init__(self, level, name=''):
+            super().__init__(name=name)
+
+            self.__level = level
+
+        def filter(self,  record: logging.LogRecord) -> bool:
+            return record.levelno <= self.__level
+
+    # All messages that are DEBUG or INFO will be captured by this handler and printed to stdout.
+    logging_stdout_handler = logging.StreamHandler(sys.stdout)
+    logging_stdout_handler.setLevel(logging.INFO)
+    logging_stdout_handler.addFilter(IgnoreLevelsAbove(logging.INFO))
+    logging_stdout_handler.setFormatter(simple_formatter)
+    logger.addHandler(logging_stdout_handler)
+
+    # This handler handles all messages that are >= WARNING and print them to stderr.
+    logging_stderr_handler = logging.StreamHandler(sys.stderr)
+    logging_stderr_handler.setLevel(logging.WARNING)
+    logging_stderr_handler.setFormatter(detailed_formatter)
+    logger.addHandler(logging_stderr_handler)

@@ -5,7 +5,6 @@ from typing import Optional
 
 import cv2
 import enum
-import numpy as np
 
 
 class ReprMixin:
@@ -334,7 +333,7 @@ class PipelineOptions(Options):
     def __init__(self,
                  include_background=False, static_background=False,
                  num_frames=-1, frame_step=1,
-                 use_estimated_data=False,
+                 use_estimated_data=False, log_file='logs.log',
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
         :param include_background: Include the background in the reconstructed mesh.
@@ -344,6 +343,7 @@ class PipelineOptions(Options):
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
         :param use_estimated_data: Use estimated depth maps and camera parameters instead of any
             existing ground truth data.
+        :param log_file: The path to save the logs to.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         """
@@ -352,16 +352,9 @@ class PipelineOptions(Options):
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.use_estimated_data = use_estimated_data
+        self.log_file = log_file
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
-
-        if self.include_background:
-            warnings.warn("The command line option `--include_background` is deprecated and will be removed in "
-                          "future versions. KinectFusion will reconstruct the 3D background instead.")
-
-        if self.static_background:
-            warnings.warn("The command line option `--static_background` is deprecated and will be removed in "
-                          "future versions. KinectFusion will reconstruct the 3D background instead.")
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -381,6 +374,8 @@ class PipelineOptions(Options):
         group.add_argument('--use_estimated_data', action='store_true',
                            help='Use estimated depth maps and camera parameters instead of any '
                                 'existing ground truth data.')
+        group.add_argument('--log_file', type=str, help='The path to save the logs to.',
+                           default='logs.log')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
                            default='thirdparty/webxr3dvideo/docs')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
@@ -394,6 +389,7 @@ class PipelineOptions(Options):
             num_frames=args.num_frames,
             frame_step=args.frame_step,
             use_estimated_data=args.use_estimated_data,
+            log_file=args.log_file,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url
         )

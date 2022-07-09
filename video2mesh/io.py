@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import json
+import logging
 import os
 import shutil
 import struct
@@ -23,11 +24,11 @@ from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from thirdparty.colmap.scripts.python.read_write_model import read_model
 from video2mesh.geometry import pose_vec2mat, normalise_trajectory
 from video2mesh.image_processing import dilate_mask
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
-from video2mesh.utils import log, tqdm_imap, check_domain, Domain
-from thirdparty.colmap.scripts.python.read_write_model import read_model
+from video2mesh.utils import tqdm_imap, check_domain, Domain
 
 File = Union[str, Path]
 Size = Tuple[int, int]
@@ -158,7 +159,7 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     :param filename_fmt: (optional) a function that generates a frame filename from the frame index,
         e.g. 123 -> '000123.png'.
     """
-    log(f"Creating masks...")
+    logging.info(f"Creating masks...")
 
     cfg = get_cfg()
 
@@ -172,12 +173,12 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     dataset_metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
     class_names = dataset_metadata.thing_classes
-    log(class_names)
+    logging.debug(f"Instance Segmentation Model Classes: {class_names}")
 
     person_label = class_names.index('person')
     predictor = BatchPredictor(cfg)
 
-    log(f"Creating segmentation masks...")
+    logging.info(f"Creating segmentation masks...")
     os.makedirs(mask_folder, exist_ok=overwrite_ok)
     i = 0
 
@@ -247,19 +248,19 @@ class COLMAPProcessor:
         os.makedirs(self.workspace_path, exist_ok=True)
 
         if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
-            log(f"Could not find masks in folder: {self.mask_path}.")
-            log(f"Creating masks for COLMAP...")
+            logging.info(f"Could not find masks in folder: {self.mask_path}.")
+            logging.info(f"Creating masks for COLMAP...")
             rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
             create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
         else:
-            log(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
+            logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
         command = self.get_command()
 
         # TODO: Check that COLMAP is using GPU
         with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
             for line in p.stdout:
-                log(line, end='')
+                logging.debug(line.rstrip('\n'))
 
         if (return_code := p.wait()) != 0:
             raise RuntimeError(f"COLMAP exited with code {return_code}.")
@@ -302,7 +303,8 @@ class COLMAPProcessor:
         if num_models == 1:
             sparse_recon_path = pjoin(self.result_path, models[0])
         else:
-            log(f"COLMAP reconstructed {num_models} models when 1 was expected. Attempting to merge models....")
+            logging.info(
+                f"COLMAP reconstructed {num_models} models when 1 was expected. Attempting to merge models....")
 
             path_to_merged = pjoin(self.result_path, 'merged')
             os.mkdir(path_to_merged)
@@ -331,7 +333,7 @@ class COLMAPProcessor:
 
                 with subprocess.Popen(merge_command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
                     for line in p.stdout:
-                        log(line, end='')
+                        logging.debug(line.rstrip('\n'))
 
                         if 'merge failed' in line.lower():
                             merge_successful = False
@@ -340,7 +342,7 @@ class COLMAPProcessor:
                 shutil.move(tmp_merged_folder, path_to_merged)
 
             if p.returncode == 0 and merge_successful:
-                log(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")
+                logging.info(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")
 
                 path_to_refined = pjoin(self.result_path, 'merged_refined')
                 os.mkdir(path_to_refined)
@@ -352,16 +354,16 @@ class COLMAPProcessor:
                 with subprocess.Popen(bundle_adjustment_command, stdout=subprocess.PIPE, bufsize=1,
                                       universal_newlines=True) as p:
                     for line in p.stdout:
-                        log(line, end='')
+                        logging.debug(line.rstrip('\n'))
 
                 p.wait()
 
                 sparse_recon_path = path_to_refined
             else:
-                log(f"Did not merge the {num_models} sub-models successfully, skipping bundle adjustment.")
+                logging.info(f"Did not merge the {num_models} sub-models successfully, skipping bundle adjustment.")
                 sparse_recon_path = path_to_merged
 
-        log(f"Reading COLMAP model from {sparse_recon_path}...")
+        logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
 
         return cameras, images, points3d
@@ -387,7 +389,7 @@ class COLMAPProcessor:
         intrinsic[1, 1] = f
         intrinsic[0, 2] = cx
         intrinsic[1, 2] = cy
-        log("Read intrinsic parameters.")
+        logging.info("Read intrinsic parameters.")
 
         extrinsic = []
 
@@ -423,7 +425,7 @@ class COLMAPProcessor:
 
         extrinsic = np.asarray(extrinsic).squeeze()
 
-        log(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+        logging.info(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
 
@@ -449,19 +451,19 @@ class COLMAPProcessor:
         indices = sorted(images)
 
         if len(indices) < len(camera_poses):
-            warnings.warn(f"COLMAP `images` has fewer indices ({len(indices)} than "
+            logging.warning(f"COLMAP `images` has fewer indices ({len(indices)} than "
                           f"there are frames in the camera trajectory ({len(camera_poses)}).")
 
         if min(indices) > 1:
-            warnings.warn(f"COLMAP indices in `images` does not start at 1 (starts at {min(indices)}).")
+            logging.warning(f"COLMAP indices in `images` does not start at 1 (starts at {min(indices)}).")
 
         if max(indices) < len(camera_poses):
-            warnings.warn(f"COLMAP indices in `images` do not include final frame.")
+            logging.warning(f"COLMAP indices in `images` do not include final frame.")
 
         if max(indices) > len(camera_poses):
-            warnings.warn(f"COLMAP indices in `images` include frame index greater than the number of camera poses.")
+            logging.warning(f"COLMAP indices in `images` include frame index greater than the number of camera poses.")
 
-        for index in indices:
+        for index in tqdm(indices):
             image_data = images[index]
             # `image_data.name` contains the filename, which in this case is in the format '%06d.png' (e.g. 000001.png).
             # We can extract the zero-based index of the current frame from the filename.
@@ -911,16 +913,16 @@ class VTMDataset(DatasetBase):
             is_mask_dilation_iterations_same = self.metadata.depth_mask_dilation_iterations == dilation_options.num_iterations
 
             if is_mask_dilation_iterations_same:
-                log(f"Found cached masked depth at {masked_depth_path}")
+                logging.info(f"Found cached masked depth at {masked_depth_path}")
                 self._masked_depth_path = masked_depth_path
 
                 return self
             else:
-                warnings.warn(f"Found cached masked depth maps but they were created with mask dilation iterations of "
+                logging.warning(f"Found cached masked depth maps but they were created with mask dilation iterations of "
                               f"{self.metadata.depth_mask_dilation_iterations} instead of the specified "
                               f"{dilation_options.num_iterations}. The old masked depth maps will be replaced.")
 
-        log(f"Creating masked depth maps at {masked_depth_path}")
+        logging.info(f"Creating masked depth maps at {masked_depth_path}")
 
         os.makedirs(masked_depth_path, exist_ok=True)
 
@@ -937,17 +939,17 @@ class VTMDataset(DatasetBase):
         def save_depth_wrapper(args):
             save_depth(*args)
 
-        log(f"Writing masked depth to {masked_depth_path}...")
+        logging.info(f"Writing masked depth to {masked_depth_path}...")
         args = list(zip(range(len(self)), self.depth_dataset, self.mask_dataset))
         tqdm_imap(save_depth_wrapper, args)
 
         self.metadata.depth_mask_dilation_iterations = dilation_options.num_iterations
         self.metadata.save(self.path_to_metadata)
-        log(f"Update metadata")
+        logging.info(f"Update metadata")
 
         elapsed = datetime.datetime.now() - start
 
-        log(f"Created {len(os.listdir(masked_depth_path))} masked depth maps in {elapsed}")
+        logging.info(f"Created {len(os.listdir(masked_depth_path))} masked depth maps in {elapsed}")
 
         return self
 

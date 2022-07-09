@@ -1,5 +1,5 @@
 """This module contains the code for running the 'Fusion' family of 3D reconstruction algorithms (e.g. BundleFusion)."""
-
+import logging
 import os
 import re
 import subprocess
@@ -12,15 +12,15 @@ import numpy as np
 import trimesh
 from tqdm import tqdm
 
+from thirdparty.tsdf_fusion_python import fusion
 from video2mesh.geometry import pose_vec2mat
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions, MaskDilationOptions, MeshReconstructionMethod
-from video2mesh.utils import log
-from thirdparty.tsdf_fusion_python import fusion
 
 
-def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1, frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
+                frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
     """
     Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
      http://3dmatch.cs.princeton.edu).
@@ -34,7 +34,7 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
     if num_frames == -1:
         num_frames = dataset.num_frames
 
-    log("Estimating voxel volume bounds...")
+    logging.info("Estimating voxel volume bounds...")
     vol_bnds = np.zeros((3, 2))
 
     # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
@@ -64,10 +64,10 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
     else:
         voxel_size = options.sdf_voxel_size
 
-    log("Initializing voxel volume...")
+    logging.info("Initializing voxel volume...")
     tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=voxel_size)
 
-    log("Fusing frames...")
+    logging.info("Fusing frames...")
 
     for i in tqdm(frame_range):
         color_image = dataset.rgb_dataset[i]
@@ -105,8 +105,8 @@ class BundleFusionConfig:
 
     def __setitem__(self, key, value):
         if key in self.config_dict and (value_type := type(value)) != (expected_type := type(self.config_dict[key])):
-            warnings.warn(f"The config file entry \"{key}\" is of type {expected_type} "
-                          f"but it is being set to a new value of type {value_type}")
+            logging.warning(f"The config file entry \"{key}\" is of type {expected_type} "
+                            f"but it is being set to a new value of type {value_type}")
 
         self.config_dict[key] = value
 
@@ -241,13 +241,13 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
     if num_frames == -1:
         num_frames = dataset.num_frames
 
-    log("Creating masked depth maps for BundleFusion...")
+    logging.info("Creating masked depth maps for BundleFusion...")
     dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
     dataset_path = os.path.abspath(dataset.base_path)
     bundle_fusion_output_path = pjoin(dataset_path, output_folder)
     os.makedirs(bundle_fusion_output_path, exist_ok=dataset.overwrite_ok)
 
-    log("Configuring BundleFusion...")
+    logging.info("Configuring BundleFusion...")
     bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
     default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
     config = BundleFusionConfig.load(default_config_path)
@@ -272,7 +272,7 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
     cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
            dataset_path, dataset.masked_depth_folder]
     log_path = pjoin(bundle_fusion_output_path, 'log.txt')
-    log(f"Running BundleFusion with command '{' '.join(cmd)}'")
+    logging.info(f"Running BundleFusion with command '{' '.join(cmd)}'")
 
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p, \
             open(log_path, mode='w') as f, \

@@ -1,20 +1,18 @@
 import argparse
 import datetime
 import json
+import logging
 import os
 import shutil
-import sys
 import time
-import warnings
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Set, List
+from typing import Optional, List
 
 import numpy as np
 import openmesh as om
 import trimesh
 from PIL import Image
-from numpy.polynomial import Polynomial
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -29,7 +27,7 @@ from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOpti
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StaticMeshOptions, \
     ForegroundTrajectorySmoothingOptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
-from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, log, tqdm_imap
+from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
 
 
 class Pipeline:
@@ -88,14 +86,14 @@ class Pipeline:
 
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
-        log("Configured dataset")
+        logging.info("Configured dataset")
 
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform(dataset)
 
-        log("Creating background mesh(es)...")
+        logging.info("Creating background mesh(es)...")
 
         # TODO: Rename `include_background` to something that describes its purpose more accurately.
         if self.include_background or self.static_background:
@@ -126,7 +124,7 @@ class Pipeline:
 
         self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
 
-        log("Creating foreground mesh(es)...")
+        logging.info("Creating foreground mesh(es)...")
         if self.fts_options.num_epochs > 0:
             smoothed_trajectory = ForegroundPoseOptimiser(dataset, learning_rate=self.fts_options.learning_rate,
                                                           num_epochs=self.fts_options.num_epochs).run()
@@ -138,7 +136,7 @@ class Pipeline:
 
         self._write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
 
-        log("Aligning foreground and background scenes...")
+        logging.info("Aligning foreground and background scenes...")
         foreground_scene.apply_transform(centering_transform)
         background_scene.apply_transform(centering_transform)
 
@@ -233,16 +231,19 @@ class Pipeline:
         elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
         elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / num_frames)
 
-        log('#' + '=' * 78 + '#')
-        log('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
-        log('#' + '=' * 78 + '#')
-        log(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
-        log(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
-        log(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
-        log(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
-        log(f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
-        log(f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
-        log(f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
+        logging.info('#' + '=' * 78 + '#')
+        logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
+        logging.info('#' + '=' * 78 + '#')
+        logging.info(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
+        logging.info(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
+        logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
+        logging.info(
+            f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
+        logging.info(
+            f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
+        logging.info(
+            f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
     def _get_centering_transform(self, dataset):
         camera_trajectory = dataset.camera_trajectory
@@ -276,7 +277,7 @@ class Pipeline:
         export_file(f"{fg_scene_name}.glb")
         export_file(f"{bg_scene_name}.glb")
 
-        log(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
+        logging.info(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
     def get_dataset(self):
         storage_options = self.storage_options
@@ -395,8 +396,7 @@ class Pipeline:
 
                 if coverage_ratio < 0.01:
                     # TODO: Make minimum coverage ratio configurable?
-                    # TODO: Change this warning to log output that can be filtered by severity/level.
-                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1} due to insufficient coverage.")
+                    logging.debug(f"Skipping object #{object_id} in frame {i + 1} due to insufficient coverage.")
                     continue
 
                 if is_object:
@@ -405,7 +405,7 @@ class Pipeline:
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
 
                 if len(vertices) < 9:
-                    warnings.warn(f"Skipping object #{object_id} in frame {i + 1} "
+                    logging.debug(f"Skipping object #{object_id} in frame {i + 1} "
                                   f"due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
@@ -431,8 +431,7 @@ class Pipeline:
 
             if len(texture_atlas) == 0:
                 mesh = trimesh.Trimesh()
-                # TODO: Change this warning to log output that can be filtered by severity/level.
-                warnings.warn(f"Mesh for frame #{i + 1} is empty!")
+                logging.debug(f"Mesh for frame #{i + 1} is empty!")
             else:
                 packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
 
@@ -482,7 +481,7 @@ class Pipeline:
         else:
             frames = range(num_frames)
 
-        log("Processing frame data...")
+        logging.info("Processing frame data...")
         meshes = tqdm_imap(process_frame, frames)
 
         for i, mesh in zip(frames, meshes):
@@ -642,7 +641,7 @@ class Pipeline:
             else:
                 mask[np.concatenate(connected_components)] = True
         else:
-            warnings.warn(f"Mesh found with no connected components.")
+            logging.warning(f"Mesh found with no connected components.")
 
         mesh.update_faces(mask)
 
@@ -752,7 +751,7 @@ class Pipeline:
         """
         output_path = pjoin(base_folder, f'{scene_name}.glb')
         trimesh.exchange.export.export_scene(scene, output_path)
-        log("Wrote mesh data to disk")
+        logging.info("Wrote mesh data to disk")
 
         return output_path
 
@@ -812,7 +811,6 @@ def main():
     StaticMeshOptions.add_args(parser)
 
     args = parser.parse_args()
-    log(args)
 
     video2mesh_options = PipelineOptions.from_args(args)
     storage_options = StorageOptions.from_args(args)
@@ -821,6 +819,9 @@ def main():
     decimation_options = MeshDecimationOptions.from_args(args)
     colmap_options = COLMAPOptions.from_args(args)
     static_mesh_options = StaticMeshOptions.from_args(args)
+
+    setup_logger(video2mesh_options.log_file)
+    logging.debug(args)
 
     program = Pipeline(options=video2mesh_options,
                        storage_options=storage_options,
