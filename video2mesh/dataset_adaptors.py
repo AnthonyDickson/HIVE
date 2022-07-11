@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import subprocess
+from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, Union, Tuple, List
@@ -25,10 +26,11 @@ from video2mesh.options import COLMAPOptions, StaticMeshOptions
 from video2mesh.utils import tqdm_imap
 
 
-class DatasetAdaptor(DatasetBase):
+class DatasetAdaptor(DatasetBase, ABC):
     """Creates a copy of a dataset in the VTMDataset format."""
 
-    def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, overwrite_ok=False):
+    def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
+                 colmap_options=COLMAPOptions()):
         """
         :param base_path: The path to the dataset.
         :param output_path: The path to write the new dataset to.
@@ -36,12 +38,14 @@ class DatasetAdaptor(DatasetBase):
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         """
         super().__init__(base_path=base_path, overwrite_ok=overwrite_ok)
 
         self.output_path = output_path
         self.num_frames = num_frames
         self.frame_step = frame_step
+        self.colmap_options = colmap_options
 
     def get_full_num_frames(self) -> int:
         """The number of frames in the non-truncated dataset."""
@@ -112,6 +116,7 @@ class DatasetAdaptor(DatasetBase):
         This may be faster than calling `.get_frame(i)` followed by writing the frame to the destination folder.
 
         :param output_path: The folder to save the frames to.
+        :param num_frames: How many frames to copy. If set to -1, copy all frames.
         """
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
@@ -145,16 +150,16 @@ class DatasetAdaptor(DatasetBase):
         """
         return self._convert(from_gt=True)
 
-    def convert_from_rgb(self, colmap_options=COLMAPOptions()) -> VTMDataset:
+    def convert_from_rgb(self) -> VTMDataset:
         """
         Read a video file and create a VTMDataset with estimated camera parameters and depth maps.
 
         :return: The newly created dataset object.
         """
         # TODO: Add way to pass arguments to PoseOptimiser object.
-        return self._convert(from_gt=False, colmap_options=colmap_options)
+        return self._convert(from_gt=False)
 
-    def _convert(self, from_gt: bool, colmap_options=COLMAPOptions()) -> VTMDataset:
+    def _convert(self, from_gt: bool) -> VTMDataset:
         if cached_dataset := self._try_get_cached_dataset(is_gt=from_gt):
             logging.info(f"Found cached dataset at {self.output_path}.")
             return cached_dataset
@@ -186,8 +191,8 @@ class DatasetAdaptor(DatasetBase):
             estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
 
             debug_folder = pjoin(self.output_path, 'debug')
-            camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, colmap_options,
-                                                                                output_depth_folder, metadata)
+            camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
+                                                                                metadata)
 
         logging.info(f"Creating camera matrix file.")
         camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
@@ -230,7 +235,7 @@ class DatasetAdaptor(DatasetBase):
         if os.path.isdir(self.output_path):
             if self.overwrite_ok:
                 logging.warning(f"Found a dataset in {self.output_path} but it was created with different settings."
-                              f"Since `overwrite_ok` is set to `True`, the existing dataset will be deleted.")
+                                f"Since `overwrite_ok` is set to `True`, the existing dataset will be deleted.")
                 shutil.rmtree(self.output_path)
             else:
                 raise RuntimeError(f"The output path {self.output_path} already exists! "
@@ -269,13 +274,12 @@ class DatasetAdaptor(DatasetBase):
 
         return frames, frames_subset
 
-    def _estimate_camera_parameters(self, output_folder: str, colmap_options: COLMAPOptions, output_depth_folder: str,
-                                    metadata: DatasetMetadata) -> Tuple[np.ndarray, np.ndarray]:
+    def _estimate_camera_parameters(self, output_folder: str, output_depth_folder: str, metadata: DatasetMetadata) -> \
+            Tuple[np.ndarray, np.ndarray]:
         """
         Estimate the camera parameters (intrinsics and extrinsics) with COLMAP.
 
         :param output_folder: The folder to save the COLMAP output to.
-        :param colmap_options: The configuration for COLMAP.
         :param output_depth_folder: Where the estimated depth maps have been saved to.
         :param metadata: The metadata for the dataset.
         :return: The 3x3 camera matrix and the Nx7 camera poses.
@@ -309,7 +313,7 @@ class DatasetAdaptor(DatasetBase):
         logging.info(f"Check {colmap_log_file} for the logs.")
 
         colmap_processor = COLMAPProcessor(image_path=colmap_rgb_path, workspace_path=colmap_workspace_path,
-                                           colmap_options=colmap_options)
+                                           colmap_options=self.colmap_options)
 
         with open(colmap_log_file, 'w') as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
             colmap_processor.run()
@@ -446,17 +450,20 @@ class TUMAdaptor(DatasetAdaptor):
     depth_folder = "depth"
     required_folders = [rgb_folder, depth_folder]
 
-    def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1,
-                 is_16_bit=True, overwrite_ok=False):
+    def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
+                 colmap_options=COLMAPOptions(), is_16_bit=True):
         """
-        :param base_path: The path to folder containing the dataset.
+        :param base_path: The path to the dataset.
         :param output_path: The path to write the new dataset to.
+        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         :param is_16_bit: Whether the images are stored with 16-bit values or 32-bit values.
-        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
         """
-        super().__init__(base_path=base_path, output_path=output_path,
-                         num_frames=num_frames, frame_step=frame_step,
-                         overwrite_ok=overwrite_ok)
+        super().__init__(base_path=base_path, output_path=output_path, overwrite_ok=overwrite_ok, num_frames=num_frames,
+                         frame_step=frame_step, colmap_options=colmap_options)
 
         self.base_path = Path(base_path)
         self.pose_path = Path(pjoin(base_path, str(Path(self.pose_path))))
@@ -565,13 +572,14 @@ class TUMAdaptor(DatasetAdaptor):
         return len(a)
 
     def get_metadata(self, is_gt: bool):
+        # TODO: Make the depth mask dilation iterations configurable.
         # This gets the default value for `depth_mask_dilation_iterations`.
         depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
 
         return DatasetMetadata(num_frames=self.num_frames, frame_step=self.frame_step,
                                fps=self.fps, width=self.width, height=self.height, is_gt=is_gt,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
-                               depth_scale=VTMDataset.depth_scaling_factor)
+                               depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_camera_matrix(self) -> np.ndarray:
         return self.intrinsic_matrix
@@ -600,24 +608,27 @@ class TUMAdaptor(DatasetAdaptor):
         tqdm_imap(copy_image, range(num_frames))
 
 
-class VideoAdaptorBase(DatasetAdaptor):
+class VideoAdaptorBase(DatasetAdaptor, ABC):
     """Base class for adaptors of video datasets."""
 
-    def __init__(self, base_path: Union[str, Path], output_path: Union[str, Path], video_path: Union[str, Path],
-                 num_frames=-1, frame_step=1,
-                 overwrite_ok=False,
+    def __init__(self, base_path: File, output_path: File, video_path: Union[str, Path], overwrite_ok=False,
+                 num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
                  resize_to: Optional[Union[int, Size]] = None):
         """
-        :param base_path: The path to the video file.
-        :param output_path: The path to write the new dataset to.
+        :param base_path: The folder containing the video file.
         :param video_path: The path to the RGB video.
-        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
+        :param output_path: The path to write the new dataset to.
+        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         """
-        super().__init__(base_path=base_path, output_path=output_path,
-                         num_frames=num_frames, frame_step=frame_step, overwrite_ok=overwrite_ok)
+        super().__init__(base_path=base_path, output_path=output_path, overwrite_ok=overwrite_ok, num_frames=num_frames,
+                         frame_step=frame_step, colmap_options=colmap_options)
 
         self.video_path = video_path
 
@@ -716,7 +727,7 @@ class VideoAdaptorBase(DatasetAdaptor):
         return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width, height=height,
                                is_gt=is_gt, frame_step=self.frame_step,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
-                               depth_scale=VTMDataset.depth_scaling_factor)
+                               depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_full_num_frames(self):
         with self.open_video(self.video_path) as video:
@@ -770,14 +781,17 @@ class VideoAdaptorBase(DatasetAdaptor):
 class VideoAdaptor(VideoAdaptorBase):
     """Converts an RGB video to the VTMDataset format."""
 
-    def __init__(self, base_path: Union[str, Path], output_path: Union[str, Path],
-                 num_frames=-1, frame_step=1,
-                 overwrite_ok=False,
+    def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
+                 colmap_options=COLMAPOptions(),
                  resize_to: Optional[Union[int, Size]] = None):
         """
-        :param base_path: The path to the video file.
+        :param base_path: The path to the video.
         :param output_path: The path to write the new dataset to.
-        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
+        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
@@ -787,8 +801,9 @@ class VideoAdaptor(VideoAdaptorBase):
         video_filename = path.name
         video_path = pjoin(base_path, video_filename)
 
-        super().__init__(base_path=base_path, output_path=output_path, video_path=video_path, resize_to=resize_to,
-                         num_frames=num_frames, frame_step=frame_step, overwrite_ok=overwrite_ok)
+        super().__init__(base_path=base_path, output_path=output_path, video_path=video_path, num_frames=num_frames,
+                         frame_step=frame_step, overwrite_ok=overwrite_ok, colmap_options=colmap_options,
+                         resize_to=resize_to)
 
     @classmethod
     def _validate_dataset(cls, base_path):
@@ -851,16 +866,19 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
     depth_confidence_levels = [0, 1, 2]
 
-    def __init__(self, base_path: Union[str, Path], output_path: Union[str, Path],
-                 num_frames=-1, frame_step=1,
-                 overwrite_ok=False,
+    def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
+                 colmap_options=COLMAPOptions(),
                  resize_to: Optional[Union[int, Size]] = None,
                  depth_confidence_filter_level=0):
         """
         :param base_path: The path to the dataset.
         :param output_path: The path to write the new dataset to.
-        :param overwrite_ok: Whether it is okay to overwrite existing depth maps and/or instance segmentation masks.
-        :param resize_to: The resolution (width, height) to resize the images to.
+        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
+        :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth
@@ -869,8 +887,9 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         """
         video_path = pjoin(base_path, StrayScannerAdaptor.video_filename)
 
-        super().__init__(base_path=base_path, output_path=output_path, video_path=video_path, resize_to=resize_to,
-                         num_frames=num_frames, frame_step=frame_step, overwrite_ok=overwrite_ok)
+        super().__init__(base_path=base_path, output_path=output_path, video_path=video_path, num_frames=num_frames,
+                         frame_step=frame_step, overwrite_ok=overwrite_ok, colmap_options=colmap_options,
+                         resize_to=resize_to)
 
         self.depth_confidence_filter_level = depth_confidence_filter_level
 

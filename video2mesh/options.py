@@ -1,10 +1,8 @@
-import warnings
-
 import argparse
+import enum
 from typing import Optional
 
 import cv2
-import enum
 
 
 class ReprMixin:
@@ -72,14 +70,13 @@ class StorageOptions(Options):
 class COLMAPOptions(Options):
     quality_choices = ('low', 'medium', 'high', 'extreme')
 
-    def __init__(self, is_single_camera=True, dense=False, quality='low', use_raw_pose=False,
-                 binary_path='/usr/local/bin/colmap', vocab_path='/root/.cache/colmap/vocab.bin'):
+    def __init__(self, is_single_camera=True, dense=False, quality='low', binary_path='/usr/local/bin/colmap',
+                 vocab_path='/root/.cache/colmap/vocab.bin'):
         self.binary_path = binary_path
         self.vocab_path = vocab_path
         self.is_single_camera = is_single_camera
         self.dense = dense
         self.quality = quality
-        self.use_raw_pose = use_raw_pose
 
         assert quality in COLMAPOptions.quality_choices, f"Quality must be one of: {COLMAPOptions.quality_choices}, got {quality}."
 
@@ -93,9 +90,6 @@ class COLMAPOptions(Options):
         group.add_argument('--dense', action='store_true', help='Whether to run dense reconstruction.')
         group.add_argument('--quality', type=str, help='The quality of the COLMAP reconstruction.',
                            default='low', choices=COLMAPOptions.quality_choices)
-        group.add_argument('--use_raw_pose', action='store_true',
-                           help='Whether to use the pose data straight from COLMAP, or to convert the pose data into a '
-                                'more "normal" coordinate system.')
         group.add_argument('--binary_path', type=str, help='The path to the COLMAP binary.',
                            default='/usr/local/bin/colmap')
         group.add_argument('--vocab_path', type=str,
@@ -104,13 +98,45 @@ class COLMAPOptions(Options):
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'COLMAPOptions':
+        return COLMAPOptions(is_single_camera=not args.multiple_cameras, dense=args.dense, quality=args.quality,
+                             binary_path=args.binary_path, vocab_path=args.vocab_path)
+
+    def __eq__(self, other) -> bool:
+        return (
+                self.binary_path == other.binary_path and
+                self.vocab_path == other.vocab_path and
+                self.is_single_camera == other.is_single_camera and
+                self.dense == other.dense and
+                self.quality == other.quality
+        )
+
+    def to_json(self) -> dict:
+        """
+        Convert the COLMAP configuration to a JSON friendly dictionary.
+        :return: A dictionary containing the COLMAP configuration.
+        """
+        return dict(
+            binary_path=self.binary_path,
+            vocab_path=self.vocab_path,
+            is_single_camera=self.is_single_camera,
+            dense=self.dense,
+            quality=self.quality
+        )
+
+    @classmethod
+    def from_json(cls, json_dict: dict) -> 'COLMAPOptions':
+        """
+        Get a COLMAP configuration from a JSON dictionary.
+
+        :param json_dict: A JSON formatted dictionary.
+        :return: The COLMAP configuration.
+        """
         return COLMAPOptions(
-            binary_path=args.binary_path,
-            vocab_path=args.vocab_path,
-            is_single_camera=not args.multiple_cameras,
-            dense=args.dense,
-            quality=args.quality,
-            use_raw_pose=args.use_raw_pose
+            binary_path=str(json_dict['binary_path']),
+            vocab_path=str(json_dict['vocab_path']),
+            is_single_camera=bool(json_dict['is_single_camera']),
+            dense=bool(json_dict['dense']),
+            quality=str(json_dict['quality']),
         )
 
 

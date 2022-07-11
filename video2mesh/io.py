@@ -368,18 +368,14 @@ class COLMAPProcessor:
 
         return cameras, images, points3d
 
-    def load_camera_params(self, raw_pose: Optional[bool] = True):
+    def load_camera_params(self, raw_pose: bool = True):
         """
         Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
-        :param raw_pose: (optional) Whether to use the raw pose data straight from COLMAP.
-                         This value will override `COLMAPProcessor.colmap_options.use_raw_pose` if set.
+        :param raw_pose: Whether to use the raw pose data straight from COLMAP.
         :return: A 2-tuple containing the camera matrix (intrinsic parameters) and camera trajectory (extrinsic
             parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
             translation vector, in that order.
         """
-        if raw_pose is None:
-            raw_pose = self.colmap_options.use_raw_pose
-
         cameras, images, points3d = self._load_model()
 
         f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
@@ -452,7 +448,7 @@ class COLMAPProcessor:
 
         if len(indices) < len(camera_poses):
             logging.warning(f"COLMAP `images` has fewer indices ({len(indices)} than "
-                          f"there are frames in the camera trajectory ({len(camera_poses)}).")
+                            f"there are frames in the camera trajectory ({len(camera_poses)}).")
 
         if min(indices) > 1:
             logging.warning(f"COLMAP indices in `images` does not start at 1 (starts at {min(indices)}).")
@@ -687,7 +683,8 @@ class DatasetMetadata:
     """Information about a dataset."""
 
     def __init__(self, num_frames: int, fps: float, width: int, height: int, is_gt: bool,
-                 depth_mask_dilation_iterations: int, depth_scale: float, max_depth=10.0, frame_step=1):
+                 depth_mask_dilation_iterations: int, depth_scale: float, max_depth=10.0, frame_step=1,
+                 colmap_options=COLMAPOptions()):
         """
         :param num_frames: The number of frames in the video sequence.
         :param fps: The framerate at which the video was captured.
@@ -710,6 +707,7 @@ class DatasetMetadata:
         self.max_depth = max_depth
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.is_gt = is_gt
+        self.colmap_options = colmap_options
 
         if not isinstance(is_gt, bool):
             raise ValueError(f"is_gt must be a boolean, got {type(is_gt)}.")
@@ -731,13 +729,16 @@ class DatasetMetadata:
                np.isclose(self.depth_scale, other.depth_scale) and \
                np.isclose(self.max_depth, other.max_depth) and \
                self.depth_mask_dilation_iterations == other.depth_mask_dilation_iterations and \
-               self.is_gt == other.is_gt
+               self.is_gt == other.is_gt and \
+               self.colmap_options == other.colmap_options
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
                f"frame_step={self.frame_step}, width={self.width}, height={self.height}, " \
                f"max_depth={self.max_depth}, is_gt={self.is_gt}, " \
-               f"depth_mask_dilation_iterations={self.depth_mask_dilation_iterations}, depth_scale={self.depth_scale})"
+               f"depth_mask_dilation_iterations={self.depth_mask_dilation_iterations}, " \
+               f"depth_scale={self.depth_scale}, " \
+               f"colmap_options={repr(self.colmap_options)})"
 
     def __str__(self):
         return f"Dataset info: {self.num_frames} frames, " \
@@ -750,6 +751,45 @@ class DatasetMetadata:
 
         return datetime.timedelta(seconds=total_seconds)
 
+    def to_json(self) -> dict:
+        """
+        Convert the metadata to a JSON friendly dictionary.
+        :return: A dictionary containing the metadata.
+        """
+        return dict(
+            num_frames=self.num_frames,
+            fps=self.fps,
+            frame_step=self.frame_step,
+            width=self.width,
+            height=self.height,
+            depth_scale=self.depth_scale,
+            max_depth=self.max_depth,
+            depth_mask_dilation_iterations=self.depth_mask_dilation_iterations,
+            is_gt=self.is_gt,
+            colmap_options=self.colmap_options.to_json()
+        )
+
+    @staticmethod
+    def from_json(json_dict: dict) -> 'DatasetMetadata':
+        """
+        Get a dataset metadata from a JSON dictionary.
+
+        :param json_dict: A JSON formatted dictionary.
+        :return: The dataset metadata.
+        """
+        return DatasetMetadata(
+            num_frames=int(json_dict['num_frames']),
+            frame_step=int(json_dict['frame_step']),
+            fps=float(json_dict['fps']),
+            width=int(json_dict['width']),
+            height=int(json_dict['height']),
+            is_gt=bool(json_dict['is_gt']),
+            depth_scale=float(json_dict['depth_scale']),
+            max_depth=float(json_dict['max_depth']),
+            depth_mask_dilation_iterations=int(json_dict['depth_mask_dilation_iterations']),
+            colmap_options=COLMAPOptions.from_json(json_dict['colmap_options'])
+        )
+
     def save(self, f: Union[File, IO]):
         """
         Write the metadata to disk as a JSON file.
@@ -758,9 +798,9 @@ class DatasetMetadata:
         """
         if isinstance(f, (str, Path)):
             with open(f, 'w') as file:
-                json.dump(self.__dict__, file)
+                json.dump(self.to_json(), file)
         else:
-            json.dump(self.__dict__, f)
+            json.dump(self.to_json(), f)
 
     @staticmethod
     def load(f: Union[File, IO]) -> 'DatasetMetadata':
@@ -772,19 +812,11 @@ class DatasetMetadata:
         """
         if isinstance(f, (str, Path)):
             with open(f, 'r') as file:
-                kwargs = json.load(file)
+                json_dict = json.load(file)
         else:
-            kwargs = json.load(f)
+            json_dict = json.load(f)
 
-        return DatasetMetadata(num_frames=int(kwargs['num_frames']),
-                               frame_step=int(kwargs['frame_step']),
-                               fps=float(kwargs['fps']),
-                               width=int(kwargs['width']),
-                               height=int(kwargs['height']),
-                               is_gt=bool(kwargs['is_gt']),
-                               depth_scale=float(kwargs['depth_scale']),
-                               max_depth=float(kwargs['max_depth']),
-                               depth_mask_dilation_iterations=int(kwargs['depth_mask_dilation_iterations']))
+        return DatasetMetadata.from_json(json_dict)
 
 
 class VTMDataset(DatasetBase):
@@ -918,9 +950,10 @@ class VTMDataset(DatasetBase):
 
                 return self
             else:
-                logging.warning(f"Found cached masked depth maps but they were created with mask dilation iterations of "
-                              f"{self.metadata.depth_mask_dilation_iterations} instead of the specified "
-                              f"{dilation_options.num_iterations}. The old masked depth maps will be replaced.")
+                logging.warning(
+                    f"Found cached masked depth maps but they were created with mask dilation iterations of "
+                    f"{self.metadata.depth_mask_dilation_iterations} instead of the specified "
+                    f"{dilation_options.num_iterations}. The old masked depth maps will be replaced.")
 
         logging.info(f"Creating masked depth maps at {masked_depth_path}")
 

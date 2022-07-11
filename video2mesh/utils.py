@@ -199,7 +199,7 @@ def setup_logger(log_path: Optional[str] = None):
 
             self.__level = level
 
-        def filter(self,  record: logging.LogRecord) -> bool:
+        def filter(self, record: logging.LogRecord) -> bool:
             return record.levelno <= self.__level
 
     # All messages that are DEBUG or INFO will be captured by this handler and printed to stdout.

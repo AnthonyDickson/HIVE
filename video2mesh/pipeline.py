@@ -294,7 +294,8 @@ class Pipeline:
                     output_path=f"{dataset_path}_vtm",
                     num_frames=self.options.num_frames,
                     frame_step=self.options.frame_step,
-                    overwrite_ok=storage_options.overwrite_ok
+                    overwrite_ok=storage_options.overwrite_ok,
+                    colmap_options=colmap_options
                 )
             elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
                 dataset_converter = StrayScannerAdaptor(
@@ -303,6 +304,7 @@ class Pipeline:
                     num_frames=self.options.num_frames,
                     frame_step=self.options.frame_step,
                     overwrite_ok=storage_options.overwrite_ok,
+                    colmap_options=colmap_options,
                     # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
                     resize_to=640,
                     depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
@@ -316,6 +318,7 @@ class Pipeline:
                     num_frames=self.options.num_frames,
                     frame_step=self.options.frame_step,
                     overwrite_ok=storage_options.overwrite_ok,
+                    colmap_options=colmap_options,
                     resize_to=640
                 )
             elif not os.path.isdir(dataset_path):
@@ -324,7 +327,7 @@ class Pipeline:
                 raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
 
             if self.use_estimated_data:
-                dataset = dataset_converter.convert_from_rgb(colmap_options)
+                dataset = dataset_converter.convert_from_rgb()
             else:
                 dataset = dataset_converter.convert_from_ground_truth()
 
