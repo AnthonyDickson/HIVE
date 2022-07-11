@@ -388,7 +388,7 @@ class DatasetAdaptor(DatasetBase):
         :return: The interpolated Nx7 camera poses.
         """
         src_num_frames = len(poses)
-        dst_num_frames = max(keyframes)
+        dst_num_frames = max(keyframes) + 1
 
         interpolated_poses = np.zeros((dst_num_frames, poses.shape[1]))
 
@@ -401,19 +401,14 @@ class DatasetAdaptor(DatasetBase):
             start_position = poses[src_start, 4:]
             end_position = poses[src_end, 4:]
 
-            if dst_end == dst_num_frames:
-                dst_end_point = dst_end
-            else:
-                dst_end_point = dst_end + 1
-
             key_frame_times = [0, 1]
-            times_to_interpolate = np.linspace(0, 1, num=dst_end_point - dst_start)
+            times_to_interpolate = np.linspace(0, 1, num=(dst_end + 1) - dst_start)
 
             slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
             lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
 
-            interpolated_poses[dst_start:dst_end_point, 4:] = lerp(times_to_interpolate)
-            interpolated_poses[dst_start:dst_end_point, :4] = slerp(times_to_interpolate).as_quat()
+            interpolated_poses[dst_start:dst_end + 1, 4:] = lerp(times_to_interpolate)
+            interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
 
         return interpolated_poses
 

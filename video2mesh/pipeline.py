@@ -485,8 +485,8 @@ class Pipeline:
         meshes = tqdm_imap(process_frame, frames)
 
         for i, mesh in zip(frames, meshes):
-            # TODO: Skip empty meshes so the logs don't get spammed with 'skipping empty mesh'
-            scene.add_geometry(mesh, node_name=f"{i:06d}")
+            if not mesh.is_empty:
+                scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene
 
@@ -641,7 +641,7 @@ class Pipeline:
             else:
                 mask[np.concatenate(connected_components)] = True
         else:
-            logging.warning(f"Mesh found with no connected components.")
+            logging.debug(f"Mesh found with no connected components.")
 
         mesh.update_faces(mask)
 

@@ -173,7 +173,6 @@ def setup_logger(log_path: Optional[str] = None):
 
     :param log_path: (optional) The file to save the logs to. If set to None, logs will not be written to disk.
     """
-    # TODO: Get rid of logs from installed packages from DEBUG level output.
     # TODO: Different files for 'simple' and 'detailed' output?
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -215,3 +214,6 @@ def setup_logger(log_path: Optional[str] = None):
     logging_stderr_handler.setLevel(logging.WARNING)
     logging_stderr_handler.setFormatter(detailed_formatter)
     logger.addHandler(logging_stderr_handler)
+
+    # This line prevents PILLOW from polluting the debug logs.
+    logging.getLogger('PIL').setLevel(logging.INFO)
