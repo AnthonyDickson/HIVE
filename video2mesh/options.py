@@ -9,7 +9,15 @@ class ReprMixin:
     """Mixin that provides a basic string representation for objects."""
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({', '.join(list(map(lambda k: f'{k}={self.__getattribute__(k)}', self.__dict__)))})"
+        def format_key_value_pair(key):
+            value = self.__getattribute__(key)
+
+            if isinstance(value, str):
+                return f"{key}='{value}'"
+            else:
+                return f"{key}={value}"
+
+        return f"{self.__class__.__name__}({', '.join(list(map(format_key_value_pair, self.__dict__)))})"
 
     def __str__(self):
         return repr(self)
@@ -359,7 +367,8 @@ class PipelineOptions(Options):
     def __init__(self,
                  include_background=False, static_background=False,
                  num_frames=-1, frame_step=1,
-                 use_estimated_data=False, log_file='logs.log',
+                 estimate_pose=False, estimate_depth=False,
+                 log_file='logs.log',
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
         :param include_background: Include the background in the reconstructed mesh.
@@ -367,8 +376,8 @@ class PipelineOptions(Options):
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
-        :param use_estimated_data: Use estimated depth maps and camera parameters instead of any
-            existing ground truth data.
+        :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
+        :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param log_file: The path to save the logs to.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
@@ -377,7 +386,8 @@ class PipelineOptions(Options):
         self.static_background = static_background
         self.num_frames = num_frames
         self.frame_step = frame_step
-        self.use_estimated_data = use_estimated_data
+        self.estimate_pose = estimate_pose
+        self.estimate_depth = estimate_depth
         self.log_file = log_file
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
@@ -397,9 +407,10 @@ class PipelineOptions(Options):
                            help='The frequency to sample frames at for COLMAP and pose optimisation. '
                                 'If set to 1, samples all frames (i.e. no effect). '
                                 'Otherwise if set to n | n > 1, samples every n frames.')
-        group.add_argument('--use_estimated_data', action='store_true',
-                           help='Use estimated depth maps and camera parameters instead of any '
-                                'existing ground truth data.')
+        group.add_argument('--estimate_pose', action='store_true',
+                           help='Whether to estimate camera parameters with COLMAP or use provided ground truth data.')
+        group.add_argument('--estimate_depth', action='store_true',
+                           help='Whether to estimate depth maps or use provided ground truth depth maps.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
@@ -414,7 +425,8 @@ class PipelineOptions(Options):
             static_background=args.static_background,
             num_frames=args.num_frames,
             frame_step=args.frame_step,
-            use_estimated_data=args.use_estimated_data,
+            estimate_pose=args.estimate_pose,
+            estimate_depth=args.estimate_depth,
             log_file=args.log_file,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url

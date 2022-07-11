@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os.path
 import shutil
 import warnings
@@ -18,7 +19,7 @@ from video2mesh.dataset_adaptors import TUMAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, invert_trajectory
-from video2mesh.io import VTMDataset, COLMAPProcessor, temporary_trajectory
+from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StaticMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
 from video2mesh.utils import log
@@ -137,8 +138,8 @@ def create_point_cloud(dataset: VTMDataset, index: int):
     mask = dataset.mask_dataset[index] > 0
     depth[mask] = 0.0
 
-    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-        o3d.geometry.RGBDImage.create_from_color_and_depth(
+    pcd = o3d.geometry.PointCloud().create_from_rgbd_image(
+        image=o3d.geometry.RGBDImage().create_from_color_and_depth(
             color=o3d.geometry.Image(rgb),
             depth=o3d.geometry.Image(depth),
             depth_scale=1.0,
@@ -146,7 +147,8 @@ def create_point_cloud(dataset: VTMDataset, index: int):
             convert_rgb_to_intensity=False
         ),
         intrinsic=o3d.camera.PinholeCameraIntrinsic(dataset.frame_width, dataset.frame_height, dataset.fx, dataset.fy,
-                                                    dataset.cx, dataset.cy)
+                                                    dataset.cx, dataset.cy),
+        extrinsic=np.eye(4)
     )
 
     return pcd
@@ -247,7 +249,7 @@ def icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud):
 
 
 def get_icp_trajectory(dataset: VTMDataset, init_with_gt=False):
-    log(f"Aligning point clouds with ICP...")
+    logging.info(f"Aligning point clouds with ICP...")
     num_frames = dataset.num_frames
     relative_poses = []
 
@@ -367,11 +369,11 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_t.txt"), error_t)
 
-        log(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}:")
-        log(f"\tATE: {np.mean(ate):.2f}m")
-        log(f"\tMATE: {np.mean(np.abs(trajectory_error)):.2f}m")
-        log(f"\tRPE (rot): {np.mean(np.rad2deg(error_r)):.2f}\N{DEGREE SIGN}")
-        log(f"\tRPE (tra): {np.mean(error_t):.2f}m")
+        logging.info(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}:")
+        logging.info(f"\tATE: {np.mean(ate):.2f}m")
+        logging.info(f"\tMATE: {np.mean(np.abs(trajectory_error)):.2f}m")
+        logging.info(f"\tRPE (rot): {np.mean(np.rad2deg(error_r)):.2f}\N{DEGREE SIGN}")
+        logging.info(f"\tRPE (tra): {np.mean(error_t):.2f}m")
 
         add_key('rpe', dataset_name, pred_label, results_dict)
         add_key('ate', dataset_name, pred_label, results_dict)
@@ -471,12 +473,12 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             frame_step=frame_step
         ).convert_from_rgb()
 
-        dataset_cm = VTMDataset(dataset_gt.base_path)
-        dataset_cm.camera_matrix, dataset_cm.camera_trajectory = COLMAPProcessor(
-            pjoin(dataset_estimated.path_to_rgb_frames),
-            workspace_path=pjoin(dataset_estimated.base_path, 'debug', 'colmap', 'workspace')
-        ).load_camera_params()
-        dataset_cm.camera_trajectory = dataset_cm.camera_trajectory[:len(dataset_gt)]
+        dataset_cm = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
+            num_frames=num_frames,
+            frame_step=frame_step
+        ).convert(estimate_pose=True, estimate_depth=False)
 
         # Trajectory comparisons on ground truth
         run_trajectory_comparisons(dataset_gt, dataset_gt.camera_trajectory, dataset_gt.camera_trajectory,

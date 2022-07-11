@@ -61,20 +61,24 @@ class Pipeline:
         self.fts_options = fts_options
 
     @property
-    def num_frames(self):
+    def num_frames(self) -> int:
         return self.options.num_frames
 
     @property
-    def include_background(self):
+    def include_background(self) -> bool:
         return self.options.include_background
 
     @property
-    def static_background(self):
+    def static_background(self) -> bool:
         return self.options.static_background
 
     @property
-    def use_estimated_data(self):
-        return self.options.use_estimated_data
+    def estimate_pose(self) -> bool:
+        return self.options.estimate_pose
+
+    @property
+    def estimate_depth(self) -> bool:
+        return self.options.estimate_depth
 
     def run(self, dataset: Optional[VTMDataset] = None):
         start_time = time.time()
@@ -166,6 +170,48 @@ class Pipeline:
 
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
+
+    def get_dataset(self):
+        storage_options = self.storage_options
+        colmap_options = self.colmap_options
+
+        dataset_path = storage_options.base_path
+
+        if VTMDataset.is_valid_folder_structure(dataset_path):
+            dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
+        else:
+            base_kwargs = dict(
+                    base_path=dataset_path,
+                    output_path=f"{dataset_path}_vtm",
+                    num_frames=self.options.num_frames,
+                    frame_step=self.options.frame_step,
+                    overwrite_ok=storage_options.overwrite_ok,
+                    colmap_options=colmap_options
+            )
+
+            if TUMAdaptor.is_valid_folder_structure(dataset_path):
+                dataset_converter = TUMAdaptor(**base_kwargs)
+            elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
+                dataset_converter = StrayScannerAdaptor(
+                    **base_kwargs,
+                    # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
+                    resize_to=640,
+                    depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
+                )
+            elif VideoAdaptor.is_valid_folder_structure(dataset_path):
+                path_no_extensions, _ = os.path.splitext(dataset_path)
+
+                dataset_converter = VideoAdaptor(**base_kwargs, resize_to=640)
+            elif not os.path.isdir(dataset_path):
+                raise RuntimeError(f"Could open the path {dataset_path} or it is not a folder.")
+            else:
+                raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
+
+            dataset = dataset_converter.convert(estimate_pose=self.estimate_pose, estimate_depth=self.estimate_depth)
+
+        self.options.num_frames = min(dataset.num_frames, self.num_frames)
+
+        return dataset
 
     @staticmethod
     def _get_scene_bounds(foreground_scene, background_scene):
@@ -278,62 +324,6 @@ class Pipeline:
         export_file(f"{bg_scene_name}.glb")
 
         logging.info(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
-
-    def get_dataset(self):
-        storage_options = self.storage_options
-        colmap_options = self.colmap_options
-
-        dataset_path = storage_options.base_path
-
-        if VTMDataset.is_valid_folder_structure(dataset_path):
-            dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
-        else:
-            if TUMAdaptor.is_valid_folder_structure(dataset_path):
-                dataset_converter = TUMAdaptor(
-                    base_path=dataset_path,
-                    output_path=f"{dataset_path}_vtm",
-                    num_frames=self.options.num_frames,
-                    frame_step=self.options.frame_step,
-                    overwrite_ok=storage_options.overwrite_ok,
-                    colmap_options=colmap_options
-                )
-            elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
-                dataset_converter = StrayScannerAdaptor(
-                    base_path=dataset_path,
-                    output_path=f"{dataset_path}_vtm",
-                    num_frames=self.options.num_frames,
-                    frame_step=self.options.frame_step,
-                    overwrite_ok=storage_options.overwrite_ok,
-                    colmap_options=colmap_options,
-                    # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
-                    resize_to=640,
-                    depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
-                )
-            elif VideoAdaptor.is_valid_folder_structure(dataset_path):
-                path_no_extensions, _ = os.path.splitext(dataset_path)
-
-                dataset_converter = VideoAdaptor(
-                    base_path=dataset_path,
-                    output_path=f"{path_no_extensions}_vtm",
-                    num_frames=self.options.num_frames,
-                    frame_step=self.options.frame_step,
-                    overwrite_ok=storage_options.overwrite_ok,
-                    colmap_options=colmap_options,
-                    resize_to=640
-                )
-            elif not os.path.isdir(dataset_path):
-                raise RuntimeError(f"Could open the path {dataset_path} or it is not a folder.")
-            else:
-                raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
-
-            if self.use_estimated_data:
-                dataset = dataset_converter.convert_from_rgb()
-            else:
-                dataset = dataset_converter.convert_from_ground_truth()
-
-        self.options.num_frames = min(dataset.num_frames, self.num_frames)
-
-        return dataset
 
     def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
                       static_background=False, keyframes_only=False, frame_step=1) -> trimesh.Scene:

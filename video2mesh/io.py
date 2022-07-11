@@ -360,7 +360,7 @@ class COLMAPProcessor:
 
                 sparse_recon_path = path_to_refined
             else:
-                logging.info(f"Did not merge the {num_models} sub-models successfully, skipping bundle adjustment.")
+                logging.warning(f"Did not merge the {num_models} sub-models successfully, skipping bundle adjustment.")
                 sparse_recon_path = path_to_merged
 
         logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
@@ -682,7 +682,7 @@ class DatasetBase:
 class DatasetMetadata:
     """Information about a dataset."""
 
-    def __init__(self, num_frames: int, fps: float, width: int, height: int, is_gt: bool,
+    def __init__(self, num_frames: int, fps: float, width: int, height: int, estimate_pose: bool, estimate_depth: bool,
                  depth_mask_dilation_iterations: int, depth_scale: float, max_depth=10.0, frame_step=1,
                  colmap_options=COLMAPOptions()):
         """
@@ -690,7 +690,8 @@ class DatasetMetadata:
         :param fps: The framerate at which the video was captured.
         :param width: The width of a frame (pixels).
         :param height: The height of a frame (pixels).
-        :param is_gt: Whether the dataset was created using ground truth data for the camera parameters and depth maps.
+        :param estimate_pose: Whether the camera parameters where estimated with COLMAP or from ground truth data.
+        :param estimate_depth: Whether the depth maps where estimated or from ground truth data.
         :param depth_scale: A scalar that when multiplied with depth map, will transform the depth values to meters.
         :param max_depth: The maximum depth allowed in a depth map. Values exceeding this threshold will be set to zero.
         :param frame_step: The frequency that frames were sampled at for COLMAP and pose optimisation
@@ -706,11 +707,15 @@ class DatasetMetadata:
         self.depth_scale = depth_scale
         self.max_depth = max_depth
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
-        self.is_gt = is_gt
+        self.estimate_pose = estimate_pose
+        self.estimate_depth = estimate_depth
         self.colmap_options = colmap_options
 
-        if not isinstance(is_gt, bool):
-            raise ValueError(f"is_gt must be a boolean, got {type(is_gt)}.")
+        if not isinstance(estimate_pose, bool):
+            raise ValueError(f"`estimate_pose` must be a boolean, got {type(estimate_pose)}.")
+
+        if not isinstance(estimate_depth, bool):
+            raise ValueError(f"`estimate_depth` must be a boolean, got {type(estimate_depth)}.")
 
         check_domain(num_frames, 'num_frames', int, Domain.Positive)
         check_domain(frame_step, 'frame_step', int, Domain.Positive)
@@ -729,13 +734,16 @@ class DatasetMetadata:
                np.isclose(self.depth_scale, other.depth_scale) and \
                np.isclose(self.max_depth, other.max_depth) and \
                self.depth_mask_dilation_iterations == other.depth_mask_dilation_iterations and \
-               self.is_gt == other.is_gt and \
+               self.estimate_pose == other.estimate_pose and \
+               self.estimate_depth == other.estimate_depth and \
                self.colmap_options == other.colmap_options
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
                f"frame_step={self.frame_step}, width={self.width}, height={self.height}, " \
-               f"max_depth={self.max_depth}, is_gt={self.is_gt}, " \
+               f"max_depth={self.max_depth}, " \
+               f"estimate_pose={self.estimate_pose}, " \
+               f"estimate_depth={self.estimate_depth}, " \
                f"depth_mask_dilation_iterations={self.depth_mask_dilation_iterations}, " \
                f"depth_scale={self.depth_scale}, " \
                f"colmap_options={repr(self.colmap_options)})"
@@ -765,7 +773,8 @@ class DatasetMetadata:
             depth_scale=self.depth_scale,
             max_depth=self.max_depth,
             depth_mask_dilation_iterations=self.depth_mask_dilation_iterations,
-            is_gt=self.is_gt,
+            estimate_pose=self.estimate_pose,
+            estimate_depth=self.estimate_depth,
             colmap_options=self.colmap_options.to_json()
         )
 
@@ -783,7 +792,8 @@ class DatasetMetadata:
             fps=float(json_dict['fps']),
             width=int(json_dict['width']),
             height=int(json_dict['height']),
-            is_gt=bool(json_dict['is_gt']),
+            estimate_pose=bool(json_dict['estimate_pose']),
+            estimate_depth=bool(json_dict['estimate_depth']),
             depth_scale=float(json_dict['depth_scale']),
             max_depth=float(json_dict['max_depth']),
             depth_mask_dilation_iterations=int(json_dict['depth_mask_dilation_iterations']),
@@ -833,7 +843,7 @@ class VTMDataset(DatasetBase):
     mask_folder = "mask"
     masked_depth_folder = 'masked_depth'
 
-    required_folders = [rgb_folder, depth_folder]
+    required_folders = [rgb_folder, depth_folder, mask_folder, masked_depth_folder]
 
     # Dataset adaptors are expected to convert depth maps to mm.
     # This scaling factor converts the mm depth values to meters.
@@ -845,9 +855,6 @@ class VTMDataset(DatasetBase):
         :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
         """
         super().__init__(base_path=base_path, overwrite_ok=overwrite_ok)
-
-        self._using_estimated_depth = False
-        self._using_estimated_camera_parameters = False
 
         self.metadata = DatasetMetadata.load(self.path_to_metadata)
 

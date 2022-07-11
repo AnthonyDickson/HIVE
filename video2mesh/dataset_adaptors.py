@@ -51,12 +51,13 @@ class DatasetAdaptor(DatasetBase, ABC):
         """The number of frames in the non-truncated dataset."""
         raise NotImplementedError
 
-    def get_metadata(self, is_gt: bool) -> DatasetMetadata:
+    def get_metadata(self, estimate_pose: bool, estimate_depth: bool) -> DatasetMetadata:
         """
         Get the metadata object for this dataset.
 
-        :param is_gt: Whether the dataset was/will be created using ground truth data for
-            the camera parameters and depth maps.
+        :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
+            camera parameters.
+        :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         """
         raise NotImplementedError
 
@@ -148,7 +149,7 @@ class DatasetAdaptor(DatasetBase, ABC):
 
         :return: The newly created dataset object.
         """
-        return self._convert(from_gt=True)
+        return self.convert(estimate_pose=True, estimate_depth=True)
 
     def convert_from_rgb(self) -> VTMDataset:
         """
@@ -157,17 +158,25 @@ class DatasetAdaptor(DatasetBase, ABC):
         :return: The newly created dataset object.
         """
         # TODO: Add way to pass arguments to PoseOptimiser object.
-        return self._convert(from_gt=False)
+        return self.convert(estimate_pose=False, estimate_depth=False)
 
-    def _convert(self, from_gt: bool) -> VTMDataset:
-        if cached_dataset := self._try_get_cached_dataset(is_gt=from_gt):
+    def convert(self, estimate_pose: bool, estimate_depth: bool) -> VTMDataset:
+        """
+        Convert a dataset into the standard format.
+
+        :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
+            camera parameters.
+        :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
+        :return: The converted dataset.
+        """
+        if cached_dataset := self._try_get_cached_dataset(estimate_pose=estimate_pose, estimate_depth=estimate_depth):
             logging.info(f"Found cached dataset at {self.output_path}.")
             return cached_dataset
 
         output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders()
 
         logging.info(f"Creating metadata for dataset.")
-        metadata = self.get_metadata(is_gt=from_gt)
+        metadata = self.get_metadata(estimate_pose, estimate_depth)
         metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
         metadata.save(metadata_path)
 
@@ -180,19 +189,20 @@ class DatasetAdaptor(DatasetBase, ABC):
             overwrite_ok=True
         )
 
-        if from_gt:
+        if estimate_depth:
+            logging.info(f"Creating depth maps.")
+            estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
+        else:
             logging.info(f"Copying depth maps.")
             self.copy_depth_maps(output_depth_folder)
 
-            camera_matrix = self.get_camera_matrix()
-            camera_trajectory = self.get_camera_trajectory()
-        else:
-            logging.info(f"Creating depth maps.")
-            estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
-
+        if estimate_pose:
             debug_folder = pjoin(self.output_path, 'debug')
             camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
                                                                                 metadata)
+        else:
+            camera_matrix = self.get_camera_matrix()
+            camera_trajectory = self.get_camera_trajectory()
 
         logging.info(f"Creating camera matrix file.")
         camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
@@ -208,7 +218,18 @@ class DatasetAdaptor(DatasetBase, ABC):
 
         return VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
-    def _try_get_cached_dataset(self, is_gt: bool) -> Optional[VTMDataset]:
+    def _try_get_cached_dataset(self, estimate_pose: bool, estimate_depth: bool) -> Optional[VTMDataset]:
+        """
+        Attempt to load a cached dataset.
+
+        If there is a correctly formatted VTMDataset that was created with the exact same configuration, then that
+        will be returned.
+
+        :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
+            camera parameters.
+        :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
+        :return: The cached dataset, if it exists. Otherwise, returns `None`.
+        """
         if VTMDataset.is_valid_folder_structure(self.output_path):
             dataset = VTMDataset(self.output_path, overwrite_ok=self.overwrite_ok)
 
@@ -224,7 +245,7 @@ class DatasetAdaptor(DatasetBase, ABC):
             # TODO: Check whether the cached dataset was created with the same settings
             #  (e.g. GT vs estimated data, frame step).
 
-            same_metadata = dataset.metadata == self.get_metadata(is_gt)
+            same_metadata = dataset.metadata == self.get_metadata(estimate_pose, estimate_depth)
 
             if same_num_frames and same_trajectory_length and same_metadata:
                 return dataset
@@ -571,13 +592,14 @@ class TUMAdaptor(DatasetAdaptor):
         a, _, _ = self._get_synced_frame_data()
         return len(a)
 
-    def get_metadata(self, is_gt: bool):
+    def get_metadata(self, estimate_pose: bool, estimate_depth: bool) -> DatasetMetadata:
         # TODO: Make the depth mask dilation iterations configurable.
         # This gets the default value for `depth_mask_dilation_iterations`.
         depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
 
         return DatasetMetadata(num_frames=self.num_frames, frame_step=self.frame_step,
-                               fps=self.fps, width=self.width, height=self.height, is_gt=is_gt,
+                               fps=self.fps, width=self.width, height=self.height,
+                               estimate_pose=estimate_pose, estimate_depth=estimate_depth,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
                                depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
