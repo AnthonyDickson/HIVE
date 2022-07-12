@@ -3,7 +3,6 @@ import enum
 import logging
 import os.path
 import shutil
-import warnings
 from os.path import join as pjoin
 from typing import Tuple, List, Optional, Iterable, Union
 
@@ -16,8 +15,8 @@ from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 
 from video2mesh.fusion import tsdf_fusion
-from video2mesh.geometry import Quaternion, invert_trajectory, subtract_pose, add_pose, get_identity_pose, \
-    point_cloud_from_depth
+from video2mesh.geometry import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
+    Trajectory
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
 from video2mesh.utils import tqdm_imap, temp_seed, Domain, check_domain
@@ -229,14 +228,16 @@ class FeatureExtractionOptions:
                              f"but got {max_features}.")
 
         if min_features < 20:
-            logging.warning(f"`min_features` was set to {min_features}, however it is recommended to set `min_features` "
-                          f"to at least 20. Anything lower than 20 generally leads to a low SNR and bad results.")
+            logging.warning(
+                f"`min_features` was set to {min_features}, however it is recommended to set `min_features` "
+                f"to at least 20. Anything lower than 20 generally leads to a low SNR and bad results.")
 
         if max_features is not None and max_features < 2 * min_features:
-            logging.warning(f"`max_features` was set to {max_features}, however it is recommended to set `max_features` "
-                          f"to at least 2 * `min_features` ({2 * min_features}). This is to increase the likelihood "
-                          f"that enough features will remain after filtering to meet the requirement of having "
-                          f"at least `min_features` features.")
+            logging.warning(
+                f"`max_features` was set to {max_features}, however it is recommended to set `max_features` "
+                f"to at least 2 * `min_features` ({2 * min_features}). This is to increase the likelihood "
+                f"that enough features will remain after filtering to meet the requirement of having "
+                f"at least `min_features` features.")
 
         self.ignore_dynamic_objects = ignore_dynamic_objects
         self.min_features = min_features
@@ -723,14 +724,15 @@ class OptimisationParameters(torch.nn.Module):
             r = r / torch.linalg.norm(r, ord=2, dim=1).reshape((-1, 1))
             self.rotation_quaternions = torch.nn.Parameter(r, requires_grad=True)
 
-    def get_trajectory(self) -> np.ndarray:
+    def get_trajectory(self) -> Trajectory:
         """Get the camera trajectory from the optimisation parameters as a (N, 7) NumPy array."""
         r = to_numpy(self.rotation_quaternions)
         t = to_numpy(self.translation_vectors)
 
         r = r / np.linalg.norm(r, ord=2, axis=1).reshape((-1, 1))
 
-        return np.hstack((r, t))
+        trajectory = np.hstack((r, t))
+        return Trajectory(trajectory)
 
     def sample_at(self, frame_indices: List[int]) -> 'OptimisationParameters':
         """
@@ -970,7 +972,7 @@ class PoseOptimiser:
         self.debug = debug
         self.debug_path: Optional[str] = None
 
-    def run(self, num_frames=-1) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def run(self, num_frames=-1) -> Tuple[Trajectory, np.ndarray, np.ndarray]:
         """
         Optimise the pose data.
 
@@ -997,15 +999,13 @@ class PoseOptimiser:
             interpolated_trajectory = self._smooth_trajectory(trajectory=interpolated_trajectory,
                                                               weight=self.optimisation_options.trajectory_smoothing)
 
-        # TODO: Why does this step need to be done for TSDFFusion reconstruction to interpret the pose data accurately?
-        final_camera_trajectory = invert_trajectory(interpolated_trajectory)
+        final_camera_trajectory = interpolated_trajectory
 
         scale = to_numpy(optimised_parameters.scale)
         shift = to_numpy(optimised_parameters.shift)
 
         if self.debug:
-            # noinspection PyTypeChecker
-            np.savetxt(pjoin(self.debug_path, 'optimised_camera_trajectory.txt'), final_camera_trajectory)
+            final_camera_trajectory.save(pjoin(self.debug_path, 'optimised_camera_trajectory.txt'))
 
             should_reshape = self.optimisation_options.alignment_type == AlignmentType.Deformable
 
@@ -1505,7 +1505,7 @@ class PoseOptimiser:
 
     @staticmethod
     def _interpolate_poses_without_matches(feature_set: FeatureSet,
-                                           optimised_camera_trajectory: np.ndarray) -> np.ndarray:
+                                           optimised_camera_trajectory: Trajectory) -> Trajectory:
         """
         Fill in pose data for frames that were not in a frame pair that had enough matching image features.
 
@@ -1554,7 +1554,7 @@ class PoseOptimiser:
         return interpolated_poses
 
     @staticmethod
-    def _smooth_trajectory(trajectory: np.ndarray, weight=0.9) -> np.ndarray:
+    def _smooth_trajectory(trajectory: Trajectory, weight=0.9) -> Trajectory:
         """
         Smooths the translation vectors of the given trajectory.
         This is done by calculating the exponential moving averages (EMA) for the translation vectors.
@@ -1563,21 +1563,17 @@ class PoseOptimiser:
         :param weight: The weight alpha for the EMA.
         :return: The smoothed trajectory.
         """
-        smoothed_positions = np.zeros_like(trajectory[:, 4:])
+        smoothed_trajectory = trajectory.copy()
 
-        smoothed_positions[0] = trajectory[0, 4:]
-
-        for i in range(1, len(smoothed_positions)):
-            smoothed_positions[i] = weight * trajectory[i, 4:] + (1 - weight) * smoothed_positions[i - 1]
-
-        smoothed_trajectory = np.hstack((trajectory[:, :4], smoothed_positions))
+        for i in range(1, len(smoothed_trajectory)):
+            previous_position = smoothed_trajectory.positions[i - 1]
+            next_position = trajectory.positions[i]
+            smoothed_trajectory.positions[i] = weight * next_position + (1 - weight) * previous_position
 
         return smoothed_trajectory
 
     def visualise_solution(self, solution: OptimisationParameters, label: str):
-        # The inverse transform is needed so that the trajectories are comparable to the ground truth ones and
-        # the final trajectories.
-        trajectory = invert_trajectory(solution.get_trajectory())[:, 4:]
+        trajectory = solution.get_trajectory().positions
         output_path = pjoin(self.debug_path, f"{label}.png")
 
         _, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 4.8))
@@ -1610,7 +1606,7 @@ class ForegroundPoseOptimiser:
         self.learning_rate = learning_rate
         self.num_epochs = num_epochs
 
-    def run(self) -> np.ndarray:
+    def run(self) -> Trajectory:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         num_frames = self.dataset.num_frames
 
@@ -1654,9 +1650,9 @@ class ForegroundPoseOptimiser:
         centroids_camera_space = torch.from_numpy(centroids).to(device)
 
         with torch.no_grad():
-            centroids_world_space_gt = Quaternion(params.rotation_quaternions.T)\
-                .normalise()\
-                .conjugate()\
+            centroids_world_space_gt = Quaternion(params.rotation_quaternions.T) \
+                .normalise() \
+                .conjugate() \
                 .apply((centroids_camera_space - params.translation_vectors).T).T
 
         with tqdm(range(self.num_epochs), total=self.num_epochs) as progress_bar:

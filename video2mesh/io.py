@@ -6,7 +6,6 @@ import os
 import shutil
 import struct
 import subprocess
-import warnings
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Union, Tuple, Optional, Callable, IO
@@ -25,13 +24,11 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from thirdparty.colmap.scripts.python.read_write_model import read_model
-from video2mesh.geometry import pose_vec2mat, normalise_trajectory
+from video2mesh.geometry import Trajectory
 from video2mesh.image_processing import dilate_mask
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
+from video2mesh.types import File
 from video2mesh.utils import tqdm_imap, check_domain, Domain
-
-File = Union[str, Path]
-Size = Tuple[int, int]
 
 
 def load_raw_float32_image(file_name):
@@ -106,12 +103,12 @@ def save_raw_float32_image(file_name, image):
         f.write(struct.pack("Q", pixel_size))  # Write size_t ~ uint64_t
 
         # Set buffer size to 16 MiB to hide the Python loop overhead.
-        buffersize = max(16 * 1024 ** 2 // image.itemsize, 1)
+        buffer_size = max(16 * 1024 ** 2 // image.itemsize, 1)
 
         for chunk in np.nditer(
                 float32_image,
                 flags=["external_loop", "buffered", "zerosize_ok"],
-                buffersize=buffersize,
+                buffersize=buffer_size,
                 order="F",
         ):
             f.write(chunk.tobytes("C"))
@@ -368,7 +365,7 @@ class COLMAPProcessor:
 
         return cameras, images, points3d
 
-    def load_camera_params(self, raw_pose: bool = True):
+    def load_camera_params(self, raw_pose: bool = True) -> Tuple[np.ndarray, Trajectory]:
         """
         Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
         :param raw_pose: Whether to use the raw pose data straight from COLMAP.
@@ -420,12 +417,13 @@ class COLMAPProcessor:
                 extrinsic.append(np.hstack((r, t)))
 
         extrinsic = np.asarray(extrinsic).squeeze()
+        extrinsic = Trajectory(extrinsic)
 
         logging.info(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
 
-    def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: np.ndarray) -> np.ndarray:
+    def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: Trajectory) -> np.ndarray:
         """
         Recover sparse depth maps from the COLMAP reconstruction.
 
@@ -459,6 +457,8 @@ class COLMAPProcessor:
         if max(indices) > len(camera_poses):
             logging.warning(f"COLMAP indices in `images` include frame index greater than the number of camera poses.")
 
+        camera_poses_homogeneous = camera_poses.to_homogenous_transforms()
+
         for index in tqdm(indices):
             image_data = images[index]
             # `image_data.name` contains the filename, which in this case is in the format '%06d.png' (e.g. 000001.png).
@@ -482,7 +482,7 @@ class COLMAPProcessor:
                 points[i] = [*points3d[point3d_id].xyz, 1.0]
                 has_3d_points[i] = True
 
-            pose = pose_vec2mat(camera_poses[index_zero_based])
+            pose = camera_poses_homogeneous[index_zero_based]
 
             projected_points = (K @ pose @ points.T).T
             projected_points = projected_points[has_3d_points, :3]
@@ -843,7 +843,7 @@ class VTMDataset(DatasetBase):
     mask_folder = "mask"
     masked_depth_folder = 'masked_depth'
 
-    required_folders = [rgb_folder, depth_folder, mask_folder, masked_depth_folder]
+    required_folders = [rgb_folder, depth_folder, mask_folder]
 
     # Dataset adaptors are expected to convert depth maps to mm.
     # This scaling factor converts the mm depth values to meters.
@@ -993,7 +993,7 @@ class VTMDataset(DatasetBase):
 
         return self
 
-    def _load_camera_parameters(self, normalise=True) -> Tuple[np.ndarray, np.ndarray]:
+    def _load_camera_parameters(self, normalise=True) -> Tuple[np.ndarray, Trajectory]:
         """
         Load the ground truth camera matrix and trajectory from disk.
 
@@ -1004,7 +1004,7 @@ class VTMDataset(DatasetBase):
         :param normalise: Whether to normalise the pose data s.t. the first pose is the identity.
         """
         camera_matrix = np.loadtxt(self.path_to_camera_matrix, dtype=np.float32)
-        camera_trajectory = np.loadtxt(self.path_to_camera_trajectory, dtype=np.float32)
+        camera_trajectory = Trajectory.load(self.path_to_camera_trajectory)
 
         if camera_matrix.shape != (3, 3):
             raise RuntimeError(f"Expected camera matrix to be a 3x3 matrix,"
@@ -1015,7 +1015,7 @@ class VTMDataset(DatasetBase):
                                f" but got {camera_trajectory.shape} instead.")
 
         if normalise:
-            camera_trajectory = normalise_trajectory(camera_trajectory)
+            camera_trajectory = camera_trajectory.normalise()
 
         return camera_matrix, camera_trajectory
 
@@ -1025,7 +1025,7 @@ class VTMDataset(DatasetBase):
 
 
 @contextlib.contextmanager
-def temporary_trajectory(dataset: VTMDataset, trajectory: np.ndarray):
+def temporary_trajectory(dataset: VTMDataset, trajectory: Trajectory):
     """
     Context manager that temporarily replaces the trajectory of a dataset.
 

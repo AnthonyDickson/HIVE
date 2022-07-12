@@ -2,10 +2,14 @@
 This module contains functions and classes used for manipulating camera trajectories, projecting points between
 2D image and 3D world coordinates, and creating point clouds.
 """
+from typing import Optional, Tuple
+
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
 
+from video2mesh.types import File
 from video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
@@ -79,70 +83,6 @@ def subtract_pose(pose_a, pose_b) -> np.ndarray:
 def get_identity_pose():
     """Get the identity 7-vector pose (quaternion + translation vector)."""
     return np.asarray([0., 0., 0., 1., 0., 0., 0.])
-
-
-def vector_trajectory_to_matrix_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
-    """
-    Convert each pose in a camera trajectory from a quaternion + translation vector to a homogenous 4x4 transformation.
-
-    :param camera_trajectory: The (N, 7) camera trajectory to adjust.
-        Each row should be a quaternion (scalar last) and a translation vector.
-    :return: The (N, 4, 4) camera trajectory.
-    """
-    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
-
-    T = np.tile(np.eye(4), (len(camera_trajectory), 1, 1))
-    T[:, :3, :3] = Rotation.from_quat(camera_trajectory[:, :4]).as_matrix()
-    T[:, :3, 3] = camera_trajectory[:, 4:]
-
-    return T
-
-
-def matrix_trajectory_to_vector_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
-    """
-    Convert each pose in a camera trajectory from a homogenous 4x4 transformation to a quaternion + translation vector.
-
-    :param camera_trajectory: The (N, 4, 4) camera trajectory to adjust.
-        Each row should be a 4x4 homogenous transformation matrix.
-    :return: The (N, 7) camera trajectory where each row is a quaternion and translation vector.
-    """
-    validate_shape(camera_trajectory, 'camera_trajectory', (None, 4, 4))
-
-    r = Rotation.from_matrix(camera_trajectory[:, :3, :3]).as_quat()
-    t = camera_trajectory[:, :3, 3]
-
-    return np.hstack((r, t))
-
-
-def normalise_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
-    """
-    Adjust a camera trajectory so that the first pose is the identity.
-    :param camera_trajectory: The (N, 7) camera trajectory to adjust.
-        Each row should be a quaternion (scalar last) and a translation vector.
-    :return: The normalised camera trajectory.
-    """
-    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
-
-    T = vector_trajectory_to_matrix_trajectory(camera_trajectory)
-    T = np.linalg.inv(T[0]) @ T
-
-    return matrix_trajectory_to_vector_trajectory(T)
-
-
-def invert_trajectory(camera_trajectory: np.ndarray) -> np.ndarray:
-    """
-    Get the inverse of the camera trajectory.
-
-    :param camera_trajectory: The (N, 7) camera trajectory to invert.
-        Each row should be a quaternion (scalar last) and a translation vector.
-    :return: The inverted camera trajectory.
-    """
-    validate_shape(camera_trajectory, 'camera_trajectory', (None, 7))
-
-    T = vector_trajectory_to_matrix_trajectory(camera_trajectory)
-    T = np.linalg.inv(T)
-
-    return matrix_trajectory_to_vector_trajectory(T)
 
 
 def point_cloud_from_depth(depth, mask, K, R=np.eye(3), t=np.zeros((3, 1))):
@@ -338,3 +278,256 @@ class Quaternion:
 
     def __repr__(self):
         return f"{self.__class__.__name__}({repr(self.values)})"
+
+
+class Trajectory:
+    """Encapsulates a sequence of camera poses."""
+
+    def __init__(self, values: Optional[np.ndarray] = None):
+        """
+        :param values: The Nx7 camera poses where each pose (row) is a 7-vector consisting of:
+            *  a scalar-last quaternion
+            * and camera's XYZ position.
+        """
+        if values is not None:
+            validate_shape(values, 'values', (None, 7))
+
+        self.values = values
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+    def __setitem__(self, index, value):
+        self.values[index] = value
+
+    def __iter__(self):
+        return iter(self.values)
+
+    @property
+    def rotations(self) -> np.ndarray:
+        return self.values[:, :4]
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self.values[:, 4:]
+
+    @property
+    def shape(self) -> tuple:
+        return self.values.shape
+
+    def copy(self) -> 'Trajectory':
+        """
+        :return: Get a copy of the trajectory.
+        """
+        return Trajectory(self.values.copy())
+
+    def save(self, f: File):
+        """
+        Save the trajectory to disk.
+
+        :param f: The file (path string or file object) to save to.
+        """
+        # noinspection PyTypeChecker
+        np.savetxt(f, self.values)
+
+    @classmethod
+    def load(cls, f: File) -> 'Trajectory':
+        """
+        Load a trajectory from disk.
+
+        :param f: The file (path string or file object) to load.
+        :return: The loaded trajectory.
+        """
+        values = np.loadtxt(f, dtype=np.float32)
+
+        return Trajectory(values)
+
+    def normalise(self) -> 'Trajectory':
+        """
+        Adjust the camera trajectory so that the first pose is the identity.
+
+        :return: The normalised camera trajectory.
+        """
+        matrix_trajectory = self.to_homogenous_transforms()
+        matrix_trajectory = np.linalg.inv(matrix_trajectory[0]) @ matrix_trajectory
+        vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
+
+        return vector_trajectory
+
+    def inverse(self) -> 'Trajectory':
+        """
+        Get the inverse of the camera trajectory.
+
+        :return: The inverted camera trajectory.
+        """
+        matrix_trajectory = self.to_homogenous_transforms()
+        matrix_trajectory = np.linalg.inv(matrix_trajectory)
+        vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
+
+        return vector_trajectory
+
+    def calculate_ate(self, other: 'Trajectory') -> float:
+        """
+        Calculate ATE (Absolute Trajectory Error) between this trajectory and another.
+
+        :param other: The other trajectory.
+        :return: The alignment error (RMSE)
+        """
+        if len(self) != len(other):
+            raise RuntimeError(f"Got trajectories of unequal length ({len(self)} and {len(other)})")
+
+        # Adapted from: https://github.com/tinghuiz/SfMLearner/blob/master/kitti_eval/pose_evaluation_utils.py
+        trajectory_normalised = self.normalise().positions
+        other_normalised = other.normalise().positions
+
+        scale = np.sum(trajectory_normalised * other_normalised) / np.sum(np.square(other_normalised))
+        alignment_error = other_normalised * scale - trajectory_normalised
+
+        return np.sqrt(np.mean(np.square(alignment_error)))
+
+    def calculate_rpe(self, other: 'Trajectory') -> Tuple[float, float]:
+        """
+        Calculate the RPE (Relative Pose Error) between this trajectory and another.
+
+        :param other: The other trajectory.
+        :return: A 2-tuple containing the rotational and translational errors, respectively.
+        """
+        if len(self) != len(other):
+            raise RuntimeError(f"Got trajectories of unequal length ({len(self)} and {len(other)})")
+
+        rotational_error = []
+        translational_error = []
+
+        num_frames = len(self)
+
+        gt = self.normalise().to_homogenous_transforms()
+        pred = other.normalise().to_homogenous_transforms()
+
+        for i, j in zip(range(num_frames - 1), range(1, num_frames)):
+            rel_pose_est = np.linalg.inv(pred[j]) @ pred[i]
+            rel_pose_gt = np.linalg.inv(gt[j]) @ gt[i]
+            rel_pose_error = np.linalg.inv(rel_pose_gt) @ rel_pose_est
+
+            distance = np.linalg.norm(rel_pose_error[4:])
+            angle = np.arccos(min(1, max(-1, (np.trace(rel_pose_error[:3, :3]) - 1) / 2)))
+
+            translational_error.append(distance)
+            rotational_error.append(angle)
+
+        translational_error = np.sqrt(np.mean(np.square(translational_error)))
+        rotational_error = np.sqrt(np.mean(np.square(rotational_error)))
+
+        return rotational_error, translational_error
+
+    def plot(self, output_path: Optional[str] = None):
+        """
+        Plot a camera trajectory (camera positions).
+
+        :param output_path: (optional) The file to save the plot to. If `None`, the plot will be displayed on screen.
+        """
+        trajectory = self.normalise().positions
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 4.8))
+
+        self._plot_trajectory(trajectory, plot_axis=ax1, secondary_axis='y')
+        self._plot_trajectory(trajectory, plot_axis=ax2, secondary_axis='z')
+
+        plt.tight_layout()
+
+        if output_path is None:
+            plt.show()
+        else:
+            plt.savefig(output_path, dpi=90)
+
+        plt.close()
+
+    def plot_comparison(self, other: 'Trajectory', output_path: Optional[str] = None):
+        """
+        Plot two trajectories (camera positions) over each other for comparison.
+
+        :param other: The other trajectory.
+        :param output_path: (optional) The file to save the plot to. If `None`, the plot will be displayed on screen.
+        """
+        if len(self) != len(other):
+            raise RuntimeError(f"Got trajectories of unequal length ({len(self)} and {len(other)})")
+
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 4.8))
+
+        gt_trajectory = self.normalise().positions
+        pred_trajectory = other.normalise().positions
+
+        self._plot_trajectory(gt_trajectory, pred_trajectory, plot_axis=ax1, secondary_axis='y')
+        self._plot_trajectory(gt_trajectory, pred_trajectory, plot_axis=ax2, secondary_axis='z')
+
+        plt.tight_layout()
+
+        if output_path is None:
+            plt.show()
+        else:
+            plt.savefig(output_path, dpi=90)
+
+        plt.close()
+
+    @staticmethod
+    def _plot_trajectory(gt_trajectory: np.ndarray, pred_trajectory: Optional[np.ndarray] = None,
+                         plot_axis: Optional[plt.Axes] = None, secondary_axis='y'):
+        """
+        Plot a trajectory (camera positions) on a 2D plane.
+
+        :param gt_trajectory: The reference trajectory.
+        :param pred_trajectory: (optional) A trajectory to plot alongside the reference trajectory for comparison.
+        :param plot_axis: (optional) The plot axis (matplotlib.pyplot.Axes object) to plot to.
+        :param secondary_axis: The secondary axis which defines which plane to plot the trajectory on.
+            The primary axis is always the x-axis. The XZ plane is the ground plane and the XZ plane is a vertical plane.
+        """
+        if plot_axis is None:
+            plot_axis = plt.gca()
+
+        if secondary_axis == 'y':
+            axis = 1
+        elif secondary_axis == 'z':
+            axis = 2
+        else:
+            raise RuntimeError(f"secondary_axis must be one of ('y', 'z').")
+
+        if pred_trajectory is None:
+            plot_axis.plot(gt_trajectory[:, 0], gt_trajectory[:, axis], '-', color="black")
+        else:
+            plot_axis.plot(gt_trajectory[:, 0], gt_trajectory[:, axis], '-', color="black", label="ground truth")
+            plot_axis.plot(pred_trajectory[:, 0], pred_trajectory[:, axis], '-', color="blue", label="estimated")
+            plot_axis.legend()
+
+        plot_axis.set_xlabel("x [m]")
+        plot_axis.set_ylabel(f"{secondary_axis} [m]")
+        plot_axis.set_title(f"Trajectory on X{secondary_axis.upper()} Plane")
+
+    def to_homogenous_transforms(self) -> np.ndarray:
+        """
+        Convert each pose in a camera trajectory from a quaternion + translation vector to a homogenous 4x4 transformation.
+
+        :return: The (N, 4, 4) camera trajectory.
+        """
+        T = np.tile(np.eye(4), (len(self), 1, 1))
+        T[:, :3, :3] = Rotation.from_quat(self.rotations).as_matrix()
+        T[:, :3, 3] = self.positions
+
+        return T
+
+    @staticmethod
+    def from_homogenous_transforms(camera_trajectory: np.ndarray) -> 'Trajectory':
+        """
+        Convert each pose in a camera trajectory from a homogenous 4x4 transformation to a quaternion + translation vector.
+
+        :param camera_trajectory: The (N, 4, 4) camera trajectory to adjust.
+            Each row should be a 4x4 homogenous transformation matrix.
+        :return: The (N, 7) camera trajectory where each row is a quaternion and translation vector.
+        """
+        validate_shape(camera_trajectory, 'camera_trajectory', (None, 4, 4))
+
+        r = Rotation.from_matrix(camera_trajectory[:, :3, :3]).as_quat()
+        t = camera_trajectory[:, :3, 3]
+        values = np.hstack((r, t))
+
+        return Trajectory(values)

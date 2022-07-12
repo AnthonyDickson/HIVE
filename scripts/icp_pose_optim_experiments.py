@@ -18,11 +18,10 @@ from tqdm import tqdm
 from video2mesh.dataset_adaptors import TUMAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
-    get_identity_pose, add_pose, invert_trajectory
+    get_identity_pose, add_pose, Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StaticMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
-from video2mesh.utils import log
 
 
 def setup(output_path: str, overwrite_ok: bool):
@@ -268,7 +267,7 @@ def get_icp_trajectory(dataset: VTMDataset, init_with_gt=False):
     return np.asarray([get_identity_pose()] + relative_poses)
 
 
-def merge_trajectory(relative_poses: np.ndarray, dataset: Optional[VTMDataset] = None) -> np.ndarray:
+def merge_trajectory(relative_poses: np.ndarray, dataset: Optional[VTMDataset] = None) -> Trajectory:
     # Assumes relative_poses[0] == get_identity_pose()
     merged_pose_data = []
     previous_pose = get_identity_pose()
@@ -281,7 +280,7 @@ def merge_trajectory(relative_poses: np.ndarray, dataset: Optional[VTMDataset] =
         merged_pose_data.append(new_pose)
         previous_pose = new_pose
 
-    return np.asarray(merged_pose_data)
+    return Trajectory(np.asarray(merged_pose_data))
 
 
 def export_results(output_path):
@@ -341,13 +340,13 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         if pred_label not in results_dict[key][dataset_name]:
             results_dict[key][dataset_name][pred_label] = dict()
 
-    def run_trajectory_comparisons(dataset, pred_trajectory, gt_trajectory,
+    def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajectory: Trajectory,
                                    pred_label: str, gt_label: str,
                                    results_dict: dict, output_folder: str):
         experiment_path = pjoin(output_folder, dataset_name, pred_label)
         os.makedirs(experiment_path, exist_ok=True)
 
-        np.savetxt(pjoin(experiment_path, 'trajectory.txt'), pred_trajectory)
+        pred_trajectory.save(pjoin(experiment_path, 'trajectory.txt'))
 
         ate, aligned_trajectory = calculate_ate(gt_trajectory[:, 4:], pred_trajectory[:, 4:])
 
@@ -440,11 +439,12 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
             overwrite_ok=True
         ).convert_from_rgb()
 
-        dataset_cm = VTMDataset(dataset_gt.base_path)
-        dataset_cm.camera_matrix, dataset_cm.camera_trajectory = COLMAPProcessor(
-            pjoin(dataset_estimated.path_to_rgb_frames),
-            workspace_path=pjoin(dataset_estimated.base_path, 'debug', 'colmap', 'workspace')
-        ).load_camera_params()
+        dataset_cm = TUMAdaptor(
+            base_path=pjoin(data_path, dataset_name),
+            output_path=pjoin(output_path, f"{dataset_name}_est"),
+            num_frames=num_frames,
+            frame_step=frame_step
+        ).convert(estimate_pose=True, estimate_depth=False)
 
         for dataset, pred_label_suffix in \
                 zip((dataset_gt, dataset_rand, dataset_cm, dataset_estimated), ('_gt', '_rand', '_cm', '_est')):
@@ -495,7 +495,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
         run_trajectory_comparisons(dataset_gt, optimised_trajectory, dataset_gt.camera_trajectory, pred_label='ours_gt',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
-        icp_trajectory = invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=False)))
+        icp_trajectory = merge_trajectory(get_icp_trajectory(dataset_gt, init_with_gt=False))
         run_trajectory_comparisons(dataset_gt, icp_trajectory, dataset_gt.camera_trajectory, pred_label='icp',
                                    gt_label='gt', results_dict=icp_results, output_folder=icp_results_path)
 
@@ -514,8 +514,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
                                    pred_label='gt_est', gt_label='gt',
                                    results_dict=icp_results, output_folder=icp_results_path)
 
-        icp_trajectory_est = \
-            invert_trajectory(merge_trajectory(get_icp_trajectory(dataset_estimated, init_with_gt=False)))
+        icp_trajectory_est = merge_trajectory(get_icp_trajectory(dataset_estimated, init_with_gt=False))
         run_trajectory_comparisons(dataset_estimated, icp_trajectory_est, dataset_gt.camera_trajectory,
                                    pred_label='icp_est', gt_label='colmap', results_dict=icp_results,
                                    output_folder=icp_results_path)

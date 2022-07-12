@@ -3,7 +3,6 @@ import logging
 import os
 import re
 import subprocess
-import warnings
 from collections import OrderedDict
 from os.path import join as pjoin
 from typing import Optional, List
@@ -13,7 +12,6 @@ import trimesh
 from tqdm import tqdm
 
 from thirdparty.tsdf_fusion_python import fusion
-from video2mesh.geometry import pose_vec2mat
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset
 from video2mesh.options import StaticMeshOptions, MaskDilationOptions, MeshReconstructionMethod
@@ -42,13 +40,16 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
     mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
     frame_range = frame_set if frame_set is not None else range(num_frames)
 
+    # Need to take inverse since poses are world-to-cam, but TSDFFusion appears to expect cam-to-world poses.
+    camera_trajectory = dataset.camera_trajectory.inverse().to_homogenous_transforms()
+
     for i in frame_range:
         # Read depth image and camera pose
         mask = dataset.mask_dataset[i]
         mask = dilate_mask(mask, mask_dilation_options)
         depth_im = dataset.depth_dataset[i]
         depth_im[mask > 0] = 0.0
-        cam_pose = pose_vec2mat(dataset.camera_trajectory[i])  # 4x4 rigid transformation matrix
+        cam_pose = camera_trajectory[i]  # 4x4 rigid transformation matrix
 
         # Compute camera view frustum and extend convex hull
         view_frust_pts = fusion.get_view_frustum(depth_im, dataset.camera_matrix, cam_pose)
@@ -75,7 +76,7 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
         mask = dilate_mask(mask, mask_dilation_options)
         depth_im = dataset.depth_dataset[i]
         depth_im[mask > 0] = 0.0
-        cam_pose = pose_vec2mat(dataset.camera_trajectory[i])
+        cam_pose = camera_trajectory[i]
 
         # Integrate observation into voxel volume (assume color aligned with depth)
         tsdf_vol.integrate(color_image, depth_im, dataset.camera_matrix, cam_pose, obs_weight=1.)

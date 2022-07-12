@@ -19,10 +19,11 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from thirdparty.dpt import dpt
-from video2mesh.geometry import normalise_trajectory, invert_trajectory
-from video2mesh.io import DatasetBase, File, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
-    create_masks, Size, VideoMetadata, InvalidDatasetFormatError
+from video2mesh.geometry import Trajectory
+from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
+    create_masks, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, StaticMeshOptions
+from video2mesh.types import Size, File
 from video2mesh.utils import tqdm_imap
 
 
@@ -61,7 +62,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         """
         raise NotImplementedError
 
-    def get_camera_trajectory(self) -> np.ndarray:
+    def get_camera_trajectory(self) -> Trajectory:
         """
         Get the ground truth camera trajectory.
         If the dataset does not have a ground truth camera trajectory, a `NotImplementedError` is raised.
@@ -69,7 +70,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         :return: The (N, 7) ground truth camera trajectory, if it exists.
         """
         trajectory = np.vstack([self.get_pose(i) for i in range(self.num_frames)])
-        trajectory = normalise_trajectory(trajectory)
+        trajectory = Trajectory(trajectory)
 
         return trajectory
 
@@ -212,7 +213,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         logging.info(f"Creating camera trajectory file.")
         camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
         # noinspection PyTypeChecker
-        np.savetxt(camera_trajectory_path, camera_trajectory)
+        camera_trajectory.save(camera_trajectory_path)
 
         logging.info(f"Created new dataset at {self.output_path}.")
 
@@ -296,7 +297,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         return frames, frames_subset
 
     def _estimate_camera_parameters(self, output_folder: str, output_depth_folder: str, metadata: DatasetMetadata) -> \
-            Tuple[np.ndarray, np.ndarray]:
+            Tuple[np.ndarray, Trajectory]:
         """
         Estimate the camera parameters (intrinsics and extrinsics) with COLMAP.
 
@@ -346,7 +347,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         if self.frame_step > 1:
             camera_poses_scaled = self._interpolate_poses(camera_poses_scaled, keyframes=frames_subset)
 
-        return camera_matrix, normalise_trajectory(invert_trajectory(camera_poses_scaled))
+        return camera_matrix, Trajectory(camera_poses_scaled).normalise()
 
     @staticmethod
     def _get_scaled_colmap_camera_params(colmap_processor: COLMAPProcessor,
@@ -501,7 +502,8 @@ class TUMAdaptor(DatasetAdaptor):
         if num_frames == -1:
             self.num_frames = len(self.image_filenames)
 
-        self.camera_trajectory = normalise_trajectory(self.camera_trajectory)
+        # Take inverse since TUM poses are cam-to-world, but most of the math assumes world-to-cam poses.
+        self.camera_trajectory = self.camera_trajectory.normalise().inverse()
         # TODO: Account for initial orientation of the kinect device?
 
     def _get_synced_frame_data(self):
@@ -580,7 +582,7 @@ class TUMAdaptor(DatasetAdaptor):
 
         trajectory_subset = np.array(list(map(process_trajectory_datum, trajectory_subset)))
 
-        return image_filenames_subset, depth_map_subset, trajectory_subset
+        return image_filenames_subset, depth_map_subset, Trajectory(trajectory_subset)
 
     def get_frame_path(self, index) -> str:
         return pjoin(self.base_path, self.rgb_folder, self.image_filenames[index])
@@ -735,7 +737,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
             if video.isOpened():
                 video.release()
 
-    def get_metadata(self, is_gt: bool) -> DatasetMetadata:
+    def get_metadata(self, estimate_pose: bool, estimate_depth: bool) -> DatasetMetadata:
         with self.open_video(self.video_path) as video:
             fps = float(video.get(cv2.CAP_PROP_FPS))
 
@@ -747,7 +749,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
 
         return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width, height=height,
-                               is_gt=is_gt, frame_step=self.frame_step,
+                               frame_step=self.frame_step, estimate_pose=estimate_pose, estimate_depth=estimate_depth,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
                                depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
@@ -920,7 +922,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
         self.camera_trajectory = self._load_camera_trajectory()
 
-    def _load_camera_trajectory(self):
+    def _load_camera_trajectory(self) -> Trajectory:
         """
         Load the camera poses.
 
@@ -939,7 +941,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
             trajectory.append((qx, qy, qz, qw, tx, ty, tz))
 
         trajectory = np.asarray(trajectory)
-        trajectory = normalise_trajectory(trajectory)
+        trajectory = Trajectory(trajectory).normalise()
 
         # TODO: Account for device orientation. The iPhone could have been help in portrait or landscape...
 

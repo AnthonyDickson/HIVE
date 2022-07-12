@@ -20,7 +20,7 @@ from trimesh.exchange.export import export_mesh
 
 from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAdaptor
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometry import pose_vec2mat, point_cloud_from_depth, world2image, get_pose_components
+from video2mesh.geometry import point_cloud_from_depth, world2image, get_pose_components
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
@@ -95,7 +95,7 @@ class Pipeline:
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
-        centering_transform = self._get_centering_transform(dataset)
+        centering_transform = self._get_centering_transform()
 
         logging.info("Creating background mesh(es)...")
 
@@ -181,12 +181,12 @@ class Pipeline:
             dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
         else:
             base_kwargs = dict(
-                    base_path=dataset_path,
-                    output_path=f"{dataset_path}_vtm",
-                    num_frames=self.options.num_frames,
-                    frame_step=self.options.frame_step,
-                    overwrite_ok=storage_options.overwrite_ok,
-                    colmap_options=colmap_options
+                base_path=dataset_path,
+                output_path=f"{dataset_path}_vtm",
+                num_frames=self.options.num_frames,
+                frame_step=self.options.frame_step,
+                overwrite_ok=storage_options.overwrite_ok,
+                colmap_options=colmap_options
             )
 
             if TUMAdaptor.is_valid_folder_structure(dataset_path):
@@ -291,15 +291,11 @@ class Pipeline:
         logging.info(
             f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
-    def _get_centering_transform(self, dataset):
-        camera_trajectory = dataset.camera_trajectory
-        pose = pose_vec2mat(camera_trajectory[0])
-        R, t = get_pose_components(pose)
-
+    @staticmethod
+    def _get_centering_transform():
         rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
         centering_transform = np.eye(4, dtype=np.float32)
-        centering_transform[:3, :3] = rot_180 @ R.T
-        centering_transform[:3, 3:] = -(R.T @ t)
+        centering_transform[:3, :3] = rot_180
 
         return centering_transform
 
@@ -356,11 +352,13 @@ class Pipeline:
             camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
         )
 
+        homogeneous_transformations = dataset.camera_trajectory.to_homogenous_transforms()
+
         def process_frame(i):
             rgb = dataset.rgb_dataset[i]
             depth = dataset.depth_dataset[i]
             mask_encoded = dataset.mask_dataset[i]
-            pose = dataset.camera_trajectory[i]
+            pose = homogeneous_transformations[i]
 
             frame_vertices = np.zeros((0, 3))
             frame_faces = np.zeros((0, 3))
@@ -372,10 +370,7 @@ class Pipeline:
 
             # Construct 3D Point Cloud
             rgb = np.ascontiguousarray(rgb[:, :, :3])
-            transform = pose_vec2mat(pose)
-            transform = np.linalg.inv(transform)
-            R = transform[:3, :3]
-            t = transform[:3, 3:]
+            R, t = get_pose_components(pose)
 
             mask_start_i = 0 if include_background else 1
             mask_end_i = 1 if background_only else mask_encoded.max() + 1
@@ -752,8 +747,10 @@ class Pipeline:
         pcd_bounds = np.zeros((2, 3), dtype=float)
         i = 0
 
+        homogeneous_transformations = dataset.camera_trajectory.to_homogenous_transforms()
+
         for depth_map, pose, mask_encoded in \
-                tqdm(zip(dataset.depth_dataset, dataset.camera_trajectory, dataset.mask_dataset),
+                tqdm(zip(dataset.depth_dataset, homogeneous_transformations, dataset.mask_dataset),
                      total=self.num_frames):
             if i >= self.num_frames:
                 break
@@ -762,10 +759,7 @@ class Pipeline:
 
             binary_mask = mask_encoded == 0
 
-            pose_matrix = pose_vec2mat(pose)
-            pose_matrix = np.linalg.inv(pose_matrix)
-            R = pose_matrix[:3, :3]
-            t = pose_matrix[:3, 3:]
+            R, t = get_pose_components(pose)
 
             points3d = point_cloud_from_depth(depth_map, binary_mask, dataset.camera_matrix, R, t)
 
