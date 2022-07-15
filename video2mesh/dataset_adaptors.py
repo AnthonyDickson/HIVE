@@ -1,4 +1,5 @@
 import contextlib
+import enum
 import logging
 import os
 import shutil
@@ -353,7 +354,7 @@ class DatasetAdaptor(DatasetBase, ABC):
     def _get_scaled_colmap_camera_params(colmap_processor: COLMAPProcessor,
                                          output_depth_folder: str,
                                          metadata: DatasetMetadata,
-                                         frames_subset: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+                                         frames_subset: List[int]) -> Tuple[np.ndarray, Trajectory]:
         """
         Scale the camera poses estimated by COLMAP to match the scale in the estimated depth maps.
 
@@ -655,9 +656,10 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                          frame_step=frame_step, colmap_options=colmap_options)
 
         self.video_path = video_path
+        self.full_num_frames = self._count_frames()
+        self.num_frames = self.full_num_frames if self.num_frames == -1 else self.num_frames
 
         with self.open_video(self.video_path) as video:
-            self.num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) if self.num_frames == -1 else self.num_frames
             self.source_width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.source_height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -676,6 +678,28 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         if self.target_height != self.source_height or self.target_width != self.source_width:
             logging.info(f"Will resize frames from {self.source_width}x{self.source_height} to "
                          f"{self.target_width}x{self.target_height} (width, height).")
+
+    def _count_frames(self) -> int:
+        """
+        Count the number of frames in the video sequence.
+        **Note**: This is done by getting and decoding each frame which will be slow (somewhere up to 3ms per frame).
+        Frames are counted this way since the metadata can be inaccurate, but this method is always accurate.
+
+        :return: The number of frames in the video.
+        """
+        logging.debug(f"Counting frames for the video {self.video_path}, this may take a few seconds...")
+        num_frames = 0
+
+        with self.open_video(self.video_path) as video:
+            while video.isOpened():
+                has_frame = video.grab()
+
+                if has_frame:
+                    num_frames += 1
+                else:
+                    break
+
+        return num_frames
 
     @staticmethod
     def _calculate_target_resolution(source_hw, target_hw):
@@ -754,8 +778,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                                depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_full_num_frames(self):
-        with self.open_video(self.video_path) as video:
-            return int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+        return self.full_num_frames
 
     def get_frame(self, index: int) -> np.ndarray:
         with self.open_video(self.video_path) as video:
@@ -771,18 +794,21 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
     def copy_frames(self, output_path: str, num_frames=-1):
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
-        self.extract_video(self.video_path, output_path, num_frames)
+        self.extract_video(self.video_path, output_path, num_frames,
+                           target_resolution=(self.target_height, self.target_width))
 
     @staticmethod
     def extract_video(path_to_video: str, output_path: str, num_frames: int = -1,
-                      target_resolution: Tuple[int, int] = None):
+                      target_resolution: Optional[Tuple[int, int]] = None,
+                      rotation: Optional[int] = None):
         """
         Extract the frames from a video file.
 
         :param path_to_video: The path to the video file.
         :param output_path: The folder to save the frames to.
         :param num_frames: The maximum number of frames to extract. If set to -1, all frames are extracted.
-        :param target_resolution: The resolution (height, width) to resize frames to.
+        :param target_resolution: (optional) The resolution (height, width) to resize frames to.
+        :param rotation: (optional) The rotation to apply to the video frames (see `cv2.ROTATE_*`).
         """
         ffmpeg_command = ['ffmpeg', '-i', path_to_video]
 
@@ -792,6 +818,19 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         if target_resolution is not None:
             height, width = target_resolution
             ffmpeg_command += ['-s', f"{width}x{height}"]
+
+        if rotation == cv2.ROTATE_90_CLOCKWISE:
+            ffmpeg_command += ['-vf', "transpose=1"]
+        elif rotation == cv2.ROTATE_180:
+            ffmpeg_command += ['-vf', "transpose=1,transpose=1"]
+        elif rotation == cv2.ROTATE_90_COUNTERCLOCKWISE:
+            ffmpeg_command += ['-vf', "transpose=2"]
+        elif rotation is not None:
+            raise ValueError(f"Expected `rotation` to be one of the following values: "
+                             f"[cv2.ROTATE_90_CLOCKWISE ({cv2.ROTATE_90_CLOCKWISE}), "
+                             f"[cv2.ROTATE_180 ({cv2.ROTATE_180}), "
+                             f"[cv2.ROTATE_90_COUNTERCLOCKWISE ({cv2.ROTATE_90_COUNTERCLOCKWISE})], "
+                             f"but got {rotation} instead.")
 
         ffmpeg_command += ['-start_number', str(0), pjoin(output_path, '%06d.png')]
 
@@ -875,6 +914,71 @@ class VideoAdaptor(VideoAdaptorBase):
         raise NotImplementedError
 
 
+# noinspection PyArgumentList
+class DeviceOrientation(enum.Enum):
+    """Names associating device orientation to a cardinal direction.
+    Rotation axis is about the z-axis, going counter-clockwise, with zero pointing in the negative x-axis (left).
+    """
+    # Lock button up (iPhone 13), no rotation
+    Landscape = enum.auto()
+    # 'Natural' vertical orientation, front-facing camera at top, 90 degrees CW
+    Portrait = enum.auto()
+    # Volume buttons up (iPhone 13), 180 degrees CW or CCW
+    LandscapeReverse = enum.auto()
+    # Upside down, 90 degrees CCW
+    PortraitReverse = enum.auto()
+
+    @classmethod
+    def from_angle(cls, angle, degrees=False) -> 'DeviceOrientation':
+        """
+        Get device orientation from an angle (roll).
+
+        :param angle: An angle between -180 and 180 [-PI, PI], usually the rotation about the z-axis (roll).
+        :param degrees: Whether the given angle is in degrees.
+        :return: The device orientation
+        """
+        if not degrees:
+            angle = np.rad2deg(angle)
+
+        # Divide circle into four quadrants with each quadrant extending 45 degrees either side of each
+        # cardinal direction (0, 90, 190 and 270 degrees).
+        if abs(angle) <= 45:
+            return DeviceOrientation.Landscape
+        elif -135 <= angle < -45:
+            return DeviceOrientation.Portrait
+        elif 45 < angle <= 135:
+            return DeviceOrientation.PortraitReverse
+        elif 135 < abs(angle) <= 180:
+            return DeviceOrientation.LandscapeReverse
+        else:
+            angle_message = f"Expected angle in interval [-180, 180], got {angle}"
+
+            if degrees:
+                exception_message = f"{angle_message}."
+            else:
+                exception_message = f"{angle_message} (angle converted from radians)."
+
+            raise ValueError(exception_message)
+
+    @classmethod
+    def to_opencv_rotation(cls, device_orientation: 'DeviceOrientation') -> Optional[int]:
+        """
+        Get the corresponding rotation (cv2 code, e.g. cv2.ROTATE_90_CLOCKWISE) for a device orientation such that when
+        applied would take a frame and put it the right way up (StrayScanner datasets).
+
+        :param device_orientation: The device orientation.
+        :return: The corresponding rotation code, None if
+        """
+        if device_orientation == DeviceOrientation.Portrait:
+            return cv2.ROTATE_90_CLOCKWISE
+        elif device_orientation == DeviceOrientation.LandscapeReverse:
+            return cv2.ROTATE_180
+        elif device_orientation == DeviceOrientation.PortraitReverse:
+            return cv2.ROTATE_90_COUNTERCLOCKWISE
+        else:  # device_orientation == DeviceOrientation.Landscape
+            return None
+
+
 class StrayScannerAdaptor(VideoAdaptorBase):
     """Converts a dataset captured with 'Stray Scanner' on an iOS device with a LiDAR sensor to the VTMDataset format."""
 
@@ -889,6 +993,8 @@ class StrayScannerAdaptor(VideoAdaptorBase):
     required_folders = [depth_folder, confidence_map_folder]
 
     depth_confidence_levels = [0, 1, 2]
+    valid_depth_map_types = {np.dtype('uint16'), np.dtype('uint32'), np.dtype('uint64'),
+                             np.dtype('int32'), np.dtype('int64')}
 
     def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
                  colmap_options=COLMAPOptions(),
@@ -922,11 +1028,26 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
         self.camera_trajectory = self._load_camera_trajectory()
 
+        # Note: This step must be done BEFORE the camera trajectory is normalised because the rotation will be reset.
+        roll = Rotation.from_quat(self.camera_trajectory.rotations[0]).as_euler('xyz')[-1]
+        self.device_orientation = DeviceOrientation.from_angle(roll)
+
+        if self.device_orientation in {DeviceOrientation.Portrait, DeviceOrientation.PortraitReverse}:
+            # The above orientations will cause the frames to be rotated 90 degrees, which swaps the frame height and
+            # width. So we need to make sure this change is reflected in the target resolution.
+            self.target_height, self.target_width = self.target_width, self.target_height
+
+        # TODO: Retain roll? What about pitch? Yaw can be safely discarded so that the scene is facing the
+        #  same direction for all scenes. Take angle modulus 90 degrees to account for when device is not held
+        #  perfectly level (pretty much always)?
+        self.camera_trajectory = self.camera_trajectory.normalise()
+        # TODO: Get this working with orientations other than `.Landscape`
+
     def _load_camera_trajectory(self) -> Trajectory:
         """
-        Load the camera poses.
+        Load the camera poses and.
 
-        :return: The Nx6 matrix where each row contains the rotation in axis-angle format and the translation vector.
+        :return: The Nx7 camera trajectory.
         """
         # Code adapted from https://github.com/kekeblom/StrayVisualizer/blob/df5f39c750e8eec62b130dc9c8a91bdbcff1d952/stray_visualize.py#L43
         trajectory_path = pjoin(self.base_path, self.camera_trajectory_filename)
@@ -941,9 +1062,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
             trajectory.append((qx, qy, qz, qw, tx, ty, tz))
 
         trajectory = np.asarray(trajectory)
-        trajectory = Trajectory(trajectory).normalise()
-
-        # TODO: Account for device orientation. The iPhone could have been help in portrait or landscape...
+        trajectory = Trajectory(trajectory).inverse()
 
         return trajectory
 
@@ -964,20 +1083,38 @@ class StrayScannerAdaptor(VideoAdaptorBase):
     def get_pose(self, index: int) -> np.ndarray:
         return self.camera_trajectory[index]
 
+    def copy_frames(self, output_path: str, num_frames=-1):
+        num_frames = self.num_frames if num_frames == -1 else num_frames
+
+        self.extract_video(self.video_path, output_path, num_frames,
+                           target_resolution=(self.target_height, self.target_width),
+                           rotation=DeviceOrientation.to_opencv_rotation(self.device_orientation))
+
     def get_depth_map(self, index: int) -> np.ndarray:
-        filename = f"{index:06d}"
-        depth_map_path = pjoin(self.base_path, self.depth_folder, f"{filename}.npy")
-        depth_map = np.load(depth_map_path)
+        filename = VTMDataset.index_to_filename(index, file_extension='png')
+        depth_map_path = pjoin(self.base_path, self.depth_folder, filename)
+        depth_map = imageio.v3.imread(depth_map_path)
 
-        if depth_map.dtype != np.uint16:
-            raise RuntimeError(f"Expected 16-bit depth maps, got {depth_map.dtype}.")
+        if depth_map.dtype not in self.valid_depth_map_types:
+            raise RuntimeError(f"Expected depth map of one the following types: {self.valid_depth_map_types}, "
+                               f"but got {depth_map.dtype}.")
 
-        confidence_map_path = pjoin(self.base_path, self.confidence_map_folder, f"{filename}.png")
+        confidence_map_path = pjoin(self.base_path, self.confidence_map_folder, filename)
         confidence_map = imageio.v3.imread(confidence_map_path)
 
         depth_map[confidence_map < self.depth_confidence_filter_level] = 0
 
-        depth_map = cv2.resize(depth_map, (self.target_width, self.target_height))
+        # cv2.resize(...) only works with floating point type arrays.
+        original_type = depth_map.dtype
+        depth_map = depth_map.astype(np.float32)
+        # Creators of StrayScanner suggest that nearest neighbour interpolation should be used.
+        depth_map = cv2.resize(depth_map, dsize=(self.target_width, self.target_height),
+                               interpolation=cv2.INTER_NEAREST_EXACT)
+        depth_map = np.round(depth_map)
+        depth_map = depth_map.astype(original_type)
+
+        if rotation := DeviceOrientation.to_opencv_rotation(self.device_orientation):
+            depth_map = cv2.rotate(depth_map, rotation)
 
         return depth_map
 
