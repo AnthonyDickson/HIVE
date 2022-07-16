@@ -1,21 +1,21 @@
 [submodule "thirdparty/AdaBins"]
 	path = thirdparty/AdaBins
-	url = https://github.com/eight0153/AdaBins.git
+	url = https://github.com/AnthonyDickson/AdaBins.git
 [submodule "thirdparty/colmap"]
 	path = thirdparty/colmap
 	url = https://github.com/colmap/colmap.git
 [submodule "thirdparty/webxr3dvideo"]
 	path = thirdparty/webxr3dvideo
-	url = https://github.com/eight0153/webxr3dvideo.git
+	url = https://github.com/AnthonyDickson/webxr3dvideo.git
 [submodule "thirdparty/tsdf_fusion_python"]
 	path = thirdparty/tsdf_fusion_python
-	url = https://github.com/eight0153/tsdf-fusion-python.git
+	url = https://github.com/AnthonyDickson/tsdf-fusion-python.git
 [submodule "thirdparty/adelai_depth"]
 	path = thirdparty/adelai_depth
-	url = https://github.com/eight0153/AdelaiDepth.git
+	url = https://github.com/AnthonyDickson/AdelaiDepth.git
 [submodule "thirdparty/consistent_depth"]
 	path = thirdparty/consistent_depth
-	url = https://github.com/eight0153/consistent_video_depth.git
+	url = https://github.com/AnthonyDickson/consistent_video_depth.git
 [submodule "thirdparty/dpt"]
 	path = thirdparty/dpt
-	url = https://github.com/eight0153/DPT.git
+	url = https://github.com/AnthonyDickson/DPT.git
