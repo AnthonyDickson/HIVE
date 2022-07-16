@@ -3,3 +3,4 @@ results/
 thirdparty/
 checkpoints/
 experiment_results/
+*.log
