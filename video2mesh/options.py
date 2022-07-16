@@ -247,14 +247,28 @@ class MeshFilteringOptions(Options):
 
 # noinspection PyArgumentList
 class MeshReconstructionMethod(enum.Enum):
+    # Uses a TSDF to reconstruct the 3D scene like KinectFusion, but poses must be known beforehand.
     TSDFFusion = enum.auto()
+    # Similar to the TSDFFusion method, but run on small equal length subsequences instead of the entire video sequence.
+    TSDFFusionChunks = enum.auto()
+    # Uses a TSDF to reconstruct the 3D scene like KinectFusion, but uses 3D correspondence guided frame registration.
     BundleFusion = enum.auto()
+    # Uses the first RGB-D frame to create background mesh.
+    StaticRGBD = enum.auto()
+    # Each frame will have a background mesh created from its RGB-D data
+    RGBD = enum.auto()
+    # Like the `RGBD` method except the background is only swapped out after the camera has moved enough.
+    KeyframeRGBD = enum.auto()
 
     @classmethod
     def get_choices(cls):
         return {
             'tsdf_fusion': cls.TSDFFusion,
-            'bundle_fusion': cls.BundleFusion
+            'tsdf_fusion_chunks': cls.TSDFFusionChunks,
+            'bundle_fusion': cls.BundleFusion,
+            'static_rgbd': cls.StaticRGBD,
+            'rgbd': cls.RGBD,
+            'keyframe_rgbd': cls.KeyframeRGBD
         }
 
     @classmethod
@@ -267,23 +281,25 @@ class MeshReconstructionMethod(enum.Enum):
             raise RuntimeError(f"No method called {name}, valid choices are: {list(choices.keys())}")
 
 
-class StaticMeshOptions(Options):
-    supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion]
+class BackgroundMeshOptions(Options):
+    supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion,
+                                        MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
                  sdf_volume_size=3.0, sdf_voxel_size=0.02, sdf_num_voxels: Optional[int] = None):
         """
-        :param reconstruction_method: The method to use for reconstructing the static mesh.
+        :param reconstruction_method: The method to use for reconstructing the background mesh(es).
         :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
             depth maps.
         :param sdf_volume_size: The size of the SDF volume in cubic meters. This option has no effect for the
-            reconstruction method `TSDF_FUSION` as it automatically infers the volume size from the input data.
-        :param sdf_voxel_size: The size of a voxel in the SDF volume in cubic meters.
+            reconstruction method `tsdf_fusion` as it automatically infers the volume size from the input data.
+        :param sdf_voxel_size: The size of a voxel in the SDF volume in cubic meters. Only applies to the reconstruction
+            methods `tsdf_fusion` and `bundle_fusion`.
         :param sdf_num_voxels: (optional) The desired number of voxels in the resulting voxel volume.
-            This option only has an effect for the reconstruction method `TSDF_FUSION`.
+            This option only has an effect for the reconstruction method `tsdf_fusion`.
             If specified, the `sdf_voxel_size` option will be ignored.
         """
-        assert reconstruction_method in StaticMeshOptions.supported_reconstruction_methods, \
+        assert reconstruction_method in BackgroundMeshOptions.supported_reconstruction_methods, \
             f"Reconstruction method must be one of the following: " \
             f"{[method.name for method in self.supported_reconstruction_methods]}, but got {reconstruction_method} " \
             f"instead."
@@ -306,7 +322,7 @@ class StaticMeshOptions(Options):
         group.add_argument('--mesh_reconstruction_method', type=str,
                            help="The method to use for reconstructing the static mesh.",
                            choices=[method.name.lower() for method in
-                                    StaticMeshOptions.supported_reconstruction_methods],
+                                    BackgroundMeshOptions.supported_reconstruction_methods],
                            default='tsdf_fusion')
         group.add_argument('--depth_mask_dilation_iterations', type=int,
                            help="The number of times to dilate the dynamic object masks for masking the depth maps.",
@@ -323,8 +339,8 @@ class StaticMeshOptions(Options):
                                 "If specified, the `--sdf_voxel_size` option will be ignored.")
 
     @staticmethod
-    def from_args(args: argparse.Namespace) -> 'StaticMeshOptions':
-        return StaticMeshOptions(
+    def from_args(args: argparse.Namespace) -> 'BackgroundMeshOptions':
+        return BackgroundMeshOptions(
             reconstruction_method=MeshReconstructionMethod.from_string(args.mesh_reconstruction_method),
             depth_mask_dilation_iterations=args.depth_mask_dilation_iterations,
             sdf_volume_size=args.sdf_volume_size,
@@ -365,14 +381,11 @@ class ForegroundTrajectorySmoothingOptions(Options):
 class PipelineOptions(Options):
 
     def __init__(self,
-                 include_background=False, static_background=False,
                  num_frames=-1, frame_step=1,
                  estimate_pose=False, estimate_depth=False,
                  log_file='logs.log',
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
-        :param include_background: Include the background in the reconstructed mesh.
-        :param static_background: Whether to use the first frame to generate a static background.
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
@@ -382,8 +395,6 @@ class PipelineOptions(Options):
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         """
-        self.include_background = include_background
-        self.static_background = static_background
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.estimate_pose = estimate_pose
@@ -396,11 +407,6 @@ class PipelineOptions(Options):
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('Pipeline')
 
-        group.add_argument('--include_background', help='Include the background in the reconstructed mesh.',
-                           action='store_true')
-        group.add_argument('--static_background',
-                           help='Whether to use the first frame to generate a static background.',
-                           action='store_true')
         group.add_argument('--num_frames', type=int, default=-1,
                            help='The maximum of frames to process. Set to -1 (default) to process all frames.')
         group.add_argument('--frame_step', type=int, default=1,
@@ -421,8 +427,6 @@ class PipelineOptions(Options):
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
         return PipelineOptions(
-            include_background=args.include_background,
-            static_background=args.static_background,
             num_frames=args.num_frames,
             frame_step=args.frame_step,
             estimate_pose=args.estimate_pose,

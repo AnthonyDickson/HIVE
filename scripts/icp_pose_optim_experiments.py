@@ -20,7 +20,7 @@ from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory
-from video2mesh.options import StaticMeshOptions
+from video2mesh.options import BackgroundMeshOptions
 from video2mesh.pose_optimisation import PoseOptimiser, FeatureExtractionOptions, OptimisationOptions, OptimisationStep
 
 
@@ -325,7 +325,7 @@ def main(output_path: str, data_path: str, random_seed: Optional[int] = None, ov
     frame_step = 1
     icp_results = dict()
 
-    static_mesh_options = StaticMeshOptions(sdf_num_voxels=80000000, sdf_volume_size=10.0)
+    static_mesh_options = BackgroundMeshOptions(sdf_num_voxels=80000000, sdf_volume_size=10.0)
 
     icp_results_path = pjoin(output_path, 'icp')
     os.makedirs(icp_results_path, exist_ok=True)

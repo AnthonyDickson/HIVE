@@ -1,3 +1,7 @@
+"""
+This module contains the code for running the pipeline end-to-end (minus the renderer).
+"""
+
 import argparse
 import datetime
 import json
@@ -24,7 +28,7 @@ from video2mesh.geometry import point_cloud_from_depth, world2image, get_pose_co
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
-    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StaticMeshOptions, \
+    MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
     ForegroundTrajectorySmoothingOptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
@@ -39,7 +43,7 @@ class Pipeline:
     def __init__(self, options: PipelineOptions, storage_options: StorageOptions,
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
-                 colmap_options=COLMAPOptions(), static_mesh_options=StaticMeshOptions(),
+                 colmap_options=COLMAPOptions(), static_mesh_options=BackgroundMeshOptions(),
                  fts_options=ForegroundTrajectorySmoothingOptions()):
         """
         :param options: Options pertaining to the core program.
@@ -57,20 +61,12 @@ class Pipeline:
         self.decimation_options = decimation_options
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
-        self.static_mesh_options = static_mesh_options
+        self.background_mesh_options = static_mesh_options
         self.fts_options = fts_options
 
     @property
     def num_frames(self) -> int:
         return self.options.num_frames
-
-    @property
-    def include_background(self) -> bool:
-        return self.options.include_background
-
-    @property
-    def static_background(self) -> bool:
-        return self.options.static_background
 
     @property
     def estimate_pose(self) -> bool:
@@ -99,17 +95,13 @@ class Pipeline:
 
         logging.info("Creating background mesh(es)...")
 
-        # TODO: Rename `include_background` to something that describes its purpose more accurately.
-        if self.include_background or self.static_background:
-            frame_step = 1 if self.static_background else int(round(dataset.fps))
+        if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
+                                                                  MeshReconstructionMethod.RGBD):
+            static_background = self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.StaticRGBD
             background_scene = self._create_scene(dataset, include_background=True, background_only=True,
-                                                  static_background=self.static_background, frame_step=frame_step)
+                                                  static_background=static_background)
         else:
-            fx, fy, height, width = self._extract_camera_params(dataset.camera_matrix)
-
-            background_scene = trimesh.scene.Scene(
-                camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
-            )
+            background_scene = self._create_empty_scene(dataset)
 
             if self.num_frames >= 1:
                 if self.options.frame_step > 1:
@@ -123,7 +115,7 @@ class Pipeline:
                 frame_set = None
 
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
-                                                   options=self.static_mesh_options, frame_set=frame_set)
+                                                   options=self.background_mesh_options, frame_set=frame_set)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
         self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
@@ -144,7 +136,7 @@ class Pipeline:
         foreground_scene.apply_transform(centering_transform)
         background_scene.apply_transform(centering_transform)
 
-        if self.static_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
+        if self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
             background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
         scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
@@ -165,7 +157,10 @@ class Pipeline:
 
         webxr_metadata = dict(
             fps=dataset.fps,
-            use_vertex_colour_for_bg=not self.include_background
+            use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
+                MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
+                MeshReconstructionMethod.KeyframeRGBD
+            )
         )
 
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
@@ -209,7 +204,8 @@ class Pipeline:
 
             dataset = dataset_converter.convert(estimate_pose=self.estimate_pose, estimate_depth=self.estimate_depth)
 
-        self.options.num_frames = min(dataset.num_frames, self.num_frames)
+        if self.num_frames == -1:
+            self.options.num_frames = dataset.num_frames
 
         return dataset
 
@@ -281,15 +277,12 @@ class Pipeline:
         logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
         logging.info('#' + '=' * 78 + '#')
         logging.info(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
-        logging.info(f"   Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        logging.info(f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
-        logging.info(
-            f"Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
-        logging.info(
-            f"     Dynamic Scene Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
-        logging.info(
-            f"      Static Scene Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
+        logging.info(f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
+        logging.info(f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
+        logging.info(f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
     @staticmethod
     def _get_centering_transform():
@@ -321,6 +314,21 @@ class Pipeline:
 
         logging.info(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
 
+    @staticmethod
+    def _create_empty_scene(dataset: VTMDataset) -> trimesh.Scene:
+        """
+        Create an empty trimesh scene initialised with a camera.
+
+        :param dataset: The dataset that has the camera intrinsics.
+        :return: an empty trimesh scene initialised with a camera.
+        """
+        return trimesh.scene.Scene(
+            camera=trimesh.scene.Camera(
+                resolution=(dataset.frame_width, dataset.frame_height),
+                focal=(dataset.fx, dataset.fy)
+            )
+        )
+
     def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
                       static_background=False, keyframes_only=False, frame_step=1) -> trimesh.Scene:
         """
@@ -346,12 +354,7 @@ class Pipeline:
 
         camera_matrix = dataset.camera_matrix
 
-        fx, fy, height, width = self._extract_camera_params(camera_matrix)
-
-        scene = trimesh.scene.Scene(
-            camera=trimesh.scene.Camera(resolution=(width, height), focal=(fx, fy))
-        )
-
+        scene = self._create_empty_scene(dataset)
         homogeneous_transformations = dataset.camera_trajectory.to_homogenous_transforms()
 
         def process_frame(i):
@@ -479,7 +482,7 @@ class Pipeline:
         return scene
 
     @classmethod
-    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=StaticMeshOptions(),
+    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
                             frame_set: Optional[List[int]] = None):
         """
         Create a static mesh of the scene.
@@ -507,18 +510,13 @@ class Pipeline:
         return mesh
 
     @staticmethod
-    def _extract_camera_params(camera_intrinsics):
-        cx = camera_intrinsics[0, 2]
-        cy = camera_intrinsics[1, 2]
-        width = int(2 * cx)
-        height = int(2 * cy)
-        fx = camera_intrinsics[0, 0]
-        fy = camera_intrinsics[1, 1]
+    def _triangulate_faces(points: np.ndarray) -> np.ndarray:
+        """
+        Triangulate and get face indices from a set of 2D points.
 
-        return fx, fy, height, width
-
-    @staticmethod
-    def _triangulate_faces(points):
+        :param points: The Nx2 array of points.
+        :return: A Nx3 array of faces (3 vertex indices).
+        """
         validate_shape(points, 'points', expected_shape=(None, 2))
 
         tri = Delaunay(points)
@@ -795,7 +793,7 @@ def main():
     MeshFilteringOptions.add_args(parser)
     MeshDecimationOptions.add_args(parser)
     COLMAPOptions.add_args(parser)
-    StaticMeshOptions.add_args(parser)
+    BackgroundMeshOptions.add_args(parser)
 
     args = parser.parse_args()
 
@@ -805,7 +803,7 @@ def main():
     dilation_options = MaskDilationOptions.from_args(args)
     decimation_options = MeshDecimationOptions.from_args(args)
     colmap_options = COLMAPOptions.from_args(args)
-    static_mesh_options = StaticMeshOptions.from_args(args)
+    static_mesh_options = BackgroundMeshOptions.from_args(args)
 
     setup_logger(video2mesh_options.log_file)
     logging.debug(args)

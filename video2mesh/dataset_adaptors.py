@@ -23,7 +23,7 @@ from thirdparty.dpt import dpt
 from video2mesh.geometry import Trajectory
 from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
-from video2mesh.options import COLMAPOptions, StaticMeshOptions
+from video2mesh.options import COLMAPOptions, BackgroundMeshOptions
 from video2mesh.types import Size, File
 from video2mesh.utils import tqdm_imap
 
@@ -598,7 +598,7 @@ class TUMAdaptor(DatasetAdaptor):
     def get_metadata(self, estimate_pose: bool, estimate_depth: bool) -> DatasetMetadata:
         # TODO: Make the depth mask dilation iterations configurable.
         # This gets the default value for `depth_mask_dilation_iterations`.
-        depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
+        depth_mask_dilation_iterations = BackgroundMeshOptions().depth_mask_dilation_iterations
 
         return DatasetMetadata(num_frames=self.num_frames, frame_step=self.frame_step,
                                fps=self.fps, width=self.width, height=self.height,
@@ -770,7 +770,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         video_metadata = VideoMetadata(self.video_path, width=width, height=height, num_frames=self.num_frames, fps=fps)
 
         # This gets the default value for `depth_mask_dilation_iterations`.
-        depth_mask_dilation_iterations = StaticMeshOptions().depth_mask_dilation_iterations
+        depth_mask_dilation_iterations = BackgroundMeshOptions().depth_mask_dilation_iterations
 
         return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width, height=height,
                                frame_step=self.frame_step, estimate_pose=estimate_pose, estimate_depth=estimate_depth,

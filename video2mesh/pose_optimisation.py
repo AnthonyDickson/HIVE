@@ -18,7 +18,7 @@ from video2mesh.fusion import tsdf_fusion
 from video2mesh.geometry import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
     Trajectory
 from video2mesh.io import VTMDataset
-from video2mesh.options import StaticMeshOptions, MeshReconstructionMethod
+from video2mesh.options import BackgroundMeshOptions, MeshReconstructionMethod
 from video2mesh.utils import tqdm_imap, temp_seed, Domain, check_domain
 
 
@@ -1736,8 +1736,8 @@ def main():
     camera_trajectory, _, _ = optimiser.run(num_frames)
 
     if optimiser.debug_path:
-        reconstruction_options = StaticMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
-                                                   sdf_num_voxels=80000000)
+        reconstruction_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
+                                                       sdf_num_voxels=80000000)
         logging.info("Running TSDFFusion on initial pose data...")
         mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_before.export(pjoin(optimiser.debug_path, 'before.ply'))

@@ -14,10 +14,10 @@ from tqdm import tqdm
 from thirdparty.tsdf_fusion_python import fusion
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset
-from video2mesh.options import StaticMeshOptions, MaskDilationOptions, MeshReconstructionMethod
+from video2mesh.options import BackgroundMeshOptions, MaskDilationOptions, MeshReconstructionMethod
 
 
-def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
+def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames=-1,
                 frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
     """
     Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
@@ -27,6 +27,7 @@ def tsdf_fusion(dataset: VTMDataset, options=StaticMeshOptions(), num_frames=-1,
     :param options: The configuration for the voxel volume and depth map mask dilation.
     :param num_frames: (optional) Limits the number of frames used for the reconstruction.
         If set to -1, all frames from the dataset will be used.
+    :param frame_set: (optional) Specify which frames to include in the reconstruction.
     :return: The reconstructed textured triangle mesh.
     """
     if num_frames == -1:
@@ -227,7 +228,7 @@ class BundleFusionConfig:
 
 
 def bundle_fusion(output_folder: str, dataset: VTMDataset,
-                  options=StaticMeshOptions(MeshReconstructionMethod.BundleFusion), num_frames: int = -1) \
+                  options=BackgroundMeshOptions(MeshReconstructionMethod.BundleFusion), num_frames: int = -1) \
         -> trimesh.Trimesh:
     """
     Run the BundleFusion 3D reconstruction algorithm (http://graphics.stanford.edu/projects/bundlefusion/) on a dataset.
