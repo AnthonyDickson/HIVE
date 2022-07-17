@@ -69,6 +69,10 @@ class Pipeline:
         return self.options.num_frames
 
     @property
+    def mesh_export_path(self) -> str:
+        return pjoin(dataset.base_path, self.mesh_folder)
+
+    @property
     def estimate_pose(self) -> bool:
         return self.options.estimate_pose
 
@@ -91,7 +95,7 @@ class Pipeline:
         storage_options.base_path = dataset.base_path
         logging.info("Configured dataset")
 
-        mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
+        mesh_export_path = self.mesh_export_path
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform()
@@ -121,8 +125,6 @@ class Pipeline:
                                                    options=self.background_mesh_options, frame_set=frame_set)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
-        self._write_results(mesh_export_path, scene_name=f"bg_unaligned", scene=background_scene)
-
         logging.info("Creating foreground mesh(es)...")
         if self.fts_options.num_epochs > 0:
             smoothed_trajectory = ForegroundPoseOptimiser(dataset, learning_rate=self.fts_options.learning_rate,
@@ -132,8 +134,6 @@ class Pipeline:
                 foreground_scene = self._create_scene(dataset)
         else:
             foreground_scene = self._create_scene(dataset)
-
-        self._write_results(mesh_export_path, scene_name=f"fg_unaligned", scene=foreground_scene)
 
         logging.info("Aligning foreground and background scenes...")
         foreground_scene.apply_transform(centering_transform)
@@ -356,6 +356,8 @@ class Pipeline:
 
                 if is_object:
                     mask = dilate_mask(mask, self.dilation_options)
+                    # # TODO: Make depth filtering offset configurable via CLI.
+                    # depth[depth > np.median(depth) + 0.75] = 0.0
 
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
 
@@ -447,7 +449,7 @@ class Pipeline:
 
     @classmethod
     def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
-                            frame_set: Optional[List[int]] = None):
+                            frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
         """
         Create a static mesh of the scene.
 

@@ -369,12 +369,12 @@ class Trajectory:
 
         return vector_trajectory
 
-    def calculate_ate(self, other: 'Trajectory') -> float:
+    def calculate_ate(self, other: 'Trajectory') -> np.ndarray:
         """
         Calculate ATE (Absolute Trajectory Error) between this trajectory and another.
 
         :param other: The other trajectory.
-        :return: The alignment error (RMSE)
+        :return: The alignment error per frame.
         """
         if len(self) != len(other):
             raise RuntimeError(f"Got trajectories of unequal length ({len(self)} and {len(other)})")
@@ -386,14 +386,15 @@ class Trajectory:
         scale = np.sum(trajectory_normalised * other_normalised) / np.sum(np.square(other_normalised))
         alignment_error = other_normalised * scale - trajectory_normalised
 
-        return np.sqrt(np.mean(np.square(alignment_error)))
+        return alignment_error
 
-    def calculate_rpe(self, other: 'Trajectory') -> Tuple[float, float]:
+    def calculate_rpe(self, other: 'Trajectory') -> Tuple[np.ndarray, np.ndarray]:
         """
         Calculate the RPE (Relative Pose Error) between this trajectory and another.
 
         :param other: The other trajectory.
-        :return: A 2-tuple containing the rotational and translational errors, respectively.
+        :return: A 2-tuple containing the rotational error (radians) and translational error (meters) per frame,
+            respectively.
         """
         if len(self) != len(other):
             raise RuntimeError(f"Got trajectories of unequal length ({len(self)} and {len(other)})")
@@ -417,8 +418,8 @@ class Trajectory:
             translational_error.append(distance)
             rotational_error.append(angle)
 
-        translational_error = np.sqrt(np.mean(np.square(translational_error)))
-        rotational_error = np.sqrt(np.mean(np.square(rotational_error)))
+        rotational_error = np.asarray(rotational_error)
+        translational_error = np.asarray(translational_error)
 
         return rotational_error, translational_error
 
