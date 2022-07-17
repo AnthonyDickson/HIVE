@@ -184,7 +184,7 @@ class MeshDecimationOptions(Options):
 class MaskDilationOptions(Options):
     """Options for the function `dilate_mask`."""
 
-    def __init__(self, num_iterations=3, dilation_filter=cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))):
+    def __init__(self, num_iterations=0, dilation_filter=cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))):
         """
         :param num_iterations: The number of times to apply the dilation filter.
         :param dilation_filter: The filter to dilate with (e.g. cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)).
@@ -200,7 +200,7 @@ class MaskDilationOptions(Options):
                            help='The number of times to run a dilation filter over the '
                                 'object masks. A higher number results in larger masks and '
                                 'zero results in the original mask.',
-                           default=3)
+                           default=0)
 
     @staticmethod
     def from_args(args) -> 'MaskDilationOptions':
