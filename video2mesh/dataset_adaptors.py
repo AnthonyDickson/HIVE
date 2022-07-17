@@ -1,3 +1,8 @@
+"""
+This module contains the code for converting datasets of various formats into the standardised format. This also
+includes estimating camera parameters and depth maps (when specified).
+"""
+
 import contextlib
 import enum
 import logging
@@ -23,9 +28,12 @@ from thirdparty.dpt import dpt
 from video2mesh.geometry import Trajectory
 from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
-from video2mesh.options import COLMAPOptions, BackgroundMeshOptions
+from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions
 from video2mesh.types import Size, File
 from video2mesh.utils import tqdm_imap
+
+
+# TODO: Make depth estimation customisable via cli (e.g. max depth)
 
 
 class DatasetAdaptor(DatasetBase, ABC):
@@ -1214,3 +1222,70 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
         depth_map = depth_map.astype(np.uint16)
 
         imageio.imwrite(os.path.join(output_path, f"{i:06d}.png"), depth_map)
+
+
+def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
+                output_path: Optional[str] = None, resize_to: Union[int, Size] = 640,
+                depth_confidence_filter_level=0) -> VTMDataset:
+    """
+    Get a VTM formatted dataset or create one from another dataset format.
+
+    :param storage_options: The options that includes the path to the dataset.
+    :param colmap_options: The configuration to use for COLMAP if estimating camera pose.
+    :param pipeline_options: Configuration including whether to estimate pose or depth, the number of frames to include,
+        and the frame step for COLMAP/TSDFFusion.
+    :param output_path: (optional) where to save the dataset to if it needs to be created. If `None`, the dataset will
+        be created at `storage_options.base_path`.
+    :param resize_to: The resolution (height, width) to resize the images to. If an int is given, the longest side will
+        be scaled to this value and the shorter side will have its new length automatically calculated.
+    :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth value
+     to be kept. E.g. if set to 1, all pixels in the depth map where the corresponding pixel in the confidence map is
+     less than 1 will be ignored.
+    :return: the VTM formatted dataset.
+    """
+    dataset_path = storage_options.base_path
+
+    if output_path is not None:
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        elif storage_options.overwrite_ok:
+            logging.warning(f"Output folder {output_path} already exists! Since `overwrite_ok` is set to `True`, "
+                            f"the dataset in this folder will be overwritten.")
+        else:
+            raise FileExistsError(f"Output folder {output_path} already exists!")
+
+    if VTMDataset.is_valid_folder_structure(dataset_path):
+        dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
+    else:
+        base_kwargs = dict(
+            base_path=dataset_path,
+            output_path=f"{dataset_path}_vtm" if output_path is None else output_path,
+            num_frames=pipeline_options.num_frames,
+            frame_step=pipeline_options.frame_step,
+            overwrite_ok=storage_options.overwrite_ok,
+            colmap_options=colmap_options
+        )
+
+        if TUMAdaptor.is_valid_folder_structure(dataset_path):
+            dataset_converter = TUMAdaptor(**base_kwargs)
+        elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
+            dataset_converter = StrayScannerAdaptor(
+                **base_kwargs,
+                # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
+                resize_to=resize_to,
+                depth_confidence_filter_level=depth_confidence_filter_level
+                # TODO: Make depth confidence filter level configurable via cli.
+            )
+        elif VideoAdaptor.is_valid_folder_structure(dataset_path):
+            path_no_extensions, _ = os.path.splitext(dataset_path)
+
+            dataset_converter = VideoAdaptor(**base_kwargs, resize_to=resize_to)
+        elif not os.path.isdir(dataset_path):
+            raise RuntimeError(f"Could open the path {dataset_path} or it is not a folder.")
+        else:
+            raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
+
+        dataset = dataset_converter.convert(estimate_pose=pipeline_options.estimate_pose,
+                                            estimate_depth=pipeline_options.estimate_depth)
+
+    return dataset

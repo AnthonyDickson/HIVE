@@ -22,7 +22,7 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
 
-from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAdaptor
+from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAdaptor, get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import point_cloud_from_depth, world2image, get_pose_components
 from video2mesh.image_processing import dilate_mask
@@ -82,7 +82,10 @@ class Pipeline:
         storage_options = self.storage_options
 
         if dataset is None:
-            dataset = self.get_dataset()
+            dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
+
+            if self.num_frames == -1:
+                self.options.num_frames = dataset.num_frames
 
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
@@ -166,49 +169,6 @@ class Pipeline:
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
 
-    def get_dataset(self):
-        storage_options = self.storage_options
-        colmap_options = self.colmap_options
-
-        dataset_path = storage_options.base_path
-
-        if VTMDataset.is_valid_folder_structure(dataset_path):
-            dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
-        else:
-            base_kwargs = dict(
-                base_path=dataset_path,
-                output_path=f"{dataset_path}_vtm",
-                num_frames=self.options.num_frames,
-                frame_step=self.options.frame_step,
-                overwrite_ok=storage_options.overwrite_ok,
-                colmap_options=colmap_options
-            )
-
-            if TUMAdaptor.is_valid_folder_structure(dataset_path):
-                dataset_converter = TUMAdaptor(**base_kwargs)
-            elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
-                dataset_converter = StrayScannerAdaptor(
-                    **base_kwargs,
-                    # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
-                    resize_to=640,
-                    depth_confidence_filter_level=0  # TODO: Make depth confidence filter level configurable via cli.
-                )
-            elif VideoAdaptor.is_valid_folder_structure(dataset_path):
-                path_no_extensions, _ = os.path.splitext(dataset_path)
-
-                dataset_converter = VideoAdaptor(**base_kwargs, resize_to=640)
-            elif not os.path.isdir(dataset_path):
-                raise RuntimeError(f"Could open the path {dataset_path} or it is not a folder.")
-            else:
-                raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
-
-            dataset = dataset_converter.convert(estimate_pose=self.estimate_pose, estimate_depth=self.estimate_depth)
-
-        if self.num_frames == -1:
-            self.options.num_frames = dataset.num_frames
-
-        return dataset
-
     @staticmethod
     def _get_scene_bounds(foreground_scene, background_scene):
         """
@@ -277,12 +237,16 @@ class Pipeline:
         logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
         logging.info('#' + '=' * 78 + '#')
         logging.info(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
-        logging.info(f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        logging.info(
+            f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
-        logging.info(f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
-        logging.info(f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
-        logging.info(f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
+        logging.info(
+            f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
+        logging.info(
+            f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
+        logging.info(
+            f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
     @staticmethod
     def _get_centering_transform():
