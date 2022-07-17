@@ -387,7 +387,8 @@ class DatasetAdaptor(DatasetBase, ABC):
 
         logging.info("\tLoading estimated depth maps...")
         depth_dataset = ImageFolderDataset(output_depth_folder, transform=transform)
-        est_depth = np.asarray(tqdm_imap(depth_dataset.__getitem__, frames_subset))
+        depth_frame_subset = list(filter(lambda index: index < len(depth_dataset), frames_subset))
+        est_depth = np.asarray(tqdm_imap(depth_dataset.__getitem__, depth_frame_subset))
 
         num_frames = min(len(colmap_depth), len(est_depth))
 
@@ -1271,10 +1272,10 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
         elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = StrayScannerAdaptor(
                 **base_kwargs,
-                # Resize the longest side to 640  # TODO: Make target image size configurable via cli.
+                # TODO: Make target image size configurable via cli.
                 resize_to=resize_to,
-                depth_confidence_filter_level=depth_confidence_filter_level
                 # TODO: Make depth confidence filter level configurable via cli.
+                depth_confidence_filter_level=depth_confidence_filter_level
             )
         elif VideoAdaptor.is_valid_folder_structure(dataset_path):
             path_no_extensions, _ = os.path.splitext(dataset_path)

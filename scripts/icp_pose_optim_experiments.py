@@ -1,8 +1,11 @@
 import argparse
+import contextlib
+import datetime
 import json
 import logging
 import os.path
 import shutil
+import time
 import warnings
 from collections import defaultdict
 from os.path import join as pjoin
@@ -12,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 import pandas as pd
+import torch.cuda
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
@@ -20,9 +24,11 @@ from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
     get_identity_pose, add_pose, Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory
-from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, PipelineOptions, StorageOptions
+from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, ForegroundTrajectorySmoothingOptions, \
+    PipelineOptions, StorageOptions
 from video2mesh.pipeline import Pipeline
 from video2mesh.utils import setup_logger
+
 
 def setup(output_path: str, overwrite_ok: bool):
     if os.path.isdir(output_path) and not overwrite_ok:
@@ -58,19 +64,28 @@ def export_results(output_path):
             return pd.DataFrame.from_dict(pd_results_dict, orient='index')
 
     with pd.ExcelWriter(pjoin(output_path, 'results.xlsx')) as writer:
-        icp_results_df = read_results(pjoin(output_path, 'icp', 'summary.json'))
-        icp_results_df.to_excel(writer, sheet_name='ICP_BY_DATASET')
-        icp_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='ICP_BY_METHOD')
+        trajectory_results_df = read_results(pjoin(output_path, 'trajectory', 'summary.json'))
+        trajectory_results_df.to_excel(writer, sheet_name='TRAJECTORY_BY_DATASET')
+        trajectory_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='TRAJECTORY_BY_METHOD')
+
+        pipeline_results_df = read_results(pjoin(output_path, 'pipeline', 'summary.json'))
+        pipeline_results_df.to_excel(writer, sheet_name='PIPELINE_BY_DATASET')
+        pipeline_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='PIPELINE_BY_METHOD')
 
 
 def main(output_path: str, data_path: str, overwrite_ok=False):
+    logging.info("Starting experiments...")
+    logging.debug(str(dict(output_path=output_path, data_path=data_path, overwrite_ok=overwrite_ok)))
+
+    logging.info("Setting up folders...")
     setup(output_path=output_path, overwrite_ok=overwrite_ok)
-    # TODO: Fix logs not going to the right place.
-    log_file = pjoin(output_path, 'logs')
+
+    log_file = 'experiments.log'
     setup_logger(log_file)
 
+    logging.info("Creating datasets...")
     # TODO: Download any missing TUM datasets.
-    colmap_options = COLMAPOptions(quality='medium', dense=True)
+    colmap_options = COLMAPOptions(quality='medium')
 
     num_frames = 150
     frame_step = 1
@@ -92,12 +107,15 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
 
     for dataset_name in dataset_names:
         for label, options in ((gt_label, gt_options), ('cm', cm_options), ('est', est_options)):
+            logging.info(f"Creating dataset for '{dataset_name}' and config '{label}'...")
+
             datasets[label, dataset_name] = get_dataset(
                 StorageOptions(base_path=pjoin(data_path, dataset_name), overwrite_ok=overwrite_ok),
                 colmap_options, options, output_path=pjoin(output_path, f"{dataset_name}_{label}")
             )
 
     # Trajectory comparison
+    logging.info("Running trajectory comparisons...")
     trajectory_results = dict()
 
     trajectory_results_path = pjoin(output_path, 'trajectory')
@@ -161,6 +179,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
 
     for (label, dataset_name), dataset in datasets:
+        logging.info(f"Running trajectory comparison for dataset '{dataset_name}' and config '{label}'.")
         run_trajectory_comparisons(dataset,
                                    pred_trajectory=dataset.camera_trajectory,
                                    gt_trajectory=datasets[gt_label, dataset_name].camera_trajectory,
@@ -173,9 +192,11 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         json.dump(trajectory_results, f)
 
     # Scaled COLMAP + TSDFFusion vs BundleFusion
+    logging.info("Running reconstruction comparisons...")
     recon_folder = pjoin(output_path, 'reconstruction')
 
     for (label, dataset_name), dataset in datasets:
+        logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
         mesh_output_path = pjoin(recon_folder, dataset_name, label)
         os.makedirs(mesh_output_path, exist_ok=True)
 
@@ -184,29 +205,96 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         if frame_set[-1] != num_frames - 1:
             frame_set.append(num_frames - 1)
 
+        logging.info('Creating ground truth mesh...')
         gt_mesh = tsdf_fusion(datasets[gt_label, dataset_name], static_mesh_options, frame_set=frame_set)
         gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
 
+        logging.info('Creating TSDFFusion mesh with estimated data...')
         pred_mesh = tsdf_fusion(dataset, static_mesh_options, frame_set=frame_set)
         pred_mesh.export(pjoin(mesh_output_path, 'pred.ply'))
 
         # This is needed in case BundleFusion has already been run with the dataset.
+        logging.info('Creating BundleFusion mesh with estimated data...')
         dataset.overwrite_ok = overwrite_ok
 
         bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=static_mesh_options)
         bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
 
+    # Run the pipeline on the datasets, record some basic performance stats and test foreground trajectory smoothing.
+    logging.info("Running pipeline comparisons...")
     mesh_video_output_path = pjoin(output_path, 'pipeline')
 
-    for (label, dataset_name), dataset in datasets:
-        pipeline = Pipeline(PipelineOptions(num_frames, frame_step, log_file=log_file),
-                            StorageOptions(output_path, overwrite_ok),
-                            static_mesh_options=static_mesh_options,
-                            colmap_options=colmap_options)
-        pipeline.run(dataset)
+    pipeline_stats = dict()
 
-        export_path = pjoin(mesh_video_output_path, dataset_name, label)
+    class Profiler:
+        def __init__(self):
+            self.start = time.time()
+            self.end = time.time()
+
+            if torch.cuda.is_available():
+                self.peak_gpu_memory_usage = torch.cuda.max_memory_allocated()
+            else:
+                self.peak_gpu_memory_usage = None
+
+        def __enter__(self):
+            self.start = time.time()
+
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.end = time.time()
+
+            if torch.cuda.is_available():
+                self.peak_gpu_memory_usage = torch.cuda.max_memory_allocated()
+
+        @property
+        def elapsed(self) -> float:
+            """Get the runtime in seconds."""
+            if self.end > self.start:  # this means the time has probably been run properly.
+                return self.end - self.start
+            else:
+                return time.time() - self.start
+
+    fg_smoothing_settings = (
+        ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=10),
+        ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=25),
+    )
+
+    for (label, dataset_name), dataset in datasets:
+        logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
+        base_options = dict(
+            options=PipelineOptions(num_frames, frame_step, log_file=log_file),
+            storage_options=StorageOptions(output_path, overwrite_ok),
+            static_mesh_options=static_mesh_options,
+            colmap_options=colmap_options
+        )
+
+        with Profiler() as profiler:
+            pipeline = Pipeline(**base_options)
+            pipeline.run(dataset)
+
+        export_path = pjoin(mesh_video_output_path, dataset_name, label, 'no_smoothing')
         shutil.copytree(dataset.mesh_export_path, export_path)
+
+        add_key('runtime', dataset_name, label, pipeline_stats)
+        add_key('peak_gpu_ram_usage', dataset_name, label, pipeline_stats)
+
+        pipeline_stats['runtime'][dataset_name][label] = profiler.elapsed
+        pipeline_stats['peak_gpu_memory_usage'][dataset_name][label] = profiler.peak_gpu_memory_usage
+
+        for fg_smoothing_config in fg_smoothing_settings:
+            logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
+                         f"and foreground smoothing config {fg_smoothing_config}")
+
+            pipeline = Pipeline(**base_options, fts_options=fg_smoothing_config)
+            pipeline.run(dataset)
+
+            export_path = pjoin(
+                mesh_video_output_path, dataset_name, label,
+                f"smoothing_lr={fg_smoothing_config.learning_rate}_epochs={fg_smoothing_config.num_epochs}"
+            )
+            shutil.copytree(dataset.mesh_export_path, export_path)
 
     export_results(output_path)
 

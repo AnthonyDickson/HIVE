@@ -176,6 +176,9 @@ def setup_logger(log_path: Optional[str] = None):
     # TODO: Different files for 'simple' and 'detailed' output?
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
+    # This line is needed to ensure logging works as expected. Otherwise, logs may be unexpectedly written to certain
+    # streams or files.
+    logger.handlers = []
 
     detailed_formatter = logging.Formatter(
         '[%(asctime)s.%(msecs)03d] [%(levelname)s] %(pathname)s:%(lineno)s: %(funcName)s: %(message)s',
