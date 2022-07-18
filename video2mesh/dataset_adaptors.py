@@ -356,7 +356,9 @@ class DatasetAdaptor(DatasetBase, ABC):
         if self.frame_step > 1:
             camera_poses_scaled = self._interpolate_poses(camera_poses_scaled, keyframes=frames_subset)
 
-        return camera_matrix, Trajectory(camera_poses_scaled).normalise()
+        camera_poses_scaled = Trajectory(camera_poses_scaled[:self.num_frames])
+
+        return camera_matrix, camera_poses_scaled.normalise()
 
     @staticmethod
     def _get_scaled_colmap_camera_params(colmap_processor: COLMAPProcessor,
@@ -415,7 +417,7 @@ class DatasetAdaptor(DatasetBase, ABC):
         return camera_matrix, camera_poses_scaled
 
     @staticmethod
-    def _interpolate_poses(poses: np.ndarray, keyframes: List[int]) -> np.ndarray:
+    def _interpolate_poses(poses: Trajectory, keyframes: List[int]) -> Trajectory:
         """
         Interpolate the pose for frames with missing data (when `frame_step` > 1).
 
@@ -446,7 +448,7 @@ class DatasetAdaptor(DatasetBase, ABC):
             interpolated_poses[dst_start:dst_end + 1, 4:] = lerp(times_to_interpolate)
             interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
 
-        return interpolated_poses
+        return Trajectory(interpolated_poses)
 
 
 class TUMAdaptor(DatasetAdaptor):
@@ -1245,22 +1247,14 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
     :return: the VTM formatted dataset.
     """
     dataset_path = storage_options.base_path
+    output_path = f"{dataset_path}_vtm" if output_path is None else output_path
 
-    if output_path is not None:
-        if not os.path.exists(output_path):
-            os.makedirs(output_path)
-        elif storage_options.overwrite_ok:
-            logging.warning(f"Output folder {output_path} already exists! Since `overwrite_ok` is set to `True`, "
-                            f"the dataset in this folder will be overwritten.")
-        else:
-            raise FileExistsError(f"Output folder {output_path} already exists!")
-
-    if VTMDataset.is_valid_folder_structure(dataset_path):
-        dataset = VTMDataset(dataset_path, overwrite_ok=storage_options.overwrite_ok)
+    if VTMDataset.is_valid_folder_structure(output_path):
+        dataset = VTMDataset(output_path, overwrite_ok=storage_options.overwrite_ok)
     else:
         base_kwargs = dict(
             base_path=dataset_path,
-            output_path=f"{dataset_path}_vtm" if output_path is None else output_path,
+            output_path=output_path,
             num_frames=pipeline_options.num_frames,
             frame_step=pipeline_options.frame_step,
             overwrite_ok=storage_options.overwrite_ok,
