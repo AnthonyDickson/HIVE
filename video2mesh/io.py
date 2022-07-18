@@ -336,7 +336,7 @@ class COLMAPProcessor:
                             merge_successful = False
 
                 p.wait()
-                shutil.move(tmp_merged_folder, path_to_merged)
+                shutil.copytree(tmp_merged_folder, path_to_merged)
 
             if p.returncode == 0 and merge_successful:
                 logging.info(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")
