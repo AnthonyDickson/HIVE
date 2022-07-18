@@ -85,10 +85,10 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
 
     logging.info("Creating datasets...")
     # TODO: Download any missing TUM datasets.
-    colmap_options = COLMAPOptions(quality='medium')
+    colmap_options = COLMAPOptions(quality='medium', dense=True)
 
-    num_frames = 150
-    frame_step = 1
+    num_frames = 300
+    frame_step = 10
 
     gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=False,
                                  estimate_depth=False)
@@ -137,8 +137,8 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         experiment_path = pjoin(output_folder, dataset_name, pred_label)
         os.makedirs(experiment_path, exist_ok=True)
 
-        ate_per_frame = gt_trajectory.calculate_ate(pred_trajectory)
-        error_r, error_t = calculate_rpe(gt_trajectory, pred_trajectory)
+        ate = gt_trajectory.calculate_ate(pred_trajectory)
+        error_r, error_t = gt_trajectory.calculate_rpe(pred_trajectory)
 
         gt_trajectory.save(pjoin(experiment_path, 'gt_trajectory.txt'))
         pred_trajectory.save(pjoin(experiment_path, 'pred_trajectory.txt'))
@@ -148,7 +148,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         gt_trajectory.plot_comparison(pred_trajectory, output_path=pjoin(experiment_path, 'trajectory_comparison.png'))
 
         # noinspection PyTypeChecker
-        np.savetxt(pjoin(experiment_path, 'ate.txt'), ate_per_frame)
+        np.savetxt(pjoin(experiment_path, 'ate.txt'), ate)
         # noinspection PyTypeChecker
         np.savetxt(pjoin(experiment_path, f"rpe_r.txt"), error_r)
         # noinspection PyTypeChecker
@@ -158,7 +158,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
             return np.sqrt(np.mean(np.square(x)))
 
         logging.info(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}:")
-        logging.info(f"\tATE: {rmse(ate_per_frame):.2f}m")
+        logging.info(f"\tATE: {rmse(ate):.2f}m")
         logging.info(f"\tRPE (rot): {rmse(np.rad2deg(error_r)):.2f}\N{DEGREE SIGN}")
         logging.info(f"\tRPE (tra): {rmse(error_t):.2f}m")
 
@@ -178,7 +178,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     # TODO: Run on same clips as the examples in the NeRF papers
     # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
 
-    for (label, dataset_name), dataset in datasets:
+    for (label, dataset_name), dataset in datasets.items():
         logging.info(f"Running trajectory comparison for dataset '{dataset_name}' and config '{label}'.")
         run_trajectory_comparisons(dataset,
                                    pred_trajectory=dataset.camera_trajectory,
@@ -195,7 +195,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     logging.info("Running reconstruction comparisons...")
     recon_folder = pjoin(output_path, 'reconstruction')
 
-    for (label, dataset_name), dataset in datasets:
+    for (label, dataset_name), dataset in datasets.items():
         logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
         mesh_output_path = pjoin(recon_folder, dataset_name, label)
         os.makedirs(mesh_output_path, exist_ok=True)
@@ -261,7 +261,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=25),
     )
 
-    for (label, dataset_name), dataset in datasets:
+    for (label, dataset_name), dataset in datasets.items():
         logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
         base_options = dict(
             options=PipelineOptions(num_frames, frame_step, log_file=log_file),

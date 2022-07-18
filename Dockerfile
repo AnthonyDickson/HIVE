@@ -66,7 +66,7 @@ ARG BUNDLE_FUSION_FOLDER=bundle_fusion
 ENV BUNDLE_FUSION_PATH=/${BUNDLE_FUSION_FOLDER}
 ENV BUNDLE_FUSION_BIN=/${BUNDLE_FUSION_FOLDER}/build/bundle_fusion_example
 
-RUN git clone https://github.com/eight0153/BundleFusion_Ubuntu_Pangolin.git ${BUNDLE_FUSION_FOLDER} && \
+RUN git clone https://github.com/AnthonyDickson/BundleFusion_Ubuntu_Pangolin.git ${BUNDLE_FUSION_FOLDER} && \
     cd ${BUNDLE_FUSION_FOLDER} && \
     git checkout 2b9c1df && \
     mkdir build && \
