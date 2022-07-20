@@ -1,28 +1,20 @@
 import argparse
-import contextlib
-import datetime
 import json
 import logging
 import os.path
 import shutil
 import time
-import warnings
 from collections import defaultdict
 from os.path import join as pjoin
-from typing import Tuple, Optional
+from typing import Tuple, Dict
 
-import matplotlib.pyplot as plt
 import numpy as np
-import open3d as o3d
 import pandas as pd
 import torch.cuda
-from scipy.spatial.transform import Rotation
-from tqdm import tqdm
 
-from video2mesh.dataset_adaptors import TUMAdaptor, get_dataset
+from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometry import pose_vec2mat, subtract_pose, pose_mat2vec, \
-    get_identity_pose, add_pose, Trajectory
+from video2mesh.geometry import Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, ForegroundTrajectorySmoothingOptions, \
     PipelineOptions, StorageOptions
