@@ -69,10 +69,6 @@ class Pipeline:
         return self.options.num_frames
 
     @property
-    def mesh_export_path(self) -> str:
-        return pjoin(dataset.base_path, self.mesh_folder)
-
-    @property
     def estimate_pose(self) -> bool:
         return self.options.estimate_pose
 
@@ -95,7 +91,7 @@ class Pipeline:
         storage_options.base_path = dataset.base_path
         logging.info("Configured dataset")
 
-        mesh_export_path = self.mesh_export_path
+        mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform()

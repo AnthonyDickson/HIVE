@@ -304,7 +304,7 @@ class COLMAPProcessor:
                 f"COLMAP reconstructed {num_models} models when 1 was expected. Attempting to merge models....")
 
             path_to_merged = pjoin(self.result_path, 'merged')
-            os.mkdir(path_to_merged)
+            os.makedirs(path_to_merged, exist_ok=True)
 
             input_pairs = [(models[0], models[1])]
 
@@ -336,7 +336,7 @@ class COLMAPProcessor:
                             merge_successful = False
 
                 p.wait()
-                shutil.copytree(tmp_merged_folder, path_to_merged)
+                shutil.copytree(tmp_merged_folder, path_to_merged, dirs_exist_ok=True)
 
             if p.returncode == 0 and merge_successful:
                 logging.info(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")

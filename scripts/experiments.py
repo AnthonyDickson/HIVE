@@ -164,7 +164,6 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
 
         add_key('rpe', dataset_name, pred_label, results_dict)
         add_key('ate', dataset_name, pred_label, results_dict)
-        add_key('mate', dataset_name, pred_label, results_dict)
 
         results_dict['ate'][dataset_name][pred_label] = rmse(ate)
         results_dict['rpe'][dataset_name][pred_label]['rotation'] = rmse(np.rad2deg(error_r))
@@ -188,7 +187,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
                                    results_dict=trajectory_results,
                                    output_folder=trajectory_results_path)
 
-    with open(pjoin(output_path, 'icp', 'summary.json'), 'w') as f:
+    with open(pjoin(trajectory_results_path, 'summary.json'), 'w') as f:
         json.dump(trajectory_results, f)
 
     # Scaled COLMAP + TSDFFusion vs BundleFusion
@@ -270,15 +269,19 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
             colmap_options=colmap_options
         )
 
-        with Profiler() as profiler:
+        # TODO: Need to run dataset adaptor for profiler to capture GPU RAM usage.
+        profiler = Profiler()
+
+        with profiler:
             pipeline = Pipeline(**base_options)
             pipeline.run(dataset)
 
         export_path = pjoin(mesh_video_output_path, dataset_name, label, 'no_smoothing')
-        shutil.copytree(dataset.mesh_export_path, export_path)
+        mesh_export_path = pjoin(dataset.base_path, Pipeline.mesh_folder)
+        shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
 
         add_key('runtime', dataset_name, label, pipeline_stats)
-        add_key('peak_gpu_ram_usage', dataset_name, label, pipeline_stats)
+        add_key('peak_gpu_memory_usage', dataset_name, label, pipeline_stats)
 
         pipeline_stats['runtime'][dataset_name][label] = profiler.elapsed
         pipeline_stats['peak_gpu_memory_usage'][dataset_name][label] = profiler.peak_gpu_memory_usage
@@ -294,7 +297,10 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
                 mesh_video_output_path, dataset_name, label,
                 f"smoothing_lr={fg_smoothing_config.learning_rate}_epochs={fg_smoothing_config.num_epochs}"
             )
-            shutil.copytree(dataset.mesh_export_path, export_path)
+            shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+
+    with open(pjoin(mesh_video_output_path, 'summary.json'), 'w') as f:
+        json.dump(pipeline_stats, f)
 
     export_results(output_path)
 

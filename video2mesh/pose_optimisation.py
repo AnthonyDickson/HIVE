@@ -1623,7 +1623,7 @@ class ForegroundPoseOptimiser:
         # (N, M, 3) tensor where: N is the number of frames;
         #  and M is the number of pixels belonging to dynamic objects in each depth map.
         point_clouds = tqdm_imap(get_point_cloud, list(range(num_frames)))
-        trajectory_torch = torch.from_numpy(self.dataset.camera_trajectory.copy())
+        trajectory_torch = self.dataset.camera_trajectory.tensor()
         params = OptimisationParameters(trajectory_torch, AlignmentType.Rigid).to(device)
 
         optimiser = torch.optim.Adam(params.parameters(), lr=self.learning_rate, weight_decay=1e-4)

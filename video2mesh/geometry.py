@@ -369,6 +369,14 @@ class Trajectory:
 
         return vector_trajectory
 
+    def tensor(self) -> torch.FloatTensor:
+        """
+        Get the trajectory as a Pytorch Tensor.
+
+        :return: A Nx7 float32 tensor.
+        """
+        return torch.from_numpy(self.values).to(torch.float32)
+
     def calculate_ate(self, other: 'Trajectory') -> np.ndarray:
         """
         Calculate ATE (Absolute Trajectory Error) between this trajectory and another.
