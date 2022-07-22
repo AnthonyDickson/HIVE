@@ -24,8 +24,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from thirdparty.colmap.scripts.python.read_write_model import read_model
+from thirdparty.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from video2mesh.geometry import Trajectory
-from video2mesh.image_processing import dilate_mask
+from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
 from video2mesh.types import File
 from video2mesh.utils import tqdm_imap, check_domain, Domain
@@ -230,15 +231,21 @@ class COLMAPProcessor:
         return pjoin(self.workspace_path, self.mask_folder)
 
     @property
-    def result_path(self):
+    def sparse_path(self) -> str:
+        """The path to the sparse reconstruction."""
         return pjoin(self.workspace_path, 'sparse')
 
     @property
-    def probably_has_results(self):
-        recon_result_path = pjoin(self.result_path, '0')
+    def dense_path(self) -> str:
+        """The path to the dense reconstruction."""
+        return pjoin(self.workspace_path, 'dense')
+
+    @property
+    def probably_has_results(self) -> bool:
+        recon_result_path = pjoin(self.sparse_path, '0')
         min_files_for_recon = 4
 
-        return os.path.isdir(self.result_path) and len(os.listdir(self.result_path)) > 0 and \
+        return os.path.isdir(self.sparse_path) and len(os.listdir(self.sparse_path)) > 0 and \
                (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
 
     def run(self):
@@ -293,17 +300,16 @@ class COLMAPProcessor:
         return ' '.join(command) if return_as_string else command
 
     def _load_model(self):
-
-        models = sorted(os.listdir(self.result_path))
+        models = sorted(os.listdir(self.sparse_path))
         num_models = len(models)
 
         if num_models == 1:
-            sparse_recon_path = pjoin(self.result_path, models[0])
+            sparse_recon_path = pjoin(self.sparse_path, models[0])
         else:
             logging.info(
                 f"COLMAP reconstructed {num_models} models when 1 was expected. Attempting to merge models....")
 
-            path_to_merged = pjoin(self.result_path, 'merged')
+            path_to_merged = pjoin(self.sparse_path, 'merged')
             os.makedirs(path_to_merged, exist_ok=True)
 
             input_pairs = [(models[0], models[1])]
@@ -316,7 +322,7 @@ class COLMAPProcessor:
 
             for input1, input2 in input_pairs:
                 # Use temporary folder for output to avoid any issues with reading/writing to same folder for num_models > 2.
-                tmp_merged_folder = pjoin(self.result_path, 'tmp')
+                tmp_merged_folder = pjoin(self.sparse_path, 'tmp')
 
                 if os.path.isdir(tmp_merged_folder):
                     shutil.rmtree(tmp_merged_folder)
@@ -324,8 +330,8 @@ class COLMAPProcessor:
                 os.mkdir(tmp_merged_folder)
 
                 merge_command = ['colmap', 'model_merger',
-                                 '--input_path1', pjoin(self.result_path, input1),
-                                 '--input_path2', pjoin(self.result_path, input2),
+                                 '--input_path1', pjoin(self.sparse_path, input1),
+                                 '--input_path2', pjoin(self.sparse_path, input2),
                                  f"--output_path", tmp_merged_folder]
 
                 with subprocess.Popen(merge_command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
@@ -341,7 +347,7 @@ class COLMAPProcessor:
             if p.returncode == 0 and merge_successful:
                 logging.info(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")
 
-                path_to_refined = pjoin(self.result_path, 'merged_refined')
+                path_to_refined = pjoin(self.sparse_path, 'merged_refined')
                 os.mkdir(path_to_refined)
 
                 bundle_adjustment_command = ['colmap', 'bundle_adjuster',
@@ -490,6 +496,53 @@ class COLMAPProcessor:
             u, v = np.round(image_data.xys[has_3d_points]).astype(int).T
 
             depth_maps[index_zero_based, v, u] = depth
+
+        return depth_maps
+
+    def get_dense_depth_maps(self, resize_to: Union[int, Tuple[int, int]] = None) -> np.ndarray:
+        """
+        Get the depth maps from the dense reconstruction.
+
+        :param resize_to: The resolution (height, width) to resize the depth maps to.
+            If an int is given, the longest side will be scaled to this value and the shorter side will have its new
+            length automatically calculated.
+        :return:
+        """
+        path_to_depth_maps = pjoin(self.dense_path, '0', 'stereo', 'depth_maps')
+
+        if not os.path.isdir(path_to_depth_maps):
+            raise NotADirectoryError(f"Could not find or open a folder at {path_to_depth_maps}. "
+                                     f"Did you run COLMAP with `dense = True`?")
+
+        if len(os.listdir(path_to_depth_maps)) == 0:
+            raise FileNotFoundError(f"Did not find any depth maps in the folder {path_to_depth_maps}. "
+                                    f"Did you run COLMAP with `dense = True`?")
+
+        depth_map_filenames = sorted(os.listdir(path_to_depth_maps))
+
+        if resize_to is not None:
+            source_height, source_width = load_colmap_depth_map(pjoin(path_to_depth_maps, depth_map_filenames[0])).shape
+            target_height, target_width = calculate_target_resolution((source_height, source_width), resize_to)
+
+            def load_depth_map(filename: str) -> np.ndarray:
+                path = pjoin(path_to_depth_maps, filename)
+                depth_map = load_colmap_depth_map(path)
+                depth_map = cv2.resize(depth_map, (target_width, target_height), interpolation=cv2.INTER_NEAREST_EXACT)
+
+                return depth_map
+        else:
+            def load_depth_map(filename: str) -> np.ndarray:
+                path = pjoin(path_to_depth_maps, filename)
+                depth_map = load_colmap_depth_map(path)
+
+                return depth_map
+
+        depth_maps = tqdm_imap(load_depth_map, depth_map_filenames)
+        depth_maps = np.asarray(depth_maps)
+
+        max_depth = np.quantile(depth_maps, 0.95)
+        depth_maps[depth_maps < 0] = 0
+        depth_maps[depth_maps > max_depth] = 0
 
         return depth_maps
 

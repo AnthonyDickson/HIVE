@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from thirdparty.dpt import dpt
 from video2mesh.geometry import Trajectory
+from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions
@@ -379,7 +380,11 @@ class DatasetAdaptor(DatasetBase, ABC):
 
         logging.info("Creating COLMAP depth maps...")
         camera_matrix, camera_poses = colmap_processor.load_camera_params(raw_pose=True)
-        colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
+
+        if colmap_processor.colmap_options.dense:
+            colmap_depth = colmap_processor.get_dense_depth_maps(resize_to=(metadata.height, metadata.width))
+        else:
+            colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
 
         def transform(depth_map):
             depth_map = VTMDataset.depth_scaling_factor * depth_map.astype(np.float32)
@@ -413,6 +418,21 @@ class DatasetAdaptor(DatasetBase, ABC):
 
         camera_poses_scaled = camera_poses.copy()
         camera_poses_scaled[:, 4:] *= scaling_factor
+
+        # TODO: Integrate COMAP depth maps more closely into the VTMDataset format.
+        if colmap_processor.colmap_options.dense:
+            parent_path = Path(output_depth_folder).parent
+            colmap_depth_output_path = pjoin(parent_path, 'colmap_depth')
+            os.makedirs(colmap_depth_output_path)
+
+            def save_depth(index_depth_map):
+                index, depth_map = index_depth_map
+                depth_map = 1000 * depth_map  # convert to mm
+                depth_map = depth_map.astype(np.uint16)
+                imageio.v3.imwrite(pjoin(colmap_depth_output_path, VTMDataset.index_to_filename(index)), depth_map)
+
+            logging.debug(f"Writing dense COLMAP depth maps to {colmap_depth_output_path}...")
+            tqdm_imap(save_depth, list(zip(frames_subset, colmap_depth_scaled)))
 
         return camera_matrix, camera_poses_scaled
 
@@ -677,12 +697,12 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         if isinstance(resize_to, tuple):
             resize_width, resize_height = resize_to
             self.target_height, self.target_width = \
-                self._calculate_target_resolution((self.source_height, self.source_width),
-                                                  (resize_height, resize_width))
+                calculate_target_resolution((self.source_height, self.source_width),
+                                                 (resize_height, resize_width))
         elif isinstance(resize_to, int):
             # noinspection PyTypeChecker
             self.target_height, self.target_width = \
-                self._calculate_target_resolution((self.source_height, self.source_width), resize_to)
+                calculate_target_resolution((self.source_height, self.source_width), resize_to)
         else:
             self.target_height, self.target_width = self.source_height, self.source_width
 
@@ -711,55 +731,6 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                     break
 
         return num_frames
-
-    @staticmethod
-    def _calculate_target_resolution(source_hw, target_hw):
-        """
-        Calculate the target resolution and perform some sanity checks.
-
-        :param source_hw: The resolution of the input frames. These are used if the target resolution is given as a
-            single value indicating the desired length of the longest side of the images.
-        :param target_hw: The resolution (height, width) to resize the images to.
-        :return: The target resolution as a 2-tuple (height, width).
-        """
-        if isinstance(target_hw, int):
-            # Cast results to int to avoid warning highlights in IDE.
-            longest_side = int(np.argmax(source_hw))
-            shortest_side = int(np.argmin(source_hw))
-
-            new_size = [0, 0]
-            new_size[longest_side] = target_hw
-
-            scale_factor = new_size[longest_side] / source_hw[longest_side]
-            new_size[shortest_side] = int(source_hw[shortest_side] * scale_factor)
-
-            target_hw = new_size
-        elif isinstance(target_hw, tuple):
-            if len(target_hw) != 2:
-                raise ValueError(f"The target resolution must be a 2-tuple, but got a {len(target_hw)}-tuple.")
-
-            if not isinstance(target_hw[0], int) or not isinstance(target_hw[1], int):
-                raise ValueError(f"Expected target resolution to be a 2-tuple of integers, but got a tuple of"
-                                 f" ({type(target_hw[0])}, {type(target_hw[1])}).")
-
-        target_orientation = 'portrait' if np.argmax(target_hw) == 0 else 'landscape'
-        source_orientation = 'portrait' if np.argmax(source_hw) == 0 else 'landscape'
-
-        if target_orientation != source_orientation:
-            logging.warning(
-                f"The input images appear to be in {source_orientation} ({source_hw[1]}x{source_hw[0]}), "
-                f"but they are being resized to what appears to be "
-                f"{target_orientation} ({target_hw[1]}x{target_hw[0]})")
-
-        source_aspect = np.round(source_hw[1] / source_hw[0], decimals=2)
-        target_aspect = np.round(target_hw[1] / target_hw[0], decimals=2)
-
-        if not np.isclose(source_aspect, target_aspect):
-            logging.warning(f"The aspect ratio of the source video is {source_aspect:.2f}, "
-                            f"however the aspect ratio of the target resolution is {target_aspect:.2f}. "
-                            f"This may lead to stretching in the images.")
-
-        return target_hw
 
     @staticmethod
     @contextlib.contextmanager
@@ -1153,6 +1124,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load network
+    # TODO: Make input resolution a parameter.
     net_w = 640
     net_h = 480
 
@@ -1213,8 +1185,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
                 torch.nn.functional.interpolate(
                     prediction.unsqueeze(1),
                     size=img.shape[:2],
-                    mode="bicubic",
-                    align_corners=False,
+                    mode="nearest",
                 )
                 .squeeze()
                 .cpu()
