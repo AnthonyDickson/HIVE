@@ -420,6 +420,8 @@ class DatasetAdaptor(DatasetBase, ABC):
         camera_poses_scaled[:, 4:] *= scaling_factor
 
         # TODO: Integrate COMAP depth maps more closely into the VTMDataset format.
+        # TODO: Fix edge case where last frame index is not multiple of frame step and is not copied
+        #  (See how frame_subset is created).
         if colmap_processor.colmap_options.dense:
             parent_path = Path(output_depth_folder).parent
             colmap_depth_output_path = pjoin(parent_path, 'colmap_depth')

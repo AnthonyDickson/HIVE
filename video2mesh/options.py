@@ -154,7 +154,9 @@ class MeshDecimationOptions(Options):
     def __init__(self, num_vertices_background=2 ** 14, num_vertices_object=2 ** 10, max_error=0.001):
         """
         :param num_vertices_background: The target number of vertices for the background mesh.
+            If set to -1, no mesh decimation is applied to the background.
         :param num_vertices_object: The target number of vertices for any object meshes.
+            If set to -1, no mesh decimation is applied to the foreground meshes..
         :param max_error: Not sure what this parameter does exactly...
         """
         self.num_vertices_background = num_vertices_background

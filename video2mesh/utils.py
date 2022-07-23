@@ -218,5 +218,6 @@ def setup_logger(log_path: Optional[str] = None):
     logging_stderr_handler.setFormatter(detailed_formatter)
     logger.addHandler(logging_stderr_handler)
 
+    # TODO: Get rid of matplotlib and trimesh debug output.
     # This line prevents PILLOW from polluting the debug logs.
     logging.getLogger('PIL').setLevel(logging.INFO)

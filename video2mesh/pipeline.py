@@ -531,6 +531,9 @@ class Pipeline:
         validate_shape(vertices, 'vertices', expected_shape=(None, 3))
         validate_shape(faces, 'faces', expected_shape=(None, 3))
 
+        if (is_object and options.num_vertices_object == -1) or (options.num_vertices_background == -1):
+            return vertices, faces
+
         # Construct temporary mesh.
         mesh = om.PolyMesh()
         mesh.add_vertices(vertices)
