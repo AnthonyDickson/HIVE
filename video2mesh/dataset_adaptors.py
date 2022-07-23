@@ -25,6 +25,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from thirdparty.dpt import dpt
+from thirdparty.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from video2mesh.geometry import Trajectory
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
@@ -666,6 +667,87 @@ class TUMAdaptor(DatasetAdaptor):
         tqdm_imap(copy_image, range(num_frames))
 
 
+class UnrealAdaptor(DatasetAdaptor):
+    """
+    Adaptor for datasets created with Unreal Engine and UnrealCV
+    (https://github.com/AnthonyDickson/UnrealDataset.git) Assumes VGA (640x480) input.
+    """
+
+    metadata_filename = "info.json"
+    camera_matrix_filename = "camera.txt"
+    camera_trajectory_filename = "trajectory.txt"
+
+    required_files = [metadata_filename, camera_matrix_filename, camera_trajectory_filename]
+
+    rgb_folder = "colour"
+    depth_folder = "depth"
+
+    required_folders = [rgb_folder, depth_folder]
+
+    depth_scale_factor = 1. / 1000.
+
+    def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
+                 colmap_options=COLMAPOptions()):
+        """
+        :param base_path: The path to the dataset.
+        :param output_path: The path to write the new dataset to.
+        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
+        """
+        super().__init__(base_path=base_path, output_path=output_path, overwrite_ok=overwrite_ok, num_frames=num_frames,
+                         frame_step=frame_step, colmap_options=colmap_options)
+
+        self.metadata = UnrealDatasetInfo.from_json(pjoin(base_path, self.metadata_filename))
+        self.camera_matrix = np.loadtxt(pjoin(base_path, self.camera_matrix_filename))
+
+        # TODO: Fix trajectory not being interpreted correctly.
+        camera_trajectory = np.loadtxt(pjoin(base_path, self.camera_trajectory_filename))
+        self.camera_trajectory = Trajectory(camera_trajectory).inverse().normalise()
+
+        if self.num_frames == -1:
+            self.num_frames = self.metadata.num_frames
+
+    def get_full_num_frames(self) -> int:
+        return self.metadata.num_frames
+
+    def get_metadata(self, estimate_pose: bool, estimate_depth: bool) -> DatasetMetadata:
+        # TODO: Make the depth mask dilation iterations configurable.
+        # This gets the default value for `depth_mask_dilation_iterations`.
+        depth_mask_dilation_iterations = BackgroundMeshOptions().depth_mask_dilation_iterations
+
+        return DatasetMetadata(
+            num_frames=self.num_frames,
+            fps=self.metadata.fps,
+            width=self.metadata.width,
+            height=self.metadata.height,
+            estimate_pose=estimate_pose,
+            estimate_depth=estimate_depth,
+            depth_mask_dilation_iterations=depth_mask_dilation_iterations,
+            depth_scale=self.depth_scale_factor,
+            frame_step=self.frame_step,
+            colmap_options=self.colmap_options
+        )
+
+    def get_camera_matrix(self) -> np.ndarray:
+        return self.camera_matrix
+
+    def get_pose(self, index: int) -> np.ndarray:
+        return self.camera_trajectory[index]
+
+    def get_frame(self, index: int) -> np.ndarray:
+        return imageio.v3.imread(pjoin(self.base_path, self.rgb_folder, VTMDataset.index_to_filename(index)))
+
+    def get_depth_map(self, index: int) -> np.ndarray:
+        depth_map = imageio.v3.imread(pjoin(self.base_path, self.depth_folder, VTMDataset.index_to_filename(index)))
+        depth_map = depth_map.astype(np.uint16)
+        # Depth should already be in mm, the expected format, so scaling is needed.
+
+        return depth_map
+
+
 class VideoAdaptorBase(DatasetAdaptor, ABC):
     """Base class for adaptors of video datasets."""
 
@@ -700,7 +782,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
             resize_width, resize_height = resize_to
             self.target_height, self.target_width = \
                 calculate_target_resolution((self.source_height, self.source_width),
-                                                 (resize_height, resize_width))
+                                            (resize_height, resize_width))
         elif isinstance(resize_to, int):
             # noinspection PyTypeChecker
             self.target_height, self.target_width = \
@@ -1236,6 +1318,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
 
         if TUMAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = TUMAdaptor(**base_kwargs)
+        elif UnrealAdaptor.is_valid_folder_structure(dataset_path):
+            dataset_converter = UnrealAdaptor(**base_kwargs)
         elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = StrayScannerAdaptor(
                 **base_kwargs,

@@ -19,3 +19,6 @@
 [submodule "thirdparty/dpt"]
 	path = thirdparty/dpt
 	url = https://github.com/AnthonyDickson/DPT.git
+[submodule "thirdparty/unreal_dataset"]
+	path = thirdparty/unreal_dataset
+	url = https://github.com/AnthonyDickson/UnrealDataset.git
