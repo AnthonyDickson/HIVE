@@ -5,6 +5,7 @@ includes estimating camera parameters and depth maps (when specified).
 
 import contextlib
 import enum
+import functools
 import logging
 import os
 import shutil
@@ -478,9 +479,9 @@ class TUMAdaptor(DatasetAdaptor):
     """
     Converts image, depth and pose data from a TUM formatted dataset to the VTM dataset format.
     """
-    # The below values are fixed and common to all subsets of the TUM dataset.
-    fx = 525.0  # focal length x
-    fy = 525.0  # focal length y
+    # The below values are the recommended defaults.
+    fx = 580.0  # focal length x
+    fy = 580.0  # focal length y
     cx = 319.5  # optical center x
     cy = 239.5  # optical center y
     width = 640
@@ -534,8 +535,15 @@ class TUMAdaptor(DatasetAdaptor):
 
         self.image_filenames, self.depth_filenames, self.camera_trajectory = self._get_synced_frame_data()
 
+        # TODO: Refactor this common pattern from the dataset adaptors into the base class.
+        full_num_frames = self.get_full_num_frames()
+
         if num_frames == -1:
-            self.num_frames = len(self.image_filenames)
+            self.num_frames = full_num_frames
+        elif num_frames > full_num_frames:
+            self.num_frames = full_num_frames
+        else:
+            self.num_frames = num_frames
 
         # Take inverse since TUM poses are cam-to-world, but most of the math assumes world-to-cam poses.
         self.camera_trajectory = self.camera_trajectory.normalise().inverse()
@@ -707,8 +715,13 @@ class UnrealAdaptor(DatasetAdaptor):
         camera_trajectory = np.loadtxt(pjoin(base_path, self.camera_trajectory_filename))
         self.camera_trajectory = Trajectory(camera_trajectory).inverse().normalise()
 
-        if self.num_frames == -1:
-            self.num_frames = self.metadata.num_frames
+        # TODO: Refactor this common pattern from the dataset adaptors into the base class.
+        if num_frames == -1:
+            self.num_frames = self.get_full_num_frames()
+        elif num_frames > self.get_full_num_frames():
+            self.num_frames = self.get_full_num_frames()
+        else:
+            self.num_frames = num_frames
 
     def get_full_num_frames(self) -> int:
         return self.metadata.num_frames
@@ -771,8 +784,16 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                          frame_step=frame_step, colmap_options=colmap_options)
 
         self.video_path = video_path
-        self.full_num_frames = self._count_frames()
-        self.num_frames = self.full_num_frames if self.num_frames == -1 else self.num_frames
+
+        # TODO: Refactor this common pattern from the dataset adaptors into the base class.
+        full_num_frames = self.get_full_num_frames()
+
+        if num_frames == -1:
+            self.num_frames = full_num_frames
+        elif num_frames > full_num_frames:
+            self.num_frames = full_num_frames
+        else:
+            self.num_frames = num_frames
 
         with self.open_video(self.video_path) as video:
             self.source_width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -794,6 +815,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
             logging.info(f"Will resize frames from {self.source_width}x{self.source_height} to "
                          f"{self.target_width}x{self.target_height} (width, height).")
 
+    @functools.lru_cache
     def _count_frames(self) -> int:
         """
         Count the number of frames in the video sequence.
@@ -844,7 +866,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                                depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_full_num_frames(self):
-        return self.full_num_frames
+        return self._count_frames()
 
     def get_frame(self, index: int) -> np.ndarray:
         with self.open_video(self.video_path) as video:

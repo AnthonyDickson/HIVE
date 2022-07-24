@@ -86,6 +86,10 @@ class Pipeline:
 
             if self.num_frames == -1:
                 self.options.num_frames = dataset.num_frames
+            else:
+                # This handles the case where the specified number of frames is more than the total number of frames in
+                # the non-truncated dataset.
+                self.options.num_frames = min(self.num_frames, dataset.num_frames)
 
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path
