@@ -97,7 +97,7 @@ The Docker containers will, by default, bring up the python interpreter.
 All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
-docker run --rm -gpus all -v $(pwd):/app -t dican732/video2mesh:cu117 
+docker run --rm -gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 
 ```
 For example, if you wanted to run the CUDA enabled container: 
 ```shell
