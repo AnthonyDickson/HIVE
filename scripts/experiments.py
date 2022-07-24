@@ -18,7 +18,7 @@ from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometry import Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory, DatasetMetadata
 from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, ForegroundTrajectorySmoothingOptions, \
-    PipelineOptions, StorageOptions, MeshDecimationOptions
+    PipelineOptions, StorageOptions, MeshDecimationOptions, MeshReconstructionMethod
 from video2mesh.pipeline import Pipeline
 from video2mesh.utils import setup_logger, tqdm_imap
 
@@ -92,7 +92,9 @@ def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajecto
         mesh = tsdf_fusion(dataset, background_mesh_options)
         mesh.export(pjoin(experiment_path, f"mesh.ply"))
 
-def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_options: BackgroundMeshOptions) -> Optional[trimesh.Trimesh]:
+
+def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_options: BackgroundMeshOptions) -> Optional[
+    trimesh.Trimesh]:
     depth_folder = pjoin(dataset.base_path, 'colmap_depth')
     rgb_files = [dataset.rgb_dataset.image_filenames[i] for i in frame_set]
     mask_files = [dataset.mask_dataset.image_filenames[i] for i in frame_set]
@@ -154,6 +156,7 @@ def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_opti
     shutil.rmtree(tmp_dir)
 
     return mesh
+
 
 def export_results(output_path):
     def read_results(path):
@@ -236,18 +239,21 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=True, estimate_depth=False)
     est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=True, estimate_depth=True)
 
-    background_mesh_options = BackgroundMeshOptions(sdf_num_voxels=80000000, sdf_volume_size=10.0)
+    tsdf_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
+                                              sdf_num_voxels=80000000, sdf_volume_size=10.0)
+    rgbd_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.RGBD)
     mesh_decimation_options = MeshDecimationOptions(num_vertices_object=-1, num_vertices_background=-1)
 
     # TODO: Make the dataset list configurable.
     dataset_names = ['rgbd_dataset_freiburg1_desk',
                      'rgbd_dataset_freiburg3_walking_xyz',
-                     'rgbd_dataset_freiburg3_sitting_xyz']
+                     'rgbd_dataset_freiburg3_sitting_xyz',
+                     'rgbd_dataset_freiburg2_desk_with_person',
+                     'rgbd_dataset_freiburg1_teddy',
+                     'edwardsBay']
 
     datasets: Dict[Tuple[str, str], VTMDataset] = dict()
     gt_label = 'gt'
-
-    # TODO: Add experiments that use COLMAP's dense depth maps scaled with estimated depth w/ TSDFFusion
 
     # Run the pipeline on the datasets, record some basic performance stats and test foreground trajectory smoothing.
     logging.info("Running pipeline comparisons...")
@@ -260,54 +266,78 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=25),
     )
 
-    for dataset_name in dataset_names:
-        for label, options in ((gt_label, gt_options), ('cm', cm_options), ('est', est_options)):
-            logging.info(f"Creating dataset for '{dataset_name}' and config '{label}'...")
+    # TODO: Extract function.
+    def run_pipeline_experiment(dataset_name: str, label: str, options: PipelineOptions,
+                                dataset_path: Optional[str] = None):
+        logging.info(f"Creating dataset for '{dataset_name}' and config '{label}'...")
 
-            profiler = Profiler()
+        if dataset_path is None:
+            dataset_path = pjoin(data_path, dataset_name)
 
-            with profiler:
-                dataset = get_dataset(
-                    StorageOptions(base_path=pjoin(data_path, dataset_name), overwrite_ok=overwrite_ok),
-                    colmap_options, options, output_path=pjoin(output_path, f"{dataset_name}_{label}")
-                )
+        profiler = Profiler()
 
-                datasets[label, dataset_name] = dataset
+        with profiler:
+            dataset = get_dataset(
+                StorageOptions(base_path=dataset_path, overwrite_ok=overwrite_ok),
+                colmap_options, options, output_path=pjoin(output_path, f"{dataset_name}_{label}")
+            )
 
-                logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
-                base_options = dict(
-                    options=PipelineOptions(num_frames, frame_step, log_file=log_file),
-                    storage_options=StorageOptions(output_path, overwrite_ok),
-                    decimation_options=mesh_decimation_options,
-                    static_mesh_options=background_mesh_options,
-                    colmap_options=colmap_options
-                )
+            logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
+            base_options = dict(
+                options=PipelineOptions(num_frames, frame_step, log_file=log_file),
+                storage_options=StorageOptions(output_path, overwrite_ok),
+                decimation_options=mesh_decimation_options,
+                static_mesh_options=tsdf_mesh_options,
+                colmap_options=colmap_options
+            )
 
-                pipeline = Pipeline(**base_options)
-                pipeline.run(dataset)
+            pipeline = Pipeline(**base_options)
+            pipeline.run(dataset)
 
-            export_path = pjoin(mesh_video_output_path, dataset_name, label, 'no_smoothing')
-            mesh_export_path = pjoin(dataset.base_path, Pipeline.mesh_folder)
+        export_path = pjoin(mesh_video_output_path, dataset_name, label, 'no_smoothing')
+        mesh_export_path = pjoin(dataset.base_path, Pipeline.mesh_folder)
+        shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+
+        add_key('runtime', dataset_name, label, pipeline_stats)
+        add_key('peak_gpu_memory_usage', dataset_name, label, pipeline_stats)
+
+        pipeline_stats['runtime'][dataset_name][label] = profiler.elapsed
+        pipeline_stats['peak_gpu_memory_usage'][dataset_name][label] = profiler.peak_gpu_memory_usage
+
+        for fg_smoothing_config in fg_smoothing_settings:
+            logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
+                         f"and foreground smoothing config {fg_smoothing_config}")
+
+            pipeline = Pipeline(**base_options, fts_options=fg_smoothing_config)
+            pipeline.run(dataset)
+
+            export_path = pjoin(
+                mesh_video_output_path, dataset_name, label,
+                f"smoothing_lr={fg_smoothing_config.learning_rate}_epochs={fg_smoothing_config.num_epochs}"
+            )
             shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
 
-            add_key('runtime', dataset_name, label, pipeline_stats)
-            add_key('peak_gpu_memory_usage', dataset_name, label, pipeline_stats)
+        # TODO: Fix crash (code 137) when it gets to desk sequence + cm config.
+        # # Pipeline using per-frame meshes.
+        # logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
+        #              f"and rgbd_mesh config {rgbd_mesh_options}...")
+        #
+        # per_frame_mesh_options = {**base_options, "static_mesh_options": rgbd_mesh_options}
+        # pipeline = Pipeline(**per_frame_mesh_options)
+        # pipeline.run(dataset)
+        #
+        # export_path = pjoin(mesh_video_output_path, dataset_name, label, 'rgbd_mesh')
+        # shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
 
-            pipeline_stats['runtime'][dataset_name][label] = profiler.elapsed
-            pipeline_stats['peak_gpu_memory_usage'][dataset_name][label] = profiler.peak_gpu_memory_usage
+        return dataset
 
-            for fg_smoothing_config in fg_smoothing_settings:
-                logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
-                             f"and foreground smoothing config {fg_smoothing_config}")
+    for dataset_name in dataset_names:
+        for label, options in ((gt_label, gt_options), ('cm', cm_options), ('est', est_options)):
+            datasets[label, dataset_name] = run_pipeline_experiment(dataset_name, label, options)
 
-                pipeline = Pipeline(**base_options, fts_options=fg_smoothing_config)
-                pipeline.run(dataset)
-
-                export_path = pjoin(
-                    mesh_video_output_path, dataset_name, label,
-                    f"smoothing_lr={fg_smoothing_config.learning_rate}_epochs={fg_smoothing_config.num_epochs}"
-                )
-                shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+    # Ours vs NeRF based methods
+    run_pipeline_experiment('kid_running', label='est', options=est_options,
+                            dataset_path=pjoin(data_path, f"kid_running.mp4"))
 
     with open(pjoin(mesh_video_output_path, 'summary.json'), 'w') as f:
         json.dump(pipeline_stats, f)
@@ -329,14 +359,10 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
                                    gt_label=gt_label,
                                    results_dict=trajectory_results,
                                    output_folder=trajectory_results_path,
-                                   background_mesh_options=background_mesh_options)
+                                   background_mesh_options=tsdf_mesh_options)
 
     with open(pjoin(trajectory_results_path, 'summary.json'), 'w') as f:
         json.dump(trajectory_results, f)
-
-    # Ours vs NeRF based methods
-    # TODO: Run on same clips as the examples in the NeRF papers
-    # TODO: Record runtime statistics (e.g., wall time, peak GPU memory usage)
 
     # Scaled COLMAP + TSDFFusion vs BundleFusion
     logging.info("Running reconstruction comparisons...")
@@ -353,23 +379,23 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
             frame_set.append(num_frames - 1)
 
         logging.info('Creating ground truth mesh...')
-        gt_mesh = tsdf_fusion(datasets[gt_label, dataset_name], background_mesh_options, frame_set=frame_set)
+        gt_mesh = tsdf_fusion(datasets[gt_label, dataset_name], tsdf_mesh_options, frame_set=frame_set)
         gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
 
         logging.info('Creating TSDFFusion mesh with estimated data...')
-        pred_mesh = tsdf_fusion(dataset, background_mesh_options, frame_set=frame_set)
+        pred_mesh = tsdf_fusion(dataset, tsdf_mesh_options, frame_set=frame_set)
         pred_mesh.export(pjoin(mesh_output_path, 'pred.ply'))
 
         # This is needed in case BundleFusion has already been run with the dataset.
         logging.info('Creating BundleFusion mesh with estimated data...')
         dataset.overwrite_ok = overwrite_ok
 
-        bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=background_mesh_options)
+        bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=tsdf_mesh_options)
         bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
 
         logging.info('Creating TSDFFusion mesh with COLMAP depth...')
 
-        if label != gt_label and (mesh := tsdf_fusion_with_colmap(dataset, frame_set, background_mesh_options)):
+        if label != gt_label and (mesh := tsdf_fusion_with_colmap(dataset, frame_set, tsdf_mesh_options)):
             mesh.export(pjoin(mesh_output_path, 'colmap_depth.ply'))
 
     export_results(output_path)
