@@ -126,7 +126,7 @@ python -m unittest discover $(pwd)/tests $(pwd)
 ```
 or in Docker:
 ```shell
-docker run --rm -gpus all -v $(pwd):/app -t dican732/video2mesh:cu117 -m unittest discover -s /app/tests -t /app
+docker run --rm --gpus all -v $(pwd):/app -t dican732/video2mesh:cu117 -m unittest discover -s /app/tests -t /app
 ```
 ## Input Data Format
 This program accepts datasets in three formats:
