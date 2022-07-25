@@ -15,12 +15,12 @@ git submodule update --init --recursive
 
 ## Setting Up Python
 Start by choosing on of the following methods for setting up the Python environment (Docker is the recommended approach):
-1. PIP - CUDA (11.)
+1. PIP - CUDA (11.7)
     ```shell
     pip install -r requirement.txt
     ```
 
-2. Docker - CUDA (11.)
+2. Docker - CUDA (11.7)
 
    Either:
    1. Pull (download) a pre-built image (~11.3 GB): 
