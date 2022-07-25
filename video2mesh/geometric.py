@@ -416,11 +416,12 @@ class Trajectory:
         pred = other.normalise().to_homogenous_transforms()
 
         for i, j in zip(range(num_frames - 1), range(1, num_frames)):
-            rel_pose_est = np.linalg.inv(pred[j]) @ pred[i]
-            rel_pose_gt = np.linalg.inv(gt[j]) @ gt[i]
+            rel_pose_est = np.linalg.inv(pred[i]) @ pred[j]
+            rel_pose_gt = np.linalg.inv(gt[i]) @ gt[j]
             rel_pose_error = np.linalg.inv(rel_pose_gt) @ rel_pose_est
 
-            distance = np.linalg.norm(rel_pose_error[4:])
+            distance = np.linalg.norm(rel_pose_error[:3, 3])
+            # The below is equivalent to converting to axis-angle or Euler angles and taking the L2 norm.
             angle = np.arccos(min(1, max(-1, (np.trace(rel_pose_error[:3, :3]) - 1) / 2)))
 
             translational_error.append(distance)
