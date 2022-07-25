@@ -28,7 +28,7 @@ Start by choosing on of the following methods for setting up the Python environm
       docker pull dican732/video2mesh:cu117
       ```
    2. Build the Docker Image:
-      1. 
+      1. Run the build command:
           ```shell
           docker build -t dican732/video2mesh:cu117 .
           ```
