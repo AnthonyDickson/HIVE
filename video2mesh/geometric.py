@@ -181,10 +181,10 @@ def image2world(points, depth, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=
     num_points = points.shape[0]
 
     points2d = np.vstack((points.T * scale_factor, np.ones(num_points)))
-    pixel_i = np.linalg.inv(K) @ points2d
-    pixel_world = R.T @ (depth * pixel_i - t)
+    points_camera_space = np.linalg.inv(K) @ points2d
+    points_world_space = R.T @ (depth * points_camera_space - t)
 
-    return pixel_world.T
+    return points_world_space.T
 
 
 class Quaternion:

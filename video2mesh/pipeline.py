@@ -22,9 +22,9 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
 
-from video2mesh.dataset_adaptors import TUMAdaptor, StrayScannerAdaptor, VideoAdaptor, get_dataset
+from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometry import point_cloud_from_depth, world2image, get_pose_components
+from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
@@ -84,12 +84,12 @@ class Pipeline:
         if dataset is None:
             dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
 
-            if self.num_frames == -1:
-                self.options.num_frames = dataset.num_frames
-            else:
-                # This handles the case where the specified number of frames is more than the total number of frames in
-                # the non-truncated dataset.
-                self.options.num_frames = min(self.num_frames, dataset.num_frames)
+        if self.num_frames == -1:
+            self.options.num_frames = dataset.num_frames
+        else:
+            # This handles the case where the specified number of frames is more than the total number of frames in
+            # the non-truncated dataset.
+            self.options.num_frames = min(self.num_frames, dataset.num_frames)
 
         # The root folder of the dataset may change if it had to be converted.
         storage_options.base_path = dataset.base_path

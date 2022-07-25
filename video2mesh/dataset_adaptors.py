@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 from thirdparty.dpt import dpt
 from thirdparty.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
-from video2mesh.geometry import Trajectory
+from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError

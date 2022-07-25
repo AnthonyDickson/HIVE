@@ -8,7 +8,7 @@ Clone the repo:
 ```shell
 git clone --recurse-submodules https://github.com/AnthonyDickson/video2mesh.git 
 ```
-If forget to or cannot clone with `--recurse-submodules` then clone the git dependencies with the following:
+If you forget to or cannot clone with `--recurse-submodules` then clone the git dependencies with the following:
 ```shell
 git submodule update --init --recursive
 ```

@@ -15,7 +15,7 @@ import trimesh
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometry import Trajectory
+from video2mesh.geometric import Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory, DatasetMetadata
 from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, ForegroundTrajectorySmoothingOptions, \
     PipelineOptions, StorageOptions, MeshDecimationOptions, MeshReconstructionMethod

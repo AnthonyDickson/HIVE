@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from thirdparty.colmap.scripts.python.read_write_model import read_model
 from thirdparty.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
-from video2mesh.geometry import Trajectory
+from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
 from video2mesh.types import File

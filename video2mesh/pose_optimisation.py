@@ -15,7 +15,7 @@ from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 
 from video2mesh.fusion import tsdf_fusion
-from video2mesh.geometry import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
+from video2mesh.geometric import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
     Trajectory
 from video2mesh.io import VTMDataset
 from video2mesh.options import BackgroundMeshOptions, MeshReconstructionMethod
