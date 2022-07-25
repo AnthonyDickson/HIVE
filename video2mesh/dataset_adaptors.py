@@ -60,6 +60,9 @@ class DatasetAdaptor(DatasetBase, ABC):
         self.frame_step = frame_step
         self.colmap_options = colmap_options
 
+        if output_path == base_path:
+            raise RuntimeError(f"Output path for a dataset adaptor cannot be the same as the input dataset path.")
+
     def get_full_num_frames(self) -> int:
         """The number of frames in the non-truncated dataset."""
         raise NotImplementedError
@@ -185,6 +188,9 @@ class DatasetAdaptor(DatasetBase, ABC):
         if cached_dataset := self._try_get_cached_dataset(estimate_pose=estimate_pose, estimate_depth=estimate_depth):
             logging.info(f"Found cached dataset at {self.output_path}.")
             return cached_dataset
+
+        logging.info(f"Converting input dataset at {self.base_path} and "
+                     f"writing converted dataset to {self.output_path}.")
 
         output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders()
 
@@ -1305,7 +1311,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
 
 def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
-                output_path: Optional[str] = None, resize_to: Union[int, Size] = 640,
+                resize_to: Union[int, Size] = 640,
                 depth_confidence_filter_level=0) -> VTMDataset:
     """
     Get a VTM formatted dataset or create one from another dataset format.
@@ -1314,8 +1320,6 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
     :param colmap_options: The configuration to use for COLMAP if estimating camera pose.
     :param pipeline_options: Configuration including whether to estimate pose or depth, the number of frames to include,
         and the frame step for COLMAP/TSDFFusion.
-    :param output_path: (optional) where to save the dataset to if it needs to be created. If `None`, the dataset will
-        be created at `storage_options.base_path`.
     :param resize_to: The resolution (height, width) to resize the images to. If an int is given, the longest side will
         be scaled to this value and the shorter side will have its new length automatically calculated.
     :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth value
@@ -1323,8 +1327,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
      less than 1 will be ignored.
     :return: the VTM formatted dataset.
     """
-    dataset_path = storage_options.base_path
-    output_path = f"{dataset_path}_vtm" if output_path is None else output_path
+    dataset_path = storage_options.dataset_path
+    output_path = storage_options.output_path
 
     if VTMDataset.is_valid_folder_structure(output_path):
         dataset = VTMDataset(output_path, overwrite_ok=storage_options.overwrite_ok)

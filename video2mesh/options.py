@@ -4,6 +4,8 @@ from typing import Optional
 
 import cv2
 
+from video2mesh.types import File
+
 
 class ReprMixin:
     """Mixin that provides a basic string representation for objects."""
@@ -52,27 +54,32 @@ class Options(ReprMixin):
 class StorageOptions(Options):
     """Options regarding storage of inputs and outputs."""
 
-    def __init__(self, base_path, overwrite_ok=False):
+    def __init__(self, dataset_path: File, output_path: File, overwrite_ok=False):
         """
-        :param base_path: Path to the folder containing the RGB and depth image folders.'
+        :param dataset_path: Path to the folder containing the RGB and depth image folders.
+        :param output_path: Where to save the outputs.
         :param overwrite_ok: Whether it is okay to replace old results.
         """
-        self.base_path = base_path
+        self.dataset_path = dataset_path
+        self.output_path = output_path
         self.overwrite_ok = overwrite_ok
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('Storage Options')
 
-        group.add_argument('--base_path', type=str,
+        group.add_argument('--dataset_path', type=str,
                            help='Path to the folder containing the RGB and depth image folders.',
                            required=True)
+        group.add_argument('--output_path', type=str, required=True,
+                           help='Where to save the outputs.')
         group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
                            action='store_true')
 
     @staticmethod
     def from_args(args) -> 'StorageOptions':
-        return StorageOptions(base_path=args.base_path, overwrite_ok=args.overwrite_ok)
+        return StorageOptions(dataset_path=args.dataset_path, output_path=args.output_path,
+                              overwrite_ok=args.overwrite_ok)
 
 
 class COLMAPOptions(Options):

@@ -240,7 +240,7 @@ This folder is saved under the dataset folder.
 
 # Algorithm Overview
 ## Pipeline
-![pipeline overview](images/vtm_pipline_overview.png)
+![pipeline overview](images/vtm_pipeline_overview.png)
 ## Foreground Mesh Reconstruction
 ![dynamic mesh reconstruction overview](images/vtm_dynamic_mesh_reconstruction.png)
 ## Pose Optimisation

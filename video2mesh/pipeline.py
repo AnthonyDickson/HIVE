@@ -79,8 +79,6 @@ class Pipeline:
     def run(self, dataset: Optional[VTMDataset] = None):
         start_time = time.time()
 
-        storage_options = self.storage_options
-
         if dataset is None:
             dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
 
@@ -91,12 +89,10 @@ class Pipeline:
             # the non-truncated dataset.
             self.options.num_frames = min(self.num_frames, dataset.num_frames)
 
-        # The root folder of the dataset may change if it had to be converted.
-        storage_options.base_path = dataset.base_path
         logging.info("Configured dataset")
 
         mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
-        os.makedirs(mesh_export_path, exist_ok=storage_options.overwrite_ok)
+        os.makedirs(mesh_export_path, exist_ok=self.storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform()
 
@@ -258,10 +254,8 @@ class Pipeline:
 
     def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
                             export_name: str):
-        storage_options = self.storage_options
-
         webxr_output_path = pjoin(self.options.webxr_path, export_name)
-        os.makedirs(webxr_output_path, exist_ok=storage_options.overwrite_ok)
+        os.makedirs(webxr_output_path, exist_ok=self.storage_options.overwrite_ok)
 
         metadata_filename = 'metadata.json'
         metadata_path = pjoin(mesh_path, metadata_filename)
@@ -366,10 +360,16 @@ class Pipeline:
                                   f"due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
+                valid_pixels = mask & (depth > 0.0)
+                v, u = valid_pixels.nonzero()
+                # Need to take transpose since stacking UV coordinates gives (2, N) shaped array to get the
+                # expected (N, 2) shape.
+                points2d = np.vstack((u, v)).T
+                masked_depth = depth[valid_pixels]
+
                 # TODO: Filter long stretched out bits of floor attached to peoples' feet.
-                points2d, depth_proj = world2image(vertices, camera_matrix, R, t)
                 faces = self._triangulate_faces(points2d)
-                faces = self._filter_faces(points2d, depth_proj, faces, self.filtering_options)
+                faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
                 vertices, faces = self._decimate_mesh(vertices, faces, is_object, self.decimation_options)
 
                 vertices, faces = self._cleanup_with_connected_components(

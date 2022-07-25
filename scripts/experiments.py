@@ -277,15 +277,15 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         profiler = Profiler()
 
         with profiler:
-            dataset = get_dataset(
-                StorageOptions(base_path=dataset_path, overwrite_ok=overwrite_ok),
-                colmap_options, options, output_path=pjoin(output_path, f"{dataset_name}_{label}")
-            )
+            storage_options = StorageOptions(dataset_path=dataset_path,
+                                             output_path=pjoin(output_path, f"{dataset_name}_{label}"),
+                                             overwrite_ok=overwrite_ok)
+            dataset = get_dataset(storage_options, colmap_options, options)
 
             logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
             base_options = dict(
                 options=PipelineOptions(num_frames, frame_step, log_file=log_file),
-                storage_options=StorageOptions(output_path, overwrite_ok),
+                storage_options=storage_options,
                 decimation_options=mesh_decimation_options,
                 static_mesh_options=tsdf_mesh_options,
                 colmap_options=colmap_options
