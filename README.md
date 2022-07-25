@@ -3,7 +3,7 @@ This project looks at creating a 3D video from a RGB-D video.
 ![demo of 3D video](images/video_3d_demo.gif)
 
 # Getting Started
-## Cloning the project
+## Cloning the Project
 Clone the repo:
 ```shell
 git clone --recurse-submodules https://github.com/AnthonyDickson/video2mesh.git 
@@ -65,6 +65,18 @@ Otherwise, ensure that you have installed the following:
   - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
   
 Refer to `Dockerfile` for detailed setup instructions on Ubuntu 20.04.  
+
+## Maintaining the Program
+### Pulling with Submodules
+- To pull all changes in the repo including changes in the submodules:
+   ```shell
+   git pull --recurse-submodules
+   ```
+
+- To pull all changes for the submodules:
+   ```shell
+   git submodule update --remote
+   ```
 
 ## Running the Program
 ### Sample Dataset
