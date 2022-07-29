@@ -149,6 +149,7 @@ docker run --rm --gpus all -v $(pwd):/app -t dican732/video2mesh:cu117 -m unitte
 This program accepts datasets in three formats:
 - TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
 - RGB-D datasets created on an iOS device using [StrayScanner](https://apps.apple.com/nz/app/stray-scanner/id1557051662)
+- RGB Video
 - The VTM format (see below.)
 
 The above datasets are automatically converted to the VTM format.
@@ -246,7 +247,16 @@ This folder is saved under the dataset folder.
 # Algorithm Overview
 ## Pipeline
 ![pipeline overview](images/vtm_pipeline_overview.png)
-## Foreground Mesh Reconstruction
+
+## Dataset Creation
+![dataset creation overview](images/vtm_dataset_creation_overview.png)
+
+## Mesh Reconstruction
 ![dynamic mesh reconstruction overview](images/vtm_dynamic_mesh_reconstruction.png)
-## Pose Optimisation
+Background mesh reconstruction uses [TSDFFusion](https://github.com/andyzeng/tsdf-fusion-python) by default, but it can also use the above method if the user requests it.
+
+## WebXR Renderer
+![webxr renderer overview](images/vtm_renderer_overview.png)
+
+## Pose Optimisation (Obsolete)
 ![pose optimisation overview](images/vtm_pose_optimisation.png)
