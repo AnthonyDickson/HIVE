@@ -58,10 +58,22 @@ Start by choosing one of the following methods for setting up the Python environ
 **Note**: If you either set up the environment or build the Docker image locally, you will need to 
 download the weights for one of the depth estimation models from [CloudStor](https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31), and place them in the folder `weights/`. 
 
+### PyCharm Users
+To set up Docker as a remote interpreter you will need to:
+
+1. Go to your project settings, click on the `<No interpreter>` drop down menu and then click `Show All...`.
+   ![Docker interpreter setup step 1](images/pycharm_docker_setup_1.png)
+2. Add a new interpreter.
+   ![Docker interpreter setup step 2](images/pycharm_docker_setup_2.png)
+3. Choose `Docker`, fill in the image name and the Python interpreter path, and click `OK`.
+   ![Docker interpreter setup step 3](images/pycharm_docker_setup_3.png)
+
+There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
+
 ## Setting Up C++ Environment
 If you use the Docker image, you do not need to do anything for this step.
 Otherwise, ensure that you have installed the following:
-- CUDA Toolkit 11.6
+- CUDA Toolkit 11.7
 - OpenCV 3.4.16 
   - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
   
