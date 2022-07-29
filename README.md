@@ -1,5 +1,5 @@
 # Video2Mesh
-This project looks at creating a 3D video from a RGB-D video.
+This project looks at creating a 3D video from a RGB-D (red, green, blue and depth) video.
 ![demo of 3D video](images/video_3d_demo.gif)
 
 # Getting Started
@@ -12,9 +12,10 @@ If you forget to or cannot clone with `--recurse-submodules` then clone the git 
 ```shell
 git submodule update --init --recursive
 ```
+This command can also be used to pull/update any changes in the submodules. 
 
 ## Setting Up Python
-Start by choosing on of the following methods for setting up the Python environment (Docker is the recommended approach):
+Start by choosing one of the following methods for setting up the Python environment (Docker is the recommended approach):
 1. PIP - CUDA (11.7)
     ```shell
     pip install -r requirement.txt
@@ -64,19 +65,7 @@ Otherwise, ensure that you have installed the following:
 - OpenCV 3.4.16 
   - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
   
-Refer to `Dockerfile` for detailed setup instructions on Ubuntu 20.04.  
-
-## Maintaining the Program
-### Pulling with Submodules
-- To pull all changes in the repo including changes in the submodules:
-   ```shell
-   git pull --recurse-submodules
-   ```
-
-- To pull all changes for the submodules:
-   ```shell
-   git submodule update --remote
-   ```
+Refer to `Dockerfile` for detailed setup instructions on Ubuntu 20.04.
 
 ## Running the Program
 ### Sample Dataset
@@ -86,13 +75,23 @@ Make sure you download and extract the dataset to the `data/` folder.
 
 ### Example Usage
 Below is an example of how to run the program with ground truth data and a static background:
+1. Local Python:
 ```shell
 python -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150
 ```
+2. Docker:
+```shell
+docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150
+```
 
 Below is an example of how to run the program with estimated data and a static background:
+1. Local Python:
 ```shell
 python -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
+```
+2. Docker:
+```shell
+docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
 ```
 
  **Note:** Creating the instance segmentation masks with a CPU only image/Python environment will be *VERY* slow. 
@@ -100,18 +99,22 @@ python -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_f
 
 ### CLI Parameters
 If you want help with the CLI and the options, you can either refer to the source code or view the help via:
+1. Local Python:
 ```shell
 python -m video2mesh --help
 ```
+2. Docker:
+```shell
+docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -m video2mesh --help
+```
 
 ### Docker
-The Docker containers will, by default, bring up the python interpreter.
-All you need to do to get the main script (or any other script) running is to append the usual command, 
+The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, 
 minus the call to python, to the following:
 ```shell
 docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 
 ```
-For example, if you wanted to run the CUDA enabled container: 
+For example, if you wanted to test whether or not the container is CUDA enabled: 
 ```shell
 docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -c "import torch; print(torch.cuda.is_available())"
 ```
@@ -119,7 +122,7 @@ docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -c "impo
 ### Viewing the 3D Video
 - Start the Docker container:
    ```shell
-   docker run -p 8080:8080 -v thirdparty/webxr3dvideo/src:/app/src:ro -v thirdparty/webxr3dvideo/docs:/app/docs --name WebXR-3D-Video-Server --rm dican732/webxr3dvideo:node-16 
+   docker run -p 8080:8080 -v $(pwd)/thirdparty/webxr3dvideo/src:/app/src:ro -v $(pwd)/thirdparty/webxr3dvideo/docs:/app/docs --name WebXR-3D-Video-Server --rm dican732/webxr3dvideo:node-16 
    ```
   or if you are using PyCharm there is a run configuration included.
 - When you run the pipeline it will print the link to view the video.
@@ -132,14 +135,16 @@ docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh:cu117 -c "impo
 Refer to the [WebXR repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
 
 ### Unit Tests
-You can run the unittest suite with the following :
+You can run the unittest suite with the following:
+1. Local Python:
 ```shell
 python -m unittest discover $(pwd)/tests $(pwd)
 ```
-or in Docker:
+2. Docker:
 ```shell
 docker run --rm --gpus all -v $(pwd):/app -t dican732/video2mesh:cu117 -m unittest discover -s /app/tests -t /app
 ```
+
 ## Input Data Format
 This program accepts datasets in three formats:
 - TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
