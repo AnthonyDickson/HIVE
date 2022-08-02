@@ -42,7 +42,7 @@
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="SCRIPT_NAME" value="$PROJECT_DIR$/video2mesh/pipeline.py" />
-    <option name="PARAMETERS" value="--dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path results/rgbd_dataset_freiburg3_walk_xyz_gt --overwrite_ok --sdf_volume_size 10 --sdf_num_voxels 80000000 --frame_step 15" />
+    <option name="PARAMETERS" value="--dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path results/rgbd_dataset_freiburg3_walking_xyz_gt --overwrite_ok --sdf_volume_size 10 --sdf_num_voxels 80000000 --frame_step 15" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />

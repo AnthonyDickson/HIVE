@@ -22,45 +22,41 @@ RUN apt update && \
 # COLMAP
 ## Ceres solver
 RUN cd / && \
-    git clone https://ceres-solver.googlesource.com/ceres-solver && \
+    git clone --depth 1 --branch 2.1.0 https://ceres-solver.googlesource.com/ceres-solver && \
     cd ceres-solver && \
     git checkout $(git describe --tags) && \
     mkdir build && \
     cd build && \
     cmake .. -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && \
     make -j 8 && \
-    make install
-
-## Download and install OpenCV
-ENV OPENCV_VERSION=3.4.16
-
-RUN cd / && \
-    wget -O opencv.zip https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.zip && \
-    unzip opencv.zip && \
-    mkdir -p opencv-build &&  \
-    cd opencv-build && \
-    cmake -D WITH_CUDA=ON \
-    -D BUILD_EXAMPLES=OFF -D BUILD_opencv_apps=OFF -D BUILD_DOCS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_TESTS=OFF ../opencv-${OPENCV_VERSION} && \
-    cmake --build . -- -j 8 && \
     make install && \
     cd .. && \
-    rm opencv.zip && \
-    rm -rf opencv-${OPENCV_VERSION} && \
-    rm -rf opencv-build
+    rm -rf ceres-solver
+
+## Download and install OpenCV
+RUN cd / && \
+    git clone --depth 1 --branch 3.4.16 https://github.com/opencv/opencv.git && \
+    cd opencv && \
+    mkdir -p build &&  \
+    cd build && \
+    cmake -D WITH_CUDA=ON \
+    -D BUILD_EXAMPLES=OFF -D BUILD_opencv_apps=OFF -D BUILD_DOCS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_TESTS=OFF .. && \
+    cmake --build . -- -j 8 && \
+    make install && \
+    cd / && \
+    rm -rf opencv
 
 ## Install COLMAP from source
 RUN cd / && \
-    wget -O colmap.zip https://github.com/colmap/colmap/archive/refs/tags/3.7.zip && \
-    unzip colmap.zip && \
-    cd colmap-3.7 && \
+    git clone --depth 1 --branch 3.7 https://github.com/colmap/colmap.git && \
+    cd colmap && \
     mkdir build && \
     cd build && \
     cmake .. && \
     make -j 8 && \
     make install && \
     cd / && \
-    rm -rf colmap-3.7 && \
-    rm colmap.zip
+    rm -rf colmap
 
 ARG BUNDLE_FUSION_FOLDER=bundle_fusion
 ENV BUNDLE_FUSION_PATH=/${BUNDLE_FUSION_FOLDER}
@@ -98,4 +94,4 @@ RUN python3 download_weights.py && \
 COPY weights/res101.pth ${WEIGHTS_PATH}/res101.pth
 
 WORKDIR /app
-ENTRYPOINT ["python3"]
+CMD ["python3"]
