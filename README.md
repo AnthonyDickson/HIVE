@@ -55,9 +55,6 @@ Start by choosing one of the following methods for setting up the Python environ
          
       4. You can now exit the Docker container started in step b.
 
-**Note**: If you either set up the environment or build the Docker image locally, you will need to 
-download the weights for one of the depth estimation models from [CloudStor](https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31), and place them in the folder `weights/`. 
-
 ### PyCharm Users
 To set up Docker as a remote interpreter, go to your project settings and add a new Docker interpreter and fill out the forms as follows:
 ![Setting up Docker interpreter in PyCharm step 1](images/pycharm_docker_setup_1.jpg)

@@ -85,13 +85,12 @@ RUN python3 download_weights.py && \
     gdown https://drive.google.com/uc?id=1hF8vS6YeHkx3j2pfCeQqqZGwA_PJq_Da -O ${WEIGHTS_PATH}/flownet2.pth && \
     # DPT weights
     wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt && \
+    # Weights for LeReS depth estimation model.
+    wget https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31/download -O ${WEIGHTS_PATH}/res101.pth && \
     # COLMAP vocab file.
     mkdir -p ${COLMAP_VOCAB_PATH} && \
     wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \
     rm download_weights.py
-
-# Weights for LeReS depth estimation model.
-COPY weights/res101.pth ${WEIGHTS_PATH}/res101.pth
 
 WORKDIR /app
 CMD ["python3"]
