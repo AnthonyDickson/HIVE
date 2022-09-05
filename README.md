@@ -81,23 +81,23 @@ Make sure you download and extract the dataset to the `data/` folder.
 Below is an example of how to run the program with ground truth data and a static background:
 1. Local Python:
     ```shell
-    python -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150
+    python -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
     ```
 
 2. Docker:
     ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150
+    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
     ```
 
 Below is an example of how to run the program with estimated data and a static background:
 1. Local Python:
     ```shell
-    python -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
+    python -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
     ```
 
 2. Docker:
     ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --base_path data/rgbd_dataset_freiburg3_walking_xyz --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
+    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
     ```
 
  **Note:** Creating the instance segmentation masks with a CPU only image/Python environment will be *VERY* slow. 
@@ -139,18 +139,6 @@ docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -c "im
   - `R` will reset the camera pose.
 
 Refer to the [WebXR repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
-
-### Unit Tests
-You can run the unittest suite with the following:
-1. Local Python:
-    ```shell
-    python -m unittest discover $(pwd)/tests $(pwd)
-    ```
-
-2. Docker:
-    ```shell
-    docker run --rm --gpus all -v $(pwd):/app -t dican732/video2mesh python3 -m unittest discover -s /app/tests -t /app
-    ```
 
 ## Input Data Format
 This program accepts datasets in three formats:
