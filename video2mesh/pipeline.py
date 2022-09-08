@@ -91,7 +91,7 @@ class Pipeline:
 
         logging.info("Configured dataset")
 
-        mesh_export_path = pjoin(dataset.base_path, self.mesh_folder)
+        mesh_export_path = pjoin(self.storage_options.output_path, self.mesh_folder)
         os.makedirs(mesh_export_path, exist_ok=self.storage_options.overwrite_ok)
 
         centering_transform = self._get_centering_transform()
