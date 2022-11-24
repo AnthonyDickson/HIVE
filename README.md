@@ -18,7 +18,7 @@ This command can also be used to pull/update any changes in the submodules.
 Start by choosing one of the following methods for setting up the Python environment (Docker is the recommended approach):
 1. PIP - CUDA (11.6)
     ```shell
-    pip install -r requirement.txt
+    pip install -r requirements.txt
     ```
 
 2. Docker - CUDA (11.6)

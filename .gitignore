@@ -5,3 +5,4 @@ weights/
 checkpoints/
 experiment_results/
 *.log
+video2mesh/__pycache__
