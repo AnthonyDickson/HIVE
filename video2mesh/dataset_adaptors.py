@@ -1156,7 +1156,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
             trajectory.append((qx, qy, qz, qw, tx, ty, tz))
 
         trajectory = np.asarray(trajectory)
-        trajectory = Trajectory(trajectory).inverse()
+        trajectory = Trajectory(trajectory)
 
         return trajectory
 
