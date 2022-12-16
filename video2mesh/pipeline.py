@@ -15,6 +15,7 @@ from typing import Optional, List
 
 import numpy as np
 import openmesh as om
+import torch
 import trimesh
 from PIL import Image
 from scipy.spatial import Delaunay
@@ -76,8 +77,14 @@ class Pipeline:
     def estimate_depth(self) -> bool:
         return self.options.estimate_depth
 
+    @staticmethod
+    def _reset_cuda_stats():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_accumulated_memory_stats()
+
     def run(self, dataset: Optional[VTMDataset] = None):
         start_time = time.time()
+        self._reset_cuda_stats()
 
         if dataset is None:
             dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
@@ -243,6 +250,11 @@ class Pipeline:
             f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
         logging.info(
             f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
+
+        logging.info(
+            f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} GB ({torch.cuda.max_memory_allocated():,d} Bytes)")
+        logging.info(
+            f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} GB ({torch.cuda.max_memory_reserved():,d} Bytes)")
 
     @staticmethod
     def _get_centering_transform():
@@ -774,6 +786,7 @@ def main():
     colmap_options = COLMAPOptions.from_args(args)
     static_mesh_options = BackgroundMeshOptions.from_args(args)
 
+    # TODO: Dump logs to output folder.
     setup_logger(video2mesh_options.log_file)
     logging.debug(args)
 

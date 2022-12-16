@@ -54,15 +54,17 @@ class Options(ReprMixin):
 class StorageOptions(Options):
     """Options regarding storage of inputs and outputs."""
 
-    def __init__(self, dataset_path: File, output_path: File, overwrite_ok=False):
+    def __init__(self, dataset_path: File, output_path: File, overwrite_ok=False, no_cache=False):
         """
         :param dataset_path: Path to the folder containing the RGB and depth image folders.
         :param output_path: Where to save the outputs.
         :param overwrite_ok: Whether it is okay to replace old results.
+        :param no_cache: Whether cached datasets/results should be ignored.
         """
         self.dataset_path = dataset_path
         self.output_path = output_path
         self.overwrite_ok = overwrite_ok
+        self.no_cache = no_cache
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -75,11 +77,13 @@ class StorageOptions(Options):
                            help='Where to save the outputs.')
         group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
                            action='store_true')
+        group.add_argument('--no_cache', help='Whether cached datasets/results should be ignored.',
+                           action='store_true')
 
     @staticmethod
     def from_args(args) -> 'StorageOptions':
         return StorageOptions(dataset_path=args.dataset_path, output_path=args.output_path,
-                              overwrite_ok=args.overwrite_ok)
+                              overwrite_ok=args.overwrite_ok, no_cache=args.no_cache)
 
 
 class COLMAPOptions(Options):
@@ -361,8 +365,6 @@ class BackgroundMeshOptions(Options):
 class ForegroundTrajectorySmoothingOptions(Options):
     def __init__(self, learning_rate=1e-5, num_epochs=0):
         """
-
-
         :param learning_rate: The learning rate/step size to take each epoch when smoothing the trajectory.
         :param num_epochs: The number of iterations to loop the smoothing algorithm. Set to zero to disable
             foreground trajectory smoothing.

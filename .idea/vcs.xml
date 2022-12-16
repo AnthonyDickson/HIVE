@@ -5,6 +5,7 @@
     <mapping directory="$PROJECT_DIR$/thirdparty/AdaBins" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/adelai_depth" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/colmap" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/thirdparty/colmap/doc/_build/html" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/monodepth/mannequin_challenge" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/OpticalFlowToolkit" vcs="Git" />

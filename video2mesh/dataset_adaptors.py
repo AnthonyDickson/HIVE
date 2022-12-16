@@ -176,18 +176,24 @@ class DatasetAdaptor(DatasetBase, ABC):
         # TODO: Add way to pass arguments to PoseOptimiser object.
         return self.convert(estimate_pose=False, estimate_depth=False)
 
-    def convert(self, estimate_pose: bool, estimate_depth: bool) -> VTMDataset:
+    def convert(self, estimate_pose: bool, estimate_depth: bool, no_cache = False) -> VTMDataset:
         """
         Convert a dataset into the standard format.
 
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
             camera parameters.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
+        :param no_cache: Whether cached datasets/results should be ignored.
         :return: The converted dataset.
         """
         if cached_dataset := self._try_get_cached_dataset(estimate_pose=estimate_pose, estimate_depth=estimate_depth):
             logging.info(f"Found cached dataset at {self.output_path}.")
-            return cached_dataset
+
+            if no_cache:
+                logging.warning(f"Since `no_cache` was set, the cached data at {self.output_path} will be deleted.")
+                shutil.rmtree(self.output_path)
+            else:
+                return cached_dataset
 
         logging.info(f"Converting input dataset at {self.base_path} and "
                      f"writing converted dataset to {self.output_path}.")
@@ -1330,7 +1336,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
     dataset_path = storage_options.dataset_path
     output_path = storage_options.output_path
 
-    if VTMDataset.is_valid_folder_structure(output_path):
+    if not storage_options.no_cache and VTMDataset.is_valid_folder_structure(output_path):
         dataset = VTMDataset(output_path, overwrite_ok=storage_options.overwrite_ok)
     else:
         base_kwargs = dict(
@@ -1364,6 +1370,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
             raise RuntimeError(f"Could not recognise the dataset format for the dataset at {dataset_path}.")
 
         dataset = dataset_converter.convert(estimate_pose=pipeline_options.estimate_pose,
-                                            estimate_depth=pipeline_options.estimate_depth)
+                                            estimate_depth=pipeline_options.estimate_depth,
+                                            no_cache=storage_options.no_cache)
 
     return dataset

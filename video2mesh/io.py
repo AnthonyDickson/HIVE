@@ -259,6 +259,8 @@ class COLMAPProcessor:
         else:
             logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
+        logging.info("Running COLMAP for real this time, this may take a while...")
+
         command = self.get_command()
 
         # TODO: Check that COLMAP is using GPU
