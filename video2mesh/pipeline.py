@@ -226,7 +226,7 @@ class Pipeline:
 
         fg_num_tris, num_fg_frames = count_tris(foreground_scene)
         bg_num_tris, num_bg_frames = count_tris(background_scene)
-        fg_num_tris_per_frame = fg_num_tris / num_fg_frames
+        fg_num_tris_per_frame = fg_num_tris / num_fg_frames if num_fg_frames > 0 else 0
         bg_num_tris_per_frame = bg_num_tris / num_bg_frames
         num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
 
@@ -234,7 +234,7 @@ class Pipeline:
 
         fg_file_size = os.path.getsize(foreground_scene_path)
         bg_file_size = os.path.getsize(background_scene_path)
-        fg_file_size_per_frame = fg_file_size / num_fg_frames
+        fg_file_size_per_frame = fg_file_size / num_fg_frames if num_fg_frames > 0 else 0
         bg_file_size_per_frame = bg_file_size / num_bg_frames
         file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
 
