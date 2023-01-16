@@ -182,6 +182,11 @@ class Pipeline:
         fg_bounds = foreground_scene.bounds
         bg_bounds = background_scene.bounds
 
+        # This happens if there are no people detected in the video,
+        # thus no meshes in the foreground scene meaning the bounds are undefined a.k.a `None`.
+        if fg_bounds is None:
+            return bg_bounds
+
         scene_bounds = np.vstack([
             np.min(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
             np.max(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
