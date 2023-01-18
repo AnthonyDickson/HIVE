@@ -1126,22 +1126,46 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         assert depth_confidence_filter_level in self.depth_confidence_levels, \
             f"Confidence filter must be one of the following: {self.depth_confidence_levels}."
 
-        self.camera_trajectory = self._load_camera_trajectory()
-
-        # Note: This step must be done BEFORE the camera trajectory is normalised because the rotation will be reset.
-        roll = Rotation.from_quat(self.camera_trajectory.rotations[0]).as_euler('xyz')[-1]
-        self.device_orientation = DeviceOrientation.from_angle(roll)
+        self.device_orientation, self.camera_trajectory = self._get_device_orientation_and_trajectory()
 
         if self.device_orientation in {DeviceOrientation.Portrait, DeviceOrientation.PortraitReverse}:
             # The above orientations will cause the frames to be rotated 90 degrees, which swaps the frame height and
             # width. So we need to make sure this change is reflected in the target resolution.
             self.target_height, self.target_width = self.target_width, self.target_height
 
-        # TODO: Retain roll? What about pitch? Yaw can be safely discarded so that the scene is facing the
-        #  same direction for all scenes. Take angle modulus 90 degrees to account for when device is not held
-        #  perfectly level (pretty much always)?
-        self.camera_trajectory = self.camera_trajectory.normalise()
-        # TODO: Get this working with orientations other than `.Landscape`
+    def _get_device_orientation_and_trajectory(self) -> Tuple[DeviceOrientation, Trajectory]:
+        """
+        Load the camera trajectory, infer the device orientation and adjust the trajectory such that it is:
+            normalised, inverted, and takes into account the device orientation.
+
+        :return: A 2-tuple containing the device orientation and the adjusted trajectory.
+        """
+        camera_trajectory = self._load_camera_trajectory()
+
+        # Note: This step must be done BEFORE the camera trajectory is normalised because the rotation will be reset.
+        roll = Rotation.from_quat(camera_trajectory.rotations[0]).as_euler('xyz')[-1]
+        device_orientation = DeviceOrientation.from_angle(roll)
+
+        # For non-landscape orientations the frames will be rotated so that they are the right way up.
+        # So we need to rotate the trajectory to match how the frames will be rotated.
+        if device_orientation != DeviceOrientation.Landscape:
+            if device_orientation == DeviceOrientation.LandscapeReverse:
+                angle = 180
+            elif device_orientation == DeviceOrientation.Portrait:
+                # This corresponds to a 90-degree clockwise rotation.
+                angle = -90
+            else: # self.device_orientation == DeviceOrientation.PortraitReverse
+                # This corresponds to a 90-degree counter-clockwise rotation.
+                angle = 90
+
+            rotation = np.eye(4)
+            rotation[:3, :3] = Rotation.from_euler('xyz', [0, 0, angle], degrees=True).as_matrix()
+
+            camera_trajectory = camera_trajectory.apply(rotation)
+
+        camera_trajectory = camera_trajectory.normalise().inverse()
+
+        return device_orientation, camera_trajectory
 
     def _load_camera_trajectory(self) -> Trajectory:
         """
@@ -1204,6 +1228,10 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
         depth_map[confidence_map < self.depth_confidence_filter_level] = 0
 
+        # This rotation operation must happen before the resize operation or the depth maps may not be rotated correctly.
+        if rotation := DeviceOrientation.to_opencv_rotation(self.device_orientation):
+            depth_map = cv2.rotate(depth_map, rotation)
+
         # cv2.resize(...) only works with floating point type arrays.
         original_type = depth_map.dtype
         depth_map = depth_map.astype(np.float32)
@@ -1212,9 +1240,6 @@ class StrayScannerAdaptor(VideoAdaptorBase):
                                interpolation=cv2.INTER_NEAREST_EXACT)
         depth_map = np.round(depth_map)
         depth_map = depth_map.astype(original_type)
-
-        if rotation := DeviceOrientation.to_opencv_rotation(self.device_orientation):
-            depth_map = cv2.rotate(depth_map, rotation)
 
         return depth_map
 

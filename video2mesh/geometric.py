@@ -351,6 +351,9 @@ class Trajectory:
 
         :return: The normalised camera trajectory.
         """
+        # TODO: Retain roll? What about pitch? Yaw can be safely discarded so that the scene is facing the
+        #  same direction for all scenes. Take angle modulus 90 degrees to account for when device is not held
+        #  perfectly level (pretty much always)?
         matrix_trajectory = self.to_homogenous_transforms()
         matrix_trajectory = np.linalg.inv(matrix_trajectory[0]) @ matrix_trajectory
         vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
@@ -366,6 +369,19 @@ class Trajectory:
         matrix_trajectory = self.to_homogenous_transforms()
         matrix_trajectory = np.linalg.inv(matrix_trajectory)
         vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
+
+        return vector_trajectory
+
+    def apply(self, transform: np.ndarray) -> 'Trajectory':
+        """
+        Apply a transformation to the camera trajectory (i.e. to each pose).
+
+        :param transform: A 4x4 homogeneous transformation matrix.
+        :return: The transformed trajectory.
+        """
+        matrix_trajectory = self.to_homogenous_transforms()
+        matrix_trajectory_transformed = matrix_trajectory @ transform
+        vector_trajectory = self.from_homogenous_transforms(matrix_trajectory_transformed)
 
         return vector_trajectory
 
