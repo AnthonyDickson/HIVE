@@ -161,16 +161,9 @@ class Pipeline:
                             foreground_scene_path, background_scene_path,
                             elapsed_time_seconds)
 
-        webxr_metadata = dict(
-            fps=dataset.fps,
-            use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
-                MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
-                MeshReconstructionMethod.KeyframeRGBD
-            )
-        )
-
         self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
-                                 metadata=webxr_metadata, export_name=Path(dataset.base_path).name)
+                                 metadata=self._get_webxr_metadata(fps=dataset.fps),
+                                 export_name=Path(dataset.base_path).name)
 
     @staticmethod
     def _get_scene_bounds(foreground_scene, background_scene):
@@ -194,10 +187,34 @@ class Pipeline:
 
         return scene_bounds
 
-    @staticmethod
-    def _print_summary(foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
+    def _get_webxr_metadata(self, fps: float) -> dict:
+        """
+        Create the metadata for the WebXR export.
+
+        :param fps: The frame rate of the dataset that is being processed.
+        :return: A JSON-encodable dictionary containing the fields: `fps`, `num_frames` and `use_vertex_colour_for_bg`.
+        """
+        return dict(
+            fps=fps,
+            num_frames=self.num_frames,
+            use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
+                MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
+                MeshReconstructionMethod.KeyframeRGBD
+            )
+        )
+
+    def _print_summary(self, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
                        foreground_scene_path: str, background_scene_path: str,
                        elapsed_time_seconds: float):
+        """
+        Print a text summary to the console and logs detailing the processing time, mesh size and GPU memory usage.
+
+        :param foreground_scene: The collection of foreground mesh(es).
+        :param background_scene: The collection of background mesh(es).
+        :param foreground_scene_path: The path to where the foreground scene was saved.
+        :param background_scene_path: The path to where the background scene was saved.
+        :param elapsed_time_seconds: How long the pipeline took to run.
+        """
         def format_bytes(num):
             for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
                 if abs(num) < 1024.0:
@@ -230,8 +247,6 @@ class Pipeline:
         bg_num_tris_per_frame = bg_num_tris / num_bg_frames
         num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
 
-        num_frames = max(num_fg_frames, num_bg_frames)
-
         fg_file_size = os.path.getsize(foreground_scene_path)
         bg_file_size = os.path.getsize(background_scene_path)
         fg_file_size_per_frame = fg_file_size / num_fg_frames if num_fg_frames > 0 else 0
@@ -239,12 +254,12 @@ class Pipeline:
         file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
 
         elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
-        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / num_frames)
+        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
 
         logging.info('#' + '=' * 78 + '#')
         logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
         logging.info('#' + '=' * 78 + '#')
-        logging.info(f"Processed {num_frames} frames in {elapsed_time} ({elapsed_time_per_frame} per frame).")
+        logging.info(f"Processed {self.num_frames} frames ({num_fg_frames} fg, {num_bg_frames} bg) in {elapsed_time} ({elapsed_time_per_frame} per frame).")
         logging.info(
             f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
