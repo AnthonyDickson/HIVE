@@ -11,7 +11,7 @@ import shutil
 import time
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import openmesh as om
@@ -38,7 +38,9 @@ from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, t
 class Pipeline:
     """Converts a 2D video to a 3D video."""
 
+    # This the folder the foreground and background meshes are written to.
     mesh_folder = "mesh"
+    # This the folder the outputs from BundleFusion are written to.
     bundle_fusion_folder = "bundle_fusion"
 
     def __init__(self, options: PipelineOptions, storage_options: StorageOptions,
@@ -65,6 +67,47 @@ class Pipeline:
         self.background_mesh_options = static_mesh_options
         self.fts_options = fts_options
 
+    @staticmethod
+    def from_command_line() -> 'Pipeline':
+        """
+        Initialises an instance of the pipeline using command line arguments.
+
+        :return: An instance of the pipeline.
+        """
+        parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
+                                                                      "camera trajectory annotations.")
+        PipelineOptions.add_args(parser)
+        StorageOptions.add_args(parser)
+        MaskDilationOptions.add_args(parser)
+        MeshFilteringOptions.add_args(parser)
+        MeshDecimationOptions.add_args(parser)
+        COLMAPOptions.add_args(parser)
+        BackgroundMeshOptions.add_args(parser)
+
+        args = parser.parse_args()
+
+        video2mesh_options = PipelineOptions.from_args(args)
+        storage_options = StorageOptions.from_args(args)
+        filtering_options = MeshFilteringOptions.from_args(args)
+        dilation_options = MaskDilationOptions.from_args(args)
+        decimation_options = MeshDecimationOptions.from_args(args)
+        colmap_options = COLMAPOptions.from_args(args)
+        static_mesh_options = BackgroundMeshOptions.from_args(args)
+
+        # TODO: Dump logs to output folder.
+        setup_logger(video2mesh_options.log_file)
+        logging.debug(args)
+
+        return Pipeline(
+            options=video2mesh_options,
+            storage_options=storage_options,
+            decimation_options=decimation_options,
+            dilation_options=dilation_options,
+            filtering_options=filtering_options,
+            colmap_options=colmap_options,
+            static_mesh_options=static_mesh_options
+        )
+
     @property
     def num_frames(self) -> int:
         return self.options.num_frames
@@ -77,15 +120,21 @@ class Pipeline:
     def estimate_depth(self) -> bool:
         return self.options.estimate_depth
 
-    @staticmethod
-    def _reset_cuda_stats():
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.reset_accumulated_memory_stats()
+    @property
+    def mesh_export_path(self) -> str:
+        """Where to save the foreground and background meshes to as a string path."""
+        return pjoin(self.storage_options.output_path, self.mesh_folder)
 
     def run(self, dataset: Optional[VTMDataset] = None):
+        """
+        Run the pipeline to convert a video or RGB-D dataset into a 3D video.
+
+        :param dataset: By default, the pipeline will load the dataset specified in the command line options. You can specify a dataset here to use instead.
+        """
         start_time = time.time()
         self._reset_cuda_stats()
 
+        logging.info("Loading dataset...")
         if dataset is None:
             dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
 
@@ -96,15 +145,50 @@ class Pipeline:
             # the non-truncated dataset.
             self.options.num_frames = min(self.num_frames, dataset.num_frames)
 
-        logging.info("Configured dataset")
-
-        mesh_export_path = pjoin(self.storage_options.output_path, self.mesh_folder)
-        os.makedirs(mesh_export_path, exist_ok=self.storage_options.overwrite_ok)
-
-        centering_transform = self._get_centering_transform()
-
         logging.info("Creating background mesh(es)...")
+        background_scene = self._create_background_scene(dataset)
 
+        logging.info("Creating foreground mesh(es)...")
+        foreground_scene = self._create_foreground_scene(dataset)
+
+        logging.info("Centering foreground and background scenes...")
+        foreground_scene, background_scene = self._center_scenes(dataset, foreground_scene, background_scene)
+
+        logging.info(f"Writing mesh data to disk...")
+        foreground_scene_path, background_scene_path = self._export_mesh_data(
+            mesh_export_path=self.mesh_export_path,
+            foreground_scene=foreground_scene,
+            background_scene=background_scene,
+            overwrite_ok=self.storage_options.overwrite_ok
+        )
+
+        logging.info(f"Exporting mesh data to local WebXR server folder {self.options.webxr_path}...")
+        self._export_video_webxr(self.mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
+                                 metadata=self._get_webxr_metadata(fps=dataset.fps),
+                                 export_name=(self._get_dataset_name(dataset)))
+
+        elapsed_time_seconds = time.time() - start_time
+
+        self._print_summary(foreground_scene, background_scene,
+                            foreground_scene_path, background_scene_path,
+                            elapsed_time_seconds)
+
+        logging.info(
+            f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={self._get_dataset_name(dataset)}")
+
+    @staticmethod
+    def _reset_cuda_stats():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_accumulated_memory_stats()
+
+    def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
+        """
+        Create the background mesh(es) from an RGB-D dataset.
+
+        :param dataset: An RGB-D dataset with known camera parameters.
+
+        :return: The background scene.
+        """
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
             static_background = self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.StaticRGBD
@@ -128,7 +212,16 @@ class Pipeline:
                                                    options=self.background_mesh_options, frame_set=frame_set)
             background_scene.add_geometry(static_mesh, node_name="000000")
 
-        logging.info("Creating foreground mesh(es)...")
+        return background_scene
+
+    def _create_foreground_scene(self, dataset: VTMDataset) -> trimesh.Scene:
+        """
+        Create the foreground mesh(es) from an RGB-D dataset.
+
+        :param dataset: An RGB-D dataset with known camera parameters.
+
+        :return: The foreground scene.
+        """
         if self.fts_options.num_epochs > 0:
             smoothed_trajectory = ForegroundPoseOptimiser(dataset, learning_rate=self.fts_options.learning_rate,
                                                           num_epochs=self.fts_options.num_epochs).run()
@@ -138,186 +231,7 @@ class Pipeline:
         else:
             foreground_scene = self._create_scene(dataset)
 
-        logging.info("Aligning foreground and background scenes...")
-        foreground_scene.apply_transform(centering_transform)
-        background_scene.apply_transform(centering_transform)
-
-        if self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
-            background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
-
-        scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
-        scene_centroid = np.mean(scene_bounds, axis=0)
-
-        offset_from_center = np.array([-scene_centroid[0], -scene_bounds[0, 1], -scene_bounds[0, 2]])
-        foreground_scene.apply_translation(offset_from_center)
-        background_scene.apply_translation(offset_from_center)
-
-        foreground_scene_path = self._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
-        background_scene_path = self._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
-
-        elapsed_time_seconds = time.time() - start_time
-
-        self._print_summary(foreground_scene, background_scene,
-                            foreground_scene_path, background_scene_path,
-                            elapsed_time_seconds)
-
-        self._export_video_webxr(mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
-                                 metadata=self._get_webxr_metadata(fps=dataset.fps),
-                                 export_name=Path(dataset.base_path).name)
-
-    @staticmethod
-    def _get_scene_bounds(foreground_scene, background_scene):
-        """
-        Get the bounds of two scenes.
-
-        :return: A (2, 3) array where the first row is the minimum x, y and z coordinates and the second row the maximum.
-        """
-        fg_bounds = foreground_scene.bounds
-        bg_bounds = background_scene.bounds
-
-        # This happens if there are no people detected in the video,
-        # thus no meshes in the foreground scene meaning the bounds are undefined a.k.a `None`.
-        if fg_bounds is None:
-            return bg_bounds
-
-        scene_bounds = np.vstack([
-            np.min(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
-            np.max(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
-        ])
-
-        return scene_bounds
-
-    def _get_webxr_metadata(self, fps: float) -> dict:
-        """
-        Create the metadata for the WebXR export.
-
-        :param fps: The frame rate of the dataset that is being processed.
-        :return: A JSON-encodable dictionary containing the fields: `fps`, `num_frames` and `use_vertex_colour_for_bg`.
-        """
-        return dict(
-            fps=fps,
-            num_frames=self.num_frames,
-            use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
-                MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
-                MeshReconstructionMethod.KeyframeRGBD
-            )
-        )
-
-    def _print_summary(self, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
-                       foreground_scene_path: str, background_scene_path: str,
-                       elapsed_time_seconds: float):
-        """
-        Print a text summary to the console and logs detailing the processing time, mesh size and GPU memory usage.
-
-        :param foreground_scene: The collection of foreground mesh(es).
-        :param background_scene: The collection of background mesh(es).
-        :param foreground_scene_path: The path to where the foreground scene was saved.
-        :param background_scene_path: The path to where the background scene was saved.
-        :param elapsed_time_seconds: How long the pipeline took to run.
-        """
-        def format_bytes(num):
-            for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
-                if abs(num) < 1024.0:
-                    return f"{num:3.1f} {unit}B"
-
-                num /= 1024.0
-
-            return f"{num:3.1f} PiB"
-
-        def count_tris(scene: trimesh.Scene):
-            total = 0
-            num_frames = 0
-
-            for node_name in scene.graph.nodes_geometry:
-                # which geometry does this node refer to
-                _, geometry_name = scene.graph[node_name]
-
-                # get the actual potential mesh instance
-                geometry = scene.geometry[geometry_name]
-
-                if hasattr(geometry, 'triangles'):
-                    total += len(geometry.triangles)
-                    num_frames += 1
-
-            return total, num_frames
-
-        fg_num_tris, num_fg_frames = count_tris(foreground_scene)
-        bg_num_tris, num_bg_frames = count_tris(background_scene)
-        fg_num_tris_per_frame = fg_num_tris / num_fg_frames if num_fg_frames > 0 else 0
-        bg_num_tris_per_frame = bg_num_tris / num_bg_frames
-        num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
-
-        fg_file_size = os.path.getsize(foreground_scene_path)
-        bg_file_size = os.path.getsize(background_scene_path)
-        fg_file_size_per_frame = fg_file_size / num_fg_frames if num_fg_frames > 0 else 0
-        bg_file_size_per_frame = bg_file_size / num_bg_frames
-        file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
-
-        elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
-        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
-
-        logging.info('#' + '=' * 78 + '#')
-        logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
-        logging.info('#' + '=' * 78 + '#')
-        logging.info(f"Processed {self.num_frames} frames ({num_fg_frames} fg, {num_bg_frames} bg) in {elapsed_time} ({elapsed_time_per_frame} per frame).")
-        logging.info(
-            f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
-        logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
-        logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
-        logging.info(
-            f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
-        logging.info(
-            f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
-        logging.info(
-            f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
-
-        logging.info(
-            f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} GB ({torch.cuda.max_memory_allocated():,d} Bytes)")
-        logging.info(
-            f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} GB ({torch.cuda.max_memory_reserved():,d} Bytes)")
-
-    @staticmethod
-    def _get_centering_transform():
-        rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
-        centering_transform = np.eye(4, dtype=np.float32)
-        centering_transform[:3, :3] = rot_180
-
-        return centering_transform
-
-    def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
-                            export_name: str):
-        webxr_output_path = pjoin(self.options.webxr_path, export_name)
-        os.makedirs(webxr_output_path, exist_ok=self.storage_options.overwrite_ok)
-
-        metadata_filename = 'metadata.json'
-        metadata_path = pjoin(mesh_path, metadata_filename)
-
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f)
-
-        def export_file(filename):
-            shutil.copy(pjoin(mesh_path, filename), pjoin(webxr_output_path, filename))
-
-        export_file(metadata_filename)
-        export_file(f"{fg_scene_name}.glb")
-        export_file(f"{bg_scene_name}.glb")
-
-        logging.info(f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={export_name}")
-
-    @staticmethod
-    def _create_empty_scene(dataset: VTMDataset) -> trimesh.Scene:
-        """
-        Create an empty trimesh scene initialised with a camera.
-
-        :param dataset: The dataset that has the camera intrinsics.
-        :return: an empty trimesh scene initialised with a camera.
-        """
-        return trimesh.scene.Scene(
-            camera=trimesh.scene.Camera(
-                resolution=(dataset.frame_width, dataset.frame_height),
-                focal=(dataset.fx, dataset.fy)
-            )
-        )
+        return foreground_scene
 
     def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False,
                       static_background=False, keyframes_only=False, frame_step=1) -> trimesh.Scene:
@@ -347,11 +261,12 @@ class Pipeline:
         scene = self._create_empty_scene(dataset)
         homogeneous_transformations = dataset.camera_trajectory.to_homogenous_transforms()
 
-        def process_frame(i):
-            rgb = dataset.rgb_dataset[i]
-            depth = dataset.depth_dataset[i]
-            mask_encoded = dataset.mask_dataset[i]
-            pose = homogeneous_transformations[i]
+        def process_frame(index):
+            rgb = dataset.rgb_dataset[index]
+            depth = dataset.depth_dataset[index]
+            mask_encoded = dataset.mask_dataset[index]
+            # noinspection PyShadowingNames
+            pose = homogeneous_transformations[index]
 
             frame_vertices = np.zeros((0, 3))
             frame_faces = np.zeros((0, 3))
@@ -363,7 +278,7 @@ class Pipeline:
 
             # Construct 3D Point Cloud
             rgb = np.ascontiguousarray(rgb[:, :, :3])
-            R, t = get_pose_components(pose)
+            rotation, translation = get_pose_components(pose)
 
             mask_start_i = 0 if include_background else 1
             mask_end_i = 1 if background_only else mask_encoded.max() + 1
@@ -377,7 +292,7 @@ class Pipeline:
 
                 if coverage_ratio < 0.01:
                     # TODO: Make minimum coverage ratio configurable?
-                    logging.debug(f"Skipping object #{object_id} in frame {i + 1} due to insufficient coverage.")
+                    logging.debug(f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
                     continue
 
                 if is_object:
@@ -385,10 +300,10 @@ class Pipeline:
                     # # TODO: Make depth filtering offset configurable via CLI.
                     # depth[depth > np.median(depth) + 0.75] = 0.0
 
-                vertices = point_cloud_from_depth(depth, mask, camera_matrix, R, t)
+                vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
 
                 if len(vertices) < 9:
-                    logging.debug(f"Skipping object #{object_id} in frame {i + 1} "
+                    logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
                                   f"due to insufficient number of vertices ({len(vertices)}).")
                     continue
 
@@ -409,7 +324,7 @@ class Pipeline:
                     min_components=self.filtering_options.min_num_components
                 )
 
-                texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, R, t)
+                texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, rotation, translation)
                 texture_atlas.append(texture)
                 uv_atlas.append(uv)
 
@@ -419,11 +334,13 @@ class Pipeline:
                 vertex_count += len(vertices)
 
             if len(texture_atlas) == 0:
+                # noinspection PyShadowingNames
                 mesh = trimesh.Trimesh()
-                logging.debug(f"Mesh for frame #{i + 1} is empty!")
+                logging.debug(f"Mesh for frame #{index + 1} is empty!")
             else:
                 packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
 
+                # noinspection PyUnresolvedReferences,PyShadowingNames
                 mesh = trimesh.Trimesh(
                     frame_vertices,
                     frame_faces,
@@ -438,6 +355,7 @@ class Pipeline:
             return mesh
 
         if keyframes_only:
+            # noinspection PyUnusedLocal
             def camera_frustum(camera_pose: np.ndarray):
                 """
                 Calculate the camera frustum (the 3D volume visible to the camera) for a given camera pose.
@@ -446,6 +364,7 @@ class Pipeline:
                 """
                 raise NotImplementedError
 
+            # noinspection PyUnusedLocal
             def overlap(camera_frustum_a, camera_frustum_b) -> float:
                 """
                 Calculate the ratio of overlap between two camera frustums.
@@ -479,33 +398,20 @@ class Pipeline:
 
         return scene
 
-    @classmethod
-    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
-                            frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+    @staticmethod
+    def _create_empty_scene(dataset: VTMDataset) -> trimesh.Scene:
         """
-        Create a static mesh of the scene.
+        Create an empty trimesh scene initialised with a camera.
 
-        :param dataset: The dataset to create the mesh from.
-        :param num_frames: The max number of frames to use from the dataset.
-        :param options: The options/settings for creating the static mesh.
-        :param frame_set: The subset of frames to use for reconstruction (only applies to TSDFFusion method).
-
-        :return: The reconstructed 3D mesh of the scene.
+        :param dataset: The dataset that has the camera intrinsics.
+        :return: an empty trimesh scene initialised with a camera.
         """
-        if num_frames < 1:
-            num_frames = dataset.num_frames
-
-        if frame_set is not None and len(frame_set) < 1:
-            raise RuntimeError(f"`frame_set`, if not set to `None`, must be a list with at least one element.")
-
-        if options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
-            mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)
-        elif options.reconstruction_method == MeshReconstructionMethod.TSDFFusion:
-            mesh = tsdf_fusion(dataset, options, num_frames, frame_set=frame_set)
-        else:
-            raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
-
-        return mesh
+        return trimesh.scene.Scene(
+            camera=trimesh.scene.Camera(
+                resolution=(dataset.frame_width, dataset.frame_height),
+                focal=(dataset.fx, dataset.fy)
+            )
+        )
 
     @staticmethod
     def _triangulate_faces(points: np.ndarray) -> np.ndarray:
@@ -617,12 +523,13 @@ class Pipeline:
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
+        # noinspection PyUnresolvedReferences
         connected_components = trimesh.graph.connected_components(mesh.face_adjacency, min_len=min_components)
         mask = np.zeros(len(mesh.faces), dtype=bool)
 
         if connected_components:
             if is_object:
-                # filter vertices/faces based on result of largest component
+                # filter vertices/faces based on result of the largest component
                 largest_component_index = np.argmax([len(c) for c in connected_components])
                 mask[connected_components[largest_component_index]] = True
             else:
@@ -638,24 +545,24 @@ class Pipeline:
         return vertices, faces
 
     @staticmethod
-    def _get_mesh_texture_and_uv(vertices, image, K, R=np.eye(3), t=np.zeros((3, 1)), scale_factor=1.0):
+    def _get_mesh_texture_and_uv(vertices, image, camera_matrix, rotation=np.eye(3), translation=np.zeros((3, 1)), scale_factor=1.0):
         """
         Get the cropped texture and UV coordinates for a given set of vertices.
 
         :param vertices: The (?, 3) vertices of the mesh.
         :param image: The (?, ?, 3) image to use as the texture for the mesh.
-        :param K: The (3, 3) camera intrinsics matrix.
-        :param R: The (3, 3) camera rotation matrix.
-        :param t: The (3, 1) camera translation column vector.
+        :param camera_matrix: The (3, 3) camera intrinsics matrix.
+        :param rotation: The (3, 3) camera rotation matrix.
+        :param translation: The (3, 1) camera translation column vector.
         :param scale_factor: An optional value that scales the 2D points.
 
         :return: The cropped texture and UV coordinates.
         """
         validate_shape(vertices, 'vertices', expected_shape=(None, 3))
         validate_shape(image, 'image', expected_shape=(None, None, 3))
-        validate_camera_parameter_shapes(K, R, t)
+        validate_camera_parameter_shapes(camera_matrix, rotation, translation)
 
-        uv, _ = world2image(vertices, K, R, t, scale_factor)
+        uv, _ = world2image(vertices, camera_matrix, rotation, translation, scale_factor)
 
         min_u, min_v = np.min(np.round(uv), axis=0).astype(int)
         max_u, max_v = np.max(np.round(uv), axis=0).astype(int) + 1
@@ -725,6 +632,53 @@ class Pipeline:
 
         return atlas, final_uvs
 
+    @classmethod
+    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
+                            frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+        """
+        Create a mesh of the static elements from an RGB-D dataset.
+
+        :param dataset: The dataset to create the mesh from.
+        :param num_frames: The max number of frames to use from the dataset.
+        :param options: The options/settings for creating the static mesh.
+        :param frame_set: The subset of frames to use for reconstruction (only applies to TSDFFusion method).
+
+        :return: The reconstructed 3D mesh of the scene.
+        """
+        if num_frames < 1:
+            num_frames = dataset.num_frames
+
+        if frame_set is not None and len(frame_set) < 1:
+            raise RuntimeError(f"`frame_set`, if not set to `None`, must be a list with at least one element.")
+
+        if options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
+            mesh = bundle_fusion(cls.bundle_fusion_folder, dataset, options, num_frames)
+        elif options.reconstruction_method == MeshReconstructionMethod.TSDFFusion:
+            mesh = tsdf_fusion(dataset, options, num_frames, frame_set=frame_set)
+        else:
+            raise RuntimeError(f"Unsupported mesh reconstruction method: {options.reconstruction_method}")
+
+        return mesh
+
+    @classmethod
+    def _export_mesh_data(cls, mesh_export_path: str, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
+                          overwrite_ok=False) -> Tuple[str, str]:
+        """
+        Save the mesh files to disk.
+
+        :param mesh_export_path: The folder to save the meshes to.
+        :param foreground_scene: The scene that contains the mesh data for the dynamic objects.
+        :param background_scene: The scene that contains the mesh data for the static background.
+        :param overwrite_ok: Whether it is okay to replace files in `mesh_export_path`.
+
+        :return: A 2-tuple containing the full path to the foreground and background mesh.
+        """
+        os.makedirs(mesh_export_path, exist_ok=overwrite_ok)
+        foreground_scene_path = cls._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
+        background_scene_path = cls._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
+
+        return foreground_scene_path, background_scene_path
+
     @staticmethod
     def _write_results(base_folder, scene_name, scene) -> str:
         """
@@ -738,11 +692,43 @@ class Pipeline:
         """
         output_path = pjoin(base_folder, f'{scene_name}.glb')
         trimesh.exchange.export.export_scene(scene, output_path)
-        logging.info("Wrote mesh data to disk")
+        logging.info(f"Wrote mesh data to {output_path}")
 
         return output_path
 
-    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, scene: trimesh.Scene):
+    def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
+    Tuple[trimesh.Scene, trimesh.Scene]:
+        """
+        Center the scenes at the world origin and orient them so that the render is looking at the front of scene.
+
+        :param dataset: If BundleFusion was used to reconstruct the background, this dataset is used to align the scenes.
+        :param foreground_scene: The scene that contains the mesh data for the dynamic objects.
+        :param background_scene: The scene that contains the mesh data for the static background.
+
+        :return: The centered scenes.
+        """
+        foreground_scene = foreground_scene.copy()
+        background_scene = background_scene.copy()
+
+        if self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
+            background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
+
+        centering_transform = self._get_centering_transform(foreground_scene, background_scene)
+        foreground_scene.apply_transform(centering_transform)
+        background_scene.apply_transform(centering_transform)
+
+        return foreground_scene, background_scene
+
+    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, scene: trimesh.Scene) -> trimesh.Scene:
+        """
+        BundleFusion outputs a mesh that has been transformed in multiple ways (e.g., mirror and rotation).
+        This function attempts to undo these transformations and align the background mesh with the foreground mesh.
+
+        :param dataset: The RGB-D dataset the background scene was created from.
+        :param scene: The background scene created with BundleFusion and the specified RGB-D dataset.
+
+        :return: The aligned background scene.
+        """
         pcd_bounds = np.zeros((2, 3), dtype=float)
         i = 0
 
@@ -758,9 +744,9 @@ class Pipeline:
 
             binary_mask = mask_encoded == 0
 
-            R, t = get_pose_components(pose)
+            rotation, translation = get_pose_components(pose)
 
-            points3d = point_cloud_from_depth(depth_map, binary_mask, dataset.camera_matrix, R, t)
+            points3d = point_cloud_from_depth(depth_map, binary_mask, dataset.camera_matrix, rotation, translation)
 
             # Expand bounds
             pcd_bounds[0] = np.min(np.vstack((pcd_bounds[0], points3d.min(axis=0))), axis=0)
@@ -784,39 +770,177 @@ class Pipeline:
 
         return aligned_scene
 
+    @classmethod
+    def _get_centering_transform(cls, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> np.ndarray:
+        """
+        Get the transform that places the foreground and background scene at the world origin and faces it towards where the camera starts in the WebXR renderer.
+
+        :param foreground_scene: The scene that contains the mesh data for the dynamic objects.
+        :param background_scene: The scene that contains the mesh data for the static background.
+
+        :return: 4x4 homogenous transform that centers the foreground and background scenes.
+        """
+        rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
+        centering_transform = np.eye(4, dtype=np.float32)
+        centering_transform[:3, :3] = rot_180
+
+        scene_bounds = cls._get_scene_bounds(foreground_scene, background_scene)
+        scene_centroid = np.mean(scene_bounds, axis=0)
+
+        offset_from_center = np.array([-scene_centroid[0], -scene_bounds[0, 1], -scene_bounds[0, 2]])
+
+        centering_transform[:3, 3] = offset_from_center
+
+        return centering_transform
+
+    @staticmethod
+    def _get_scene_bounds(foreground_scene, background_scene):
+        """
+        Get the bounds of two scenes.
+
+        :return: A (2, 3) array where the first row is the minimum x, y and z coordinates and the second row the maximum.
+        """
+        fg_bounds = foreground_scene.bounds
+        bg_bounds = background_scene.bounds
+
+        # This happens if there are no people detected in the video,
+        # thus no meshes in the foreground scene meaning the bounds are undefined a.k.a `None`.
+        if fg_bounds is None:
+            return bg_bounds
+
+        scene_bounds = np.vstack([
+            np.min(np.vstack((fg_bounds[0], bg_bounds[0])), axis=0),
+            np.max(np.vstack((fg_bounds[1], bg_bounds[1])), axis=0),
+        ])
+
+        return scene_bounds
+
+    @staticmethod
+    def _get_dataset_name(dataset: VTMDataset) -> str:
+        """Get the `name` of a dataset (the folder name)."""
+        return Path(dataset.base_path).name
+
+    def _get_webxr_metadata(self, fps: float) -> dict:
+        """
+        Create the metadata for the WebXR export.
+
+        :param fps: The frame rate of the dataset that is being processed.
+        :return: A JSON-encodable dictionary containing the fields: `fps`, `num_frames` and `use_vertex_colour_for_bg`.
+        """
+        return dict(
+            fps=fps,
+            num_frames=self.num_frames,
+            use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
+                MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
+                MeshReconstructionMethod.KeyframeRGBD
+            )
+        )
+
+    def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
+                            export_name: str):
+        """
+        Exports the mesh data for viewing in the local WebXR renderer.
+
+        :param mesh_path: The folder where the meshes were written to.
+        :param fg_scene_name: The filename of the foreground scene without the file extension.
+        :param bg_scene_name: The filename of the background scene without the file extension.
+        :param metadata: The JSON-encodable metadata (e.g., fps, number of frames) dictionary.
+        :param export_name: The name of the folder to write the exported mesh files to.
+        """
+        webxr_output_path = pjoin(self.options.webxr_path, export_name)
+        os.makedirs(webxr_output_path, exist_ok=self.storage_options.overwrite_ok)
+
+        metadata_filename = 'metadata.json'
+        metadata_path = pjoin(mesh_path, metadata_filename)
+
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+
+        def export_file(filename):
+            shutil.copy(pjoin(mesh_path, filename), pjoin(webxr_output_path, filename))
+
+        export_file(metadata_filename)
+        export_file(f"{fg_scene_name}.glb")
+        export_file(f"{bg_scene_name}.glb")
+
+    def _print_summary(self, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
+                       foreground_scene_path: str, background_scene_path: str,
+                       elapsed_time_seconds: float):
+        """
+        Print a text summary to the console and logs detailing the processing time, mesh size and GPU memory usage.
+
+        :param foreground_scene: The collection of foreground mesh(es).
+        :param background_scene: The collection of background mesh(es).
+        :param foreground_scene_path: The path to where the foreground scene was saved.
+        :param background_scene_path: The path to where the background scene was saved.
+        :param elapsed_time_seconds: How long the pipeline took to run.
+        """
+
+        def format_bytes(num):
+            for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
+                if abs(num) < 1024.0:
+                    return f"{num:3.1f} {unit}B"
+
+                num /= 1024.0
+
+            return f"{num:3.1f} PiB"
+
+        def count_tris(scene: trimesh.Scene):
+            total = 0
+            num_frames = 0
+
+            for node_name in scene.graph.nodes_geometry:
+                # which geometry does this node refer to
+                _, geometry_name = scene.graph[node_name]
+
+                # get the actual potential mesh instance
+                geometry = scene.geometry[geometry_name]
+
+                if hasattr(geometry, 'triangles'):
+                    total += len(geometry.triangles)
+                    num_frames += 1
+
+            return total, num_frames
+
+        fg_num_tris, num_fg_frames = count_tris(foreground_scene)
+        bg_num_tris, num_bg_frames = count_tris(background_scene)
+        fg_num_tris_per_frame = fg_num_tris / num_fg_frames if num_fg_frames > 0 else 0
+        bg_num_tris_per_frame = bg_num_tris / num_bg_frames
+        num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
+
+        fg_file_size = os.path.getsize(foreground_scene_path)
+        bg_file_size = os.path.getsize(background_scene_path)
+        fg_file_size_per_frame = fg_file_size / num_fg_frames if num_fg_frames > 0 else 0
+        bg_file_size_per_frame = bg_file_size / num_bg_frames
+        file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
+
+        elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
+        elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
+
+        logging.info('#' + '=' * 78 + '#')
+        logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
+        logging.info('#' + '=' * 78 + '#')
+        logging.info(
+            f"Processed {self.num_frames} frames ({num_fg_frames} fg, {num_bg_frames} bg) in {elapsed_time} ({elapsed_time_per_frame} per frame).")
+        logging.info(
+            f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+        logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
+        logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
+        logging.info(
+            f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
+        logging.info(
+            f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
+        logging.info(
+            f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
+
+        logging.info(
+            f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} GB ({torch.cuda.max_memory_allocated():,d} Bytes)")
+        logging.info(
+            f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} GB ({torch.cuda.max_memory_reserved():,d} Bytes)")
+
 
 def main():
-    parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
-                                                                  "camera trajectory annotations.")
-    PipelineOptions.add_args(parser)
-    StorageOptions.add_args(parser)
-    MaskDilationOptions.add_args(parser)
-    MeshFilteringOptions.add_args(parser)
-    MeshDecimationOptions.add_args(parser)
-    COLMAPOptions.add_args(parser)
-    BackgroundMeshOptions.add_args(parser)
-
-    args = parser.parse_args()
-
-    video2mesh_options = PipelineOptions.from_args(args)
-    storage_options = StorageOptions.from_args(args)
-    filtering_options = MeshFilteringOptions.from_args(args)
-    dilation_options = MaskDilationOptions.from_args(args)
-    decimation_options = MeshDecimationOptions.from_args(args)
-    colmap_options = COLMAPOptions.from_args(args)
-    static_mesh_options = BackgroundMeshOptions.from_args(args)
-
-    # TODO: Dump logs to output folder.
-    setup_logger(video2mesh_options.log_file)
-    logging.debug(args)
-
-    program = Pipeline(options=video2mesh_options,
-                       storage_options=storage_options,
-                       decimation_options=decimation_options,
-                       dilation_options=dilation_options,
-                       filtering_options=filtering_options,
-                       colmap_options=colmap_options,
-                       static_mesh_options=static_mesh_options)
+    program = Pipeline.from_command_line()
     program.run()
 
 
