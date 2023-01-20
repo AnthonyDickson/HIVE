@@ -713,9 +713,24 @@ class Pipeline:
         if self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.BundleFusion:
             background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
-        centering_transform = self._get_centering_transform(foreground_scene, background_scene)
-        foreground_scene.apply_transform(centering_transform)
-        background_scene.apply_transform(centering_transform)
+        # Flip the scenes the right way up.
+        rotation = np.eye(4, dtype=np.float32)
+        rotation[:3, :3] = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
+
+        foreground_scene.apply_transform(rotation)
+        background_scene.apply_transform(rotation)
+
+        # Then move the scenes so that they are centered on the world origin.
+        scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
+        scene_centroid = np.mean(scene_bounds, axis=0)
+
+        offset_from_center = np.array([-scene_centroid[0], -scene_bounds[0, 1], -scene_bounds[0, 2]])
+
+        translation = np.eye(4, dtype=np.float32)
+        translation[:3, 3] = offset_from_center
+
+        foreground_scene.apply_transform(translation)
+        background_scene.apply_transform(translation)
 
         return foreground_scene, background_scene
 
@@ -769,29 +784,6 @@ class Pipeline:
         aligned_scene.apply_translation([1.25, 2.0, 1.0])
 
         return aligned_scene
-
-    @classmethod
-    def _get_centering_transform(cls, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> np.ndarray:
-        """
-        Get the transform that places the foreground and background scene at the world origin and faces it towards where the camera starts in the WebXR renderer.
-
-        :param foreground_scene: The scene that contains the mesh data for the dynamic objects.
-        :param background_scene: The scene that contains the mesh data for the static background.
-
-        :return: 4x4 homogenous transform that centers the foreground and background scenes.
-        """
-        rot_180 = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
-        centering_transform = np.eye(4, dtype=np.float32)
-        centering_transform[:3, :3] = rot_180
-
-        scene_bounds = cls._get_scene_bounds(foreground_scene, background_scene)
-        scene_centroid = np.mean(scene_bounds, axis=0)
-
-        offset_from_center = np.array([-scene_centroid[0], -scene_bounds[0, 1], -scene_bounds[0, 2]])
-
-        centering_transform[:3, 3] = offset_from_center
-
-        return centering_transform
 
     @staticmethod
     def _get_scene_bounds(foreground_scene, background_scene):
