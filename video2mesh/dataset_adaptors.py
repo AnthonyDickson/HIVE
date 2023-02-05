@@ -1386,6 +1386,9 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
                 depth_confidence_filter_level=depth_confidence_filter_level
             )
         elif VideoAdaptor.is_valid_folder_structure(dataset_path):
+            if not pipeline_options.estimate_depth or not pipeline_options.estimate_pose:
+                raise RuntimeError("You must specify both of the following command line flags for plain videos: `--estimate_depth` and `--estimate_pose`.")
+
             path_no_extensions, _ = os.path.splitext(dataset_path)
 
             dataset_converter = VideoAdaptor(**base_kwargs, resize_to=resize_to)

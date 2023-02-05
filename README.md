@@ -127,7 +127,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
 - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
-- `--num_frames <int>` If specified, any frames after this index are truncated.
+- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
 - `--frame_step <int>` If specified, only every `frame_step`th frame is sent to COLMAP and used for the background reconstruction. E.g., if using `--frame_step 15` only every 15th frame is sent to COLMAP. Use this if COLMAP is taking a long time.
 - `--sdf_max_voxels <int>` Sets a limit on the number of voxels in the background mesh. Use this if you are getting out of memory errors during the background mesh reconstruction step. A recommended value for this option is 80000000.
 
