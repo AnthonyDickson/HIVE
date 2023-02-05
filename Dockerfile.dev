@@ -79,14 +79,19 @@ ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
 COPY scripts/download_weights.py download_weights.py
 # The first line downloads the weights for the MC depth estimation model, the AdaBins base model and Detectron2.
 RUN python3 download_weights.py --mc --adabins && \
+    echo "Downloading AdaBins weights..." && \
     # Weights for the AdaBins decoder portion of the model.
     gdown https://drive.google.com/uc?id=1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF -O ${WEIGHTS_PATH}/AdaBins_nyu.pt && \
+    echo "Downloading FlowNet2 weights..." && \
     # FlowNet2 weights
     gdown https://drive.google.com/uc?id=1hF8vS6YeHkx3j2pfCeQqqZGwA_PJq_Da -O ${WEIGHTS_PATH}/flownet2.pth && \
+    echo "Downloading DPT weights..." && \
     # DPT weights
     wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt && \
+    echo "Downloading LeReS weights..." && \
     # Weights for LeReS depth estimation model.
     wget https://cloudstor.aarnet.edu.au/plus/s/lTIJF4vrvHCAI31/download -O ${WEIGHTS_PATH}/res101.pth && \
+    echo "Downloading COLMAP vocab weights..." && \
     # COLMAP vocab file.
     mkdir -p ${COLMAP_VOCAB_PATH} && \
     wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \

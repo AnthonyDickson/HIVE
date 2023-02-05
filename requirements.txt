@@ -21,7 +21,7 @@ open3d==0.13.0
 timm==0.5.4
 # Consistent Video Depth Estimation
 wget==3.2
-gdown==4.4.0
+gdown==4.6.0
 h5py==3.6.0
 pypng==0.0.21
 # Creating Excel spreadsheets with Pandas

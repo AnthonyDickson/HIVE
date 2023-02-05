@@ -41,6 +41,8 @@ def get_adabins_weights(basemodel_name='tf_efficientnet_b5_ap'):
     print('Loading base model {}...'.format(basemodel_name), end='')
     torch.hub.load('rwightman/gen-efficientnet-pytorch', basemodel_name, pretrained=True)
 
+    print("Finished downloading EfficientNet weights for AdaBins.")
+
 
 def get_mc_weights():
     get_model_from_url(
@@ -48,6 +50,8 @@ def get_mc_weights():
         local_path="mc.pth",
         path_root=os.environ["WEIGHTS_PATH"]
     )
+
+    print("Finished downloading Mannequin Challange (mc) weights.")
 
 
 def get_detectron2_weights():
@@ -60,6 +64,8 @@ def get_detectron2_weights():
     # Find a model from detectron2's model zoo. You can use the https://dl.fbaipublicfiles... url as well
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(model_config_file)
     DefaultPredictor(cfg)  # The initialiser triggers the download of the weights.
+
+    print("Finished downloading Detectron2 weights.")
 
 
 if __name__ == '__main__':
