@@ -29,7 +29,7 @@ from thirdparty.dpt import dpt
 from thirdparty.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import calculate_target_resolution
-from video2mesh.io import DatasetBase, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
+from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions
 from video2mesh.types import Size, File
@@ -39,7 +39,7 @@ from video2mesh.utils import tqdm_imap
 # TODO: Make depth estimation customisable via cli (e.g. max depth)
 
 
-class DatasetAdaptor(DatasetBase, ABC):
+class DatasetAdaptor(Dataset, ABC):
     """Creates a copy of a dataset in the VTMDataset format."""
 
     def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,

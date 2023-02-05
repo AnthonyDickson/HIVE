@@ -1,3 +1,4 @@
+import abc
 import contextlib
 import datetime
 import json
@@ -20,7 +21,7 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
 from scipy.spatial.transform import Rotation
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
 
 from thirdparty.colmap.scripts.python.read_write_model import read_model
@@ -143,7 +144,7 @@ class BatchPredictor(DefaultPredictor):
         return predictions
 
 
-def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
+def create_masks(rgb_loader: TorchDataLoader, mask_folder: Union[str, Path],
                  overwrite_ok=False, for_colmap=False, filename_fmt: Optional[Callable[[int], str]] = None):
     """
     Create instance segmentation masks for the given RGB video sequence and save the masks to disk.
@@ -180,6 +181,7 @@ def create_masks(rgb_loader: DataLoader, mask_folder: Union[str, Path],
     os.makedirs(mask_folder, exist_ok=overwrite_ok)
     i = 0
 
+    # noinspection PyTypeChecker
     with tqdm(total=len(rgb_loader.dataset)) as progress_bar:
         for image_batch in rgb_loader:
             outputs = predictor(image_batch.numpy())
@@ -254,7 +256,7 @@ class COLMAPProcessor:
         if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
             logging.info(f"Could not find masks in folder: {self.mask_path}.")
             logging.info(f"Creating masks for COLMAP...")
-            rgb_loader = DataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
+            rgb_loader = TorchDataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
             create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
         else:
             logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
@@ -308,65 +310,9 @@ class COLMAPProcessor:
         if num_models == 1:
             sparse_recon_path = pjoin(self.sparse_path, models[0])
         else:
-            logging.info(
-                f"COLMAP reconstructed {num_models} models when 1 was expected. Attempting to merge models....")
-
-            path_to_merged = pjoin(self.sparse_path, 'merged')
-            os.makedirs(path_to_merged, exist_ok=True)
-
-            input_pairs = [(models[0], models[1])]
-
-            if num_models > 2:
-                for model in models[2:]:
-                    input_pairs.append((path_to_merged, model))
-
-            merge_successful = True
-
-            for input1, input2 in input_pairs:
-                # Use temporary folder for output to avoid any issues with reading/writing to same folder for num_models > 2.
-                tmp_merged_folder = pjoin(self.sparse_path, 'tmp')
-
-                if os.path.isdir(tmp_merged_folder):
-                    shutil.rmtree(tmp_merged_folder)
-
-                os.mkdir(tmp_merged_folder)
-
-                merge_command = ['colmap', 'model_merger',
-                                 '--input_path1', pjoin(self.sparse_path, input1),
-                                 '--input_path2', pjoin(self.sparse_path, input2),
-                                 f"--output_path", tmp_merged_folder]
-
-                with subprocess.Popen(merge_command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
-                    for line in p.stdout:
-                        logging.debug(line.rstrip('\n'))
-
-                        if 'merge failed' in line.lower():
-                            merge_successful = False
-
-                p.wait()
-                shutil.copytree(tmp_merged_folder, path_to_merged, dirs_exist_ok=True)
-
-            if p.returncode == 0 and merge_successful:
-                logging.info(f"Merged {num_models} successfully, refining merged data with bundle adjustment...")
-
-                path_to_refined = pjoin(self.sparse_path, 'merged_refined')
-                os.mkdir(path_to_refined)
-
-                bundle_adjustment_command = ['colmap', 'bundle_adjuster',
-                                             '--input_path', path_to_merged,
-                                             '--output_path', path_to_refined]
-
-                with subprocess.Popen(bundle_adjustment_command, stdout=subprocess.PIPE, bufsize=1,
-                                      universal_newlines=True) as p:
-                    for line in p.stdout:
-                        logging.debug(line.rstrip('\n'))
-
-                p.wait()
-
-                sparse_recon_path = path_to_refined
-            else:
-                logging.warning(f"Did not merge the {num_models} sub-models successfully, skipping bundle adjustment.")
-                sparse_recon_path = path_to_merged
+            raise RuntimeError(f"COLMAP reconstructed {num_models} models when 1 was expected meaning that the camera trajectory could not be estimated for the entire video."
+                               f"Sometimes this is due to COLMAP using a bad random initial guess of the camera parameters and can be fixed by running the program again."
+                               f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
 
         logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
@@ -549,7 +495,7 @@ class COLMAPProcessor:
         return depth_maps
 
 
-class ImageFolderDataset(Dataset):
+class ImageFolderDataset(TorchDataset):
     def __init__(self, base_dir, transform=None):
         """
         :param base_dir: The path to the folder containing images.
@@ -663,7 +609,7 @@ class InvalidDatasetFormatError(Exception):
     pass
 
 
-class DatasetBase:
+class Dataset(abc.ABC):
     """The basic structure for datasets."""
 
     """The files required to be in the root folder of a dataset."""
@@ -884,7 +830,7 @@ class DatasetMetadata:
         return DatasetMetadata.from_json(json_dict)
 
 
-class VTMDataset(DatasetBase):
+class VTMDataset(Dataset):
     """The main dataset format for the video2mesh (VTM) project."""
 
     metadata_filename = "metadata.json"
