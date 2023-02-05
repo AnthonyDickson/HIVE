@@ -15,29 +15,32 @@ git submodule update --init --recursive
 This command can also be used to pull/update any changes in the submodules. 
 
 ## Setting Up Your Development Environment
-You have three options for setting up the dev environment, in the recommended order:
+Choose one of three options for setting up the dev environment (in the recommended order):
 1. [Pre-built Docker image](#pre-built-docker-image)
 2. [Building the Docker image locally](#building-the-docker-image-locally)
 3. [Local installation](#local-installation)
 
 ### Prerequisites
 - Windows or Ubuntu
-- NVIDIA GPU with 10GB+ memory
+- NVIDIA GPU with 6GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
 - CUDA 11.6+
 - WSL for Windows users
 - Docker
 - (optional) PyCharm
 
 ### Pre-Built Docker Image
-1. Pull (download) the pre-built image (~11.3 GB): 
+1. Pull (download) the pre-built image (~13 GB): 
       ```shell
       docker pull dican732/video2mesh
       ```
+   **Note:** By default, this uses the image `dican732/video2mesh:latest` which in turn is the runtime image `dican732/video2mesh:runtime-cu116`. This is fine if you just want to run the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `dican732/video2mesh:dev-cu116`.
+
+2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Building the Docker image locally
 1. Run the build command:
       ```shell
-      docker build -t dican732/video2mesh .
+      docker build -f Dockerfile.dev -t dican732/video2mesh .
       ```
 
 2. There are some custom CUDA kernels that require GPU access to be built. These can be installed via the following command: 
@@ -45,28 +48,33 @@ You have three options for setting up the dev environment, in the recommended or
     docker run --rm -v $(pwd):/app -it dican732/video2mesh bash -c "cd thirdparty/consistent_depth/third_party/flownet2/ && chmod +x install.sh && ./install.sh && bash"
     ```
   
-3. Once this command has finished and the container is **still running**, run the following command to update the Docker image with the newly installed Python packages: 
+3. Once this command has finished and the container is ***still running***, run the following command to update the Docker image with the newly installed Python packages: 
     ```shell
     IMAGE_NAME=dican732/video2mesh
     CONTAINER_ID=$(docker ps | grep ${IMAGE_NAME} | awk '{ print $1 }')
     docker commit $CONTAINER_ID $IMAGE_NAME
     ```
      
-4. You can now exit the Docker container started in step b.
+4. You can now exit the Docker container started in step 2.
+
+5. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Local Installation
-Start by choosing one of the following methods for setting up the Python environment (Docker is the recommended approach):
 1. Install Python 3.8. A virtual environment (e.g., Conda, virtualenv, pipenv) is recommended.
+
 2. Install the Python packages:
     ```shell
     pip install -r requirements.txt
     ```
 3. Ensure that you have installed the following:
-   - CUDA Toolkit 11.6
+   - CUDA Toolkit 11.6+
    - OpenCV 3.4.16 
      - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
+   - COLMAP
   
    Refer to [Dockerfile](Dockerfile) for detailed setup instructions on Ubuntu 20.04.
+
+4. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ## Running the Program
 ### Sample Dataset
@@ -97,9 +105,6 @@ Below is an example of how to run the program with estimated data and a static b
     docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
     ```
 
- **Note:** Creating the instance segmentation masks with a CPU only image/Python environment will be *VERY* slow. 
- It is strongly recommended that you use a GPU image/environment if possible.
-
 ### PyCharm Users
 There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
 
@@ -123,7 +128,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
 - `--num_frames <int>` If specified, any frames after this index are truncated.
-- `--frame_step <int>` If specified, only every `frame_step`th frame is sent to COLMAP. E.g., if using `--frame_step 15` only every 15th frame is sent to COLMAP. Use this if COLMAP is taking a long time.
+- `--frame_step <int>` If specified, only every `frame_step`th frame is sent to COLMAP and used for the background reconstruction. E.g., if using `--frame_step 15` only every 15th frame is sent to COLMAP. Use this if COLMAP is taking a long time.
 - `--sdf_num_voxels <int>` Sets a limit on the number of voxels in the background mesh. Use this if you are getting out of memory errors during the background mesh reconstruction step. A recommended value for this option is 80000000.
 
 

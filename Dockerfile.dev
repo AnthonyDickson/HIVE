@@ -39,8 +39,8 @@ RUN cd / && \
     cd opencv && \
     mkdir -p build &&  \
     cd build && \
-    cmake -D WITH_CUDA=ON \
-    -D BUILD_EXAMPLES=OFF -D BUILD_opencv_apps=OFF -D BUILD_DOCS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_TESTS=OFF .. && \
+    # Can add `-D WITH_CUDA=ON` to force build with CUDA extensions enabled, however this adds a lot to the image build time and is not really used in the code anyway.
+    cmake -D BUILD_EXAMPLES=OFF -D BUILD_opencv_apps=OFF -D BUILD_DOCS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_TESTS=OFF .. && \
     cmake --build . -- -j 8 && \
     make install && \
     cd / && \
@@ -78,7 +78,7 @@ ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
 
 COPY scripts/download_weights.py download_weights.py
 # The first line downloads the weights for the MC depth estimation model, the AdaBins base model and Detectron2.
-RUN python3 download_weights.py && \
+RUN python3 download_weights.py --mc --adabins && \
     # Weights for the AdaBins decoder portion of the model.
     gdown https://drive.google.com/uc?id=1lvyZZbC9NLcS8a__YPcUP7rDiIpbRpoF -O ${WEIGHTS_PATH}/AdaBins_nyu.pt && \
     # FlowNet2 weights

@@ -1,3 +1,4 @@
+import argparse
 import os
 from zipfile import ZipFile
 
@@ -62,6 +63,17 @@ def get_detectron2_weights():
 
 
 if __name__ == '__main__':
-    get_mc_weights()
-    get_adabins_weights()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--mc', help='Download the weights for the "Mannequin Challenge" depth estimation model.', action='store_true')
+    parser.add_argument('--adabins', help='Download the weights for the AdaBins depth estimation model.', action='store_true')
+
+    args = parser.parse_args()
+
     get_detectron2_weights()
+
+    if args.mc:
+        get_mc_weights()
+
+    if args.adabins:
+        get_adabins_weights()
