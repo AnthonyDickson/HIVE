@@ -240,7 +240,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=True, estimate_depth=True)
 
     tsdf_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
-                                              sdf_num_voxels=80000000, sdf_volume_size=10.0)
+                                              sdf_max_voxels=80000000, sdf_volume_size=10.0)
     rgbd_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.RGBD)
     mesh_decimation_options = MeshDecimationOptions(num_vertices_object=-1, num_vertices_background=-1)
 

@@ -1737,7 +1737,7 @@ def main():
 
     if optimiser.debug_path:
         reconstruction_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
-                                                       sdf_num_voxels=80000000)
+                                                       sdf_max_voxels=80000000)
         logging.info("Running TSDFFusion on initial pose data...")
         mesh_before = tsdf_fusion(dataset, options=reconstruction_options, num_frames=num_frames)
         mesh_before.export(pjoin(optimiser.debug_path, 'before.ply'))

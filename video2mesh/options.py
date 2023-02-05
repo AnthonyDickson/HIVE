@@ -299,7 +299,7 @@ class BackgroundMeshOptions(Options):
                                         MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
-                 sdf_volume_size=3.0, sdf_voxel_size=0.02, sdf_num_voxels: Optional[int] = None):
+                 sdf_volume_size=5.0, sdf_voxel_size=0.02, sdf_max_voxels: Optional[int] = 80_000_000):
         """
         :param reconstruction_method: The method to use for reconstructing the background mesh(es).
         :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
@@ -308,7 +308,7 @@ class BackgroundMeshOptions(Options):
             reconstruction method `tsdf_fusion` as it automatically infers the volume size from the input data.
         :param sdf_voxel_size: The size of a voxel in the SDF volume in cubic meters. Only applies to the reconstruction
             methods `tsdf_fusion` and `bundle_fusion`.
-        :param sdf_num_voxels: (optional) The desired number of voxels in the resulting voxel volume.
+        :param sdf_max_voxels: (optional) The maximum number of voxels in the resulting voxel volume.
             This option only has an effect for the reconstruction method `tsdf_fusion`.
             If specified, the `sdf_voxel_size` option will be ignored.
         """
@@ -320,14 +320,14 @@ class BackgroundMeshOptions(Options):
             f"The depth mask dilation iterations must be a positive integer."
         assert sdf_volume_size > 0.0, f"Volume size must be a positive number, instead got {sdf_volume_size}"
         assert sdf_voxel_size > 0.0, f"Voxel size must be a positive number, instead got {sdf_voxel_size}"
-        assert sdf_num_voxels is None or (isinstance(sdf_num_voxels, int) and sdf_num_voxels > 0), \
-            f"Number of voxels number must be a positive integer or None, instead got {sdf_num_voxels}"
+        assert sdf_max_voxels is None or (isinstance(sdf_max_voxels, int) and sdf_max_voxels > 0), \
+            f"Number of voxels number must be a positive integer or None, instead got {sdf_max_voxels}"
 
         self.reconstruction_method = reconstruction_method
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.sdf_volume_size = sdf_volume_size
         self.sdf_voxel_size = sdf_voxel_size
-        self.sdf_num_voxels = sdf_num_voxels
+        self.sdf_max_voxels = sdf_max_voxels
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -343,11 +343,11 @@ class BackgroundMeshOptions(Options):
         group.add_argument('--sdf_volume_size', type=float,
                            help="The size of the SDF volume in cubic meters. This option has no effect for the "
                                 "reconstruction method `TSDF_FUSION` as it automatically infers the volume "
-                                "size from the input data.", default=3.0)
+                                "size from the input data.", default=5.0)
         group.add_argument('--sdf_voxel_size', type=float,
                            help="The size of a voxel in the SDF volume in cubic meters.", default=0.02)
-        group.add_argument('--sdf_num_voxels', type=int,
-                           help="The desired number of voxels in the resulting voxel volume. "
+        group.add_argument('--sdf_max_voxels', type=int, default=80_000_000,
+                           help="The maximum number of voxels allowed in the resulting voxel volume."
                                 "This option only has an effect for the reconstruction method `TSDF_FUSION`. "
                                 "If specified, the `--sdf_voxel_size` option will be ignored.")
 
@@ -358,7 +358,7 @@ class BackgroundMeshOptions(Options):
             depth_mask_dilation_iterations=args.depth_mask_dilation_iterations,
             sdf_volume_size=args.sdf_volume_size,
             sdf_voxel_size=args.sdf_voxel_size,
-            sdf_num_voxels=args.sdf_num_voxels
+            sdf_max_voxels=args.sdf_max_voxels
         )
 
 
@@ -392,14 +392,14 @@ class ForegroundTrajectorySmoothingOptions(Options):
 class PipelineOptions(Options):
 
     def __init__(self,
-                 num_frames=-1, frame_step=1,
+                 num_frames=-1, frame_step=15,
                  estimate_pose=False, estimate_depth=False,
                  log_file='logs.log',
                  webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
-            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n | n > 1, samples every n frames.
+            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param log_file: The path to save the logs to.
@@ -420,10 +420,10 @@ class PipelineOptions(Options):
 
         group.add_argument('--num_frames', type=int, default=-1,
                            help='The maximum of frames to process. Set to -1 (default) to process all frames.')
-        group.add_argument('--frame_step', type=int, default=1,
+        group.add_argument('--frame_step', type=int, default=15,
                            help='The frequency to sample frames at for COLMAP and pose optimisation. '
                                 'If set to 1, samples all frames (i.e. no effect). '
-                                'Otherwise if set to n | n > 1, samples every n frames.')
+                                'Otherwise if set to n > 1, samples every n frames.')
         group.add_argument('--estimate_pose', action='store_true',
                            help='Whether to estimate camera parameters with COLMAP or use provided ground truth data.')
         group.add_argument('--estimate_depth', action='store_true',

@@ -60,9 +60,10 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
     # ======================================================================================================== #
     # Integrate
     # ======================================================================================================== #
-    if options.sdf_num_voxels:
-        # actual_num_voxels = np.ceil(np.product((vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_voxel_size))
-        voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_num_voxels) ** (1 / 3)
+    voxel_count = np.ceil(np.product((vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_voxel_size))
+
+    if options.sdf_max_voxels and voxel_count > options.sdf_max_voxels:
+            voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_max_voxels) ** (1 / 3)
     else:
         voxel_size = options.sdf_voxel_size
 
