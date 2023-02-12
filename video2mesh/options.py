@@ -388,14 +388,49 @@ class ForegroundTrajectorySmoothingOptions(Options):
             num_epochs=args.fts_num_epochs
         )
 
+class WebXROptions(Options):
+    """Configuration for the WebXR renderer, and the metadata."""
+    def __init__(self, webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080',
+                 webxr_add_ground_plane=False, webxr_add_sky_box=False):
+        """
+        :param webxr_path: Where to export the 3D video files to.
+        :param webxr_url: The URL to the WebXR 3D video player.
+        :param webxr_add_ground_plane: Whether to render a white ground plane to the scene in the renderer. Useful for debugging.
+        :param webxr_add_sky_box: Whether to render a sky as a 360 degree background (cube map).
+        """
+        self.webxr_path = webxr_path
+        self.webxr_url = webxr_url
+        self.webxr_add_ground_plane = webxr_add_ground_plane
+        self.webxr_add_sky_box = webxr_add_sky_box
+
+    @staticmethod
+    def add_args(parser: argparse.ArgumentParser):
+        group = parser.add_argument_group('WebXR')
+
+        group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
+                           default='thirdparty/webxr3dvideo/docs')
+        group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
+                           default='http://localhost:8080')
+        group.add_argument('--webxr_add_ground_plane', action='store_true',
+                           help='Whether to render a white ground plane to the scene in the renderer.')
+        group.add_argument('--webxr_add_sky_box', action='store_true',
+                           help='Whether to render a sky cube map in the background.')
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> 'WebXROptions':
+        return WebXROptions(
+            webxr_path=args.webxr_path,
+            webxr_url=args.webxr_url,
+            webxr_add_ground_plane=args.webxr_add_ground_plane,
+            webxr_add_sky_box=args.webxr_add_sky_box
+        )
 
 class PipelineOptions(Options):
 
     def __init__(self,
                  num_frames=-1, frame_step=15,
                  estimate_pose=False, estimate_depth=False,
-                 log_file='logs.log',
-                 webxr_path='thirdparty/webxr3dvideo/docs', webxr_url='localhost:8080'):
+                 log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
@@ -403,16 +438,12 @@ class PipelineOptions(Options):
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param log_file: The path to save the logs to.
-        :param webxr_path: Where to export the 3D video files to.
-        :param webxr_url: The URL to the WebXR 3D video player.
         """
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.estimate_pose = estimate_pose
         self.estimate_depth = estimate_depth
         self.log_file = log_file
-        self.webxr_path = webxr_path
-        self.webxr_url = webxr_url
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -430,10 +461,6 @@ class PipelineOptions(Options):
                            help='Whether to estimate depth maps or use provided ground truth depth maps.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
-        group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
-                           default='thirdparty/webxr3dvideo/docs')
-        group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
-                           default='http://localhost:8080')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
@@ -442,7 +469,5 @@ class PipelineOptions(Options):
             frame_step=args.frame_step,
             estimate_pose=args.estimate_pose,
             estimate_depth=args.estimate_depth,
-            log_file=args.log_file,
-            webxr_path=args.webxr_path,
-            webxr_url=args.webxr_url
+            log_file=args.log_file
         )

@@ -30,7 +30,7 @@ from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
-    ForegroundTrajectorySmoothingOptions
+    ForegroundTrajectorySmoothingOptions, WebXROptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
 
@@ -47,6 +47,7 @@ class Pipeline:
                  decimation_options=MeshDecimationOptions(),
                  dilation_options=MaskDilationOptions(), filtering_options=MeshFilteringOptions(),
                  colmap_options=COLMAPOptions(), static_mesh_options=BackgroundMeshOptions(),
+                 webxr_options=WebXROptions(),
                  fts_options=ForegroundTrajectorySmoothingOptions()):
         """
         :param options: Options pertaining to the core program.
@@ -56,6 +57,7 @@ class Pipeline:
         :param filtering_options: Options for face filtering.
         :param colmap_options: Options for COLMAP.
         :param static_mesh_options: Options for creating the background static mesh.
+        :param webxr_options: Options for configuring the WebXR renderer and metadata.
         :param fts_options: Options for foreground trajectory smoothing.
         """
         self.options = options
@@ -65,6 +67,7 @@ class Pipeline:
         self.dilation_options = dilation_options
         self.filtering_options = filtering_options
         self.background_mesh_options = static_mesh_options
+        self.webxr_options = webxr_options
         self.fts_options = fts_options
 
     @staticmethod
@@ -83,6 +86,7 @@ class Pipeline:
         MeshDecimationOptions.add_args(parser)
         COLMAPOptions.add_args(parser)
         BackgroundMeshOptions.add_args(parser)
+        WebXROptions.add_args(parser)
 
         args = parser.parse_args()
 
@@ -93,6 +97,7 @@ class Pipeline:
         decimation_options = MeshDecimationOptions.from_args(args)
         colmap_options = COLMAPOptions.from_args(args)
         static_mesh_options = BackgroundMeshOptions.from_args(args)
+        webxr_options = WebXROptions.from_args(args)
 
         # TODO: Dump logs to output folder.
         setup_logger(video2mesh_options.log_file)
@@ -105,7 +110,8 @@ class Pipeline:
             dilation_options=dilation_options,
             filtering_options=filtering_options,
             colmap_options=colmap_options,
-            static_mesh_options=static_mesh_options
+            static_mesh_options=static_mesh_options,
+            webxr_options=webxr_options
         )
 
     @property
@@ -162,7 +168,7 @@ class Pipeline:
             overwrite_ok=self.storage_options.overwrite_ok
         )
 
-        logging.info(f"Exporting mesh data to local WebXR server folder {self.options.webxr_path}...")
+        logging.info(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...")
         self._export_video_webxr(self.mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
                                  metadata=self._get_webxr_metadata(fps=dataset.fps),
                                  export_name=(self._get_dataset_name(dataset)))
@@ -174,7 +180,7 @@ class Pipeline:
                             elapsed_time_seconds)
 
         logging.info(
-            f"Start the WebXR server and go to this URL: {self.options.webxr_url}?video={self._get_dataset_name(dataset)}")
+            f"Start the WebXR server and go to this URL: {self.webxr_options.webxr_url}?video={self._get_dataset_name(dataset)}")
 
     @staticmethod
     def _reset_cuda_stats():
@@ -825,7 +831,9 @@ class Pipeline:
             use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method not in (
                 MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD,
                 MeshReconstructionMethod.KeyframeRGBD
-            )
+            ),
+            add_ground_plane=self.webxr_options.webxr_add_ground_plane,
+            add_sky_box=self.webxr_options.webxr_add_sky_box
         )
 
     def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
@@ -839,7 +847,7 @@ class Pipeline:
         :param metadata: The JSON-encodable metadata (e.g., fps, number of frames) dictionary.
         :param export_name: The name of the folder to write the exported mesh files to.
         """
-        webxr_output_path = pjoin(self.options.webxr_path, export_name)
+        webxr_output_path = pjoin(self.webxr_options.webxr_path, export_name)
         os.makedirs(webxr_output_path, exist_ok=self.storage_options.overwrite_ok)
 
         metadata_filename = 'metadata.json'
