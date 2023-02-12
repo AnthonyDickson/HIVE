@@ -430,6 +430,7 @@ class PipelineOptions(Options):
     def __init__(self,
                  num_frames=-1, frame_step=15,
                  estimate_pose=False, estimate_depth=False,
+                 background_only=False,
                  log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
@@ -437,12 +438,14 @@ class PipelineOptions(Options):
             If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
+        :param background_only: Whether to only reconstruct the static background.
         :param log_file: The path to save the logs to.
         """
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.estimate_pose = estimate_pose
         self.estimate_depth = estimate_depth
+        self.background_only = background_only
         self.log_file = log_file
 
     @staticmethod
@@ -459,6 +462,8 @@ class PipelineOptions(Options):
                            help='Whether to estimate camera parameters with COLMAP or use provided ground truth data.')
         group.add_argument('--estimate_depth', action='store_true',
                            help='Whether to estimate depth maps or use provided ground truth depth maps.')
+        group.add_argument('--background_only', action='store_true',
+                           help='Whether to only reconstruct the static background.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
 
@@ -469,5 +474,6 @@ class PipelineOptions(Options):
             frame_step=args.frame_step,
             estimate_pose=args.estimate_pose,
             estimate_depth=args.estimate_depth,
+            background_only=args.background_only,
             log_file=args.log_file
         )

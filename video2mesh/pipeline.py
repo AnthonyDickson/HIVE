@@ -228,7 +228,9 @@ class Pipeline:
 
         :return: The foreground scene.
         """
-        if self.fts_options.num_epochs > 0:
+        if self.options.background_only:
+            foreground_scene = self._create_empty_scene(dataset)
+        elif self.fts_options.num_epochs > 0:
             smoothed_trajectory = ForegroundPoseOptimiser(dataset, learning_rate=self.fts_options.learning_rate,
                                                           num_epochs=self.fts_options.num_epochs).run()
 
