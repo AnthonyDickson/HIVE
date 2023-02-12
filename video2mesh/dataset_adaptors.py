@@ -159,23 +159,6 @@ class DatasetAdaptor(Dataset, ABC):
 
         tqdm_imap(copy_image, range(self.num_frames))
 
-    def convert_from_ground_truth(self) -> VTMDataset:
-        """
-        Read the dataset and create a copy in the VTMDataset format.
-
-        :return: The newly created dataset object.
-        """
-        return self.convert(estimate_pose=True, estimate_depth=True)
-
-    def convert_from_rgb(self) -> VTMDataset:
-        """
-        Read a video file and create a VTMDataset with estimated camera parameters and depth maps.
-
-        :return: The newly created dataset object.
-        """
-        # TODO: Add way to pass arguments to PoseOptimiser object.
-        return self.convert(estimate_pose=False, estimate_depth=False)
-
     def convert(self, estimate_pose: bool, estimate_depth: bool, no_cache = False) -> VTMDataset:
         """
         Convert a dataset into the standard format.
@@ -943,6 +926,8 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
 
 class VideoAdaptor(VideoAdaptorBase):
     """Converts an RGB video to the VTMDataset format."""
+    _no_ground_truth_error_message = "You tried loading ground truth pose or depth data for a video which is not possible. " \
+                                     "You must estimate this data for videos by specifying the flags '--estimate_pose' and '--estimate_depth'."
 
     def __init__(self, base_path: File, output_path: File, overwrite_ok=False, num_frames=-1, frame_step=1,
                  colmap_options=COLMAPOptions(),
@@ -996,22 +981,22 @@ class VideoAdaptor(VideoAdaptorBase):
             raise InvalidDatasetFormatError(f"The folder {base_path} does not exist!")
 
     def _load_camera_trajectory(self):
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
     def get_camera_matrix(self) -> np.ndarray:
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
     def get_pose(self, index: int) -> np.ndarray:
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
     def get_camera_trajectory(self) -> np.ndarray:
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
     def get_depth_map(self, index: int) -> np.ndarray:
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
     def convert_from_ground_truth(self) -> VTMDataset:
-        raise NotImplementedError
+        raise NotImplementedError(self._no_ground_truth_error_message)
 
 
 # noinspection PyArgumentList
@@ -1386,9 +1371,6 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
                 depth_confidence_filter_level=depth_confidence_filter_level
             )
         elif VideoAdaptor.is_valid_folder_structure(dataset_path):
-            if not pipeline_options.estimate_depth or not pipeline_options.estimate_pose:
-                raise RuntimeError("You must specify both of the following command line flags for plain videos: `--estimate_depth` and `--estimate_pose`.")
-
             path_no_extensions, _ = os.path.splitext(dataset_path)
 
             dataset_converter = VideoAdaptor(**base_kwargs, resize_to=resize_to)
