@@ -722,11 +722,23 @@ class Pipeline:
             background_scene = self._align_bundle_fusion_reconstruction(dataset, background_scene)
 
         # Flip the scenes the right way up.
-        rotation = np.eye(4, dtype=np.float32)
-        rotation[:3, :3] = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
+        rotate_right_way_up = np.eye(4, dtype=np.float32)
+        rotate_right_way_up[:3, :3] = Rotation.from_euler('xyz', [0, 0, 180], degrees=True).as_matrix()
 
-        foreground_scene.apply_transform(rotation)
-        background_scene.apply_transform(rotation)
+        foreground_scene.apply_transform(rotate_right_way_up)
+        background_scene.apply_transform(rotate_right_way_up)
+
+        if self.options.estimate_pose:
+            # Scenes where the recording device was held at an angle and estimated pose is used will not sit flat on the
+            # ground plane, this step attempts to fix that.
+            transform_to_origin, _ = trimesh.bounds.oriented_bounds(background_scene, angle_digits=1)
+            # This transform will result in the mesh being rotated 90 degrees about the local x-axis and then the local z-axis.
+            # This rotation undoes that last bit.
+            rotation = np.eye(4)
+            rotation[:3, :3] = Rotation.from_euler('xyz', [-90, 0, 90], degrees=True).as_matrix()
+            transform_to_origin = rotation @ transform_to_origin
+            foreground_scene.apply_transform(transform_to_origin)
+            background_scene.apply_transform(transform_to_origin)
 
         # Then move the scenes so that they are centered on the world origin.
         scene_bounds = self._get_scene_bounds(foreground_scene, background_scene)
