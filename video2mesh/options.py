@@ -430,7 +430,7 @@ class PipelineOptions(Options):
     def __init__(self,
                  num_frames=-1, frame_step=15,
                  estimate_pose=False, estimate_depth=False,
-                 background_only=False,
+                 background_only=False, align_scene=False,
                  log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
@@ -439,6 +439,7 @@ class PipelineOptions(Options):
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param background_only: Whether to only reconstruct the static background.
+        :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
         :param log_file: The path to save the logs to.
         """
         self.num_frames = num_frames
@@ -446,6 +447,7 @@ class PipelineOptions(Options):
         self.estimate_pose = estimate_pose
         self.estimate_depth = estimate_depth
         self.background_only = background_only
+        self.align_scene = align_scene
         self.log_file = log_file
 
     @staticmethod
@@ -464,6 +466,8 @@ class PipelineOptions(Options):
                            help='Whether to estimate depth maps or use provided ground truth depth maps.')
         group.add_argument('--background_only', action='store_true',
                            help='Whether to only reconstruct the static background.')
+        group.add_argument('--align_scene', action='store_true',
+                           help='Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
 
@@ -475,5 +479,6 @@ class PipelineOptions(Options):
             estimate_pose=args.estimate_pose,
             estimate_depth=args.estimate_depth,
             background_only=args.background_only,
+            align_scene=args.align_scene,
             log_file=args.log_file
         )

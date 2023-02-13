@@ -728,7 +728,7 @@ class Pipeline:
         foreground_scene.apply_transform(rotate_right_way_up)
         background_scene.apply_transform(rotate_right_way_up)
 
-        if self.options.estimate_pose:
+        if self.options.align_scene:
             # Scenes where the recording device was held at an angle and estimated pose is used will not sit flat on the
             # ground plane, this step attempts to fix that.
             transform_to_origin, _ = trimesh.bounds.oriented_bounds(background_scene, angle_digits=1)

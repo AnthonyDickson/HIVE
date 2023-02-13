@@ -128,9 +128,8 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
 - `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
-- `--frame_step <int>` If specified, only every `frame_step`th frame is sent to COLMAP and used for the background reconstruction. E.g., if using `--frame_step 15` only every 15th frame is sent to COLMAP. Use this if COLMAP is taking a long time.
-- `--sdf_max_voxels <int>` Sets a limit on the number of voxels in the background mesh. Use this if you are getting out of memory errors during the background mesh reconstruction step. A recommended value for this option is 80000000.
-
+- `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
+- `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
 
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
