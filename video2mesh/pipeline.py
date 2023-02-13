@@ -169,9 +169,10 @@ class Pipeline:
         )
 
         logging.info(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...")
-        self._export_video_webxr(self.mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
-                                 metadata=self._get_webxr_metadata(fps=dataset.fps),
-                                 export_name=(self._get_dataset_name(dataset)))
+        export_path = self._export_video_webxr(self.mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
+                                               metadata=self._get_webxr_metadata(fps=dataset.fps),
+                                               export_name=(self._get_dataset_name(dataset)))
+        logging.info(f"Exported mesh data to: {export_path}")
 
         elapsed_time_seconds = time.time() - start_time
 
@@ -553,7 +554,8 @@ class Pipeline:
         return vertices, faces
 
     @staticmethod
-    def _get_mesh_texture_and_uv(vertices, image, camera_matrix, rotation=np.eye(3), translation=np.zeros((3, 1)), scale_factor=1.0):
+    def _get_mesh_texture_and_uv(vertices, image, camera_matrix, rotation=np.eye(3), translation=np.zeros((3, 1)),
+                                 scale_factor=1.0):
         """
         Get the cropped texture and UV coordinates for a given set of vertices.
 
@@ -705,7 +707,7 @@ class Pipeline:
         return output_path
 
     def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
-    Tuple[trimesh.Scene, trimesh.Scene]:
+            Tuple[trimesh.Scene, trimesh.Scene]:
         """
         Center the scenes at the world origin and orient them so that the render is looking at the front of scene.
 
@@ -851,7 +853,7 @@ class Pipeline:
         )
 
     def _export_video_webxr(self, mesh_path: str, fg_scene_name: str, bg_scene_name: str, metadata: dict,
-                            export_name: str):
+                            export_name: str) -> str:
         """
         Exports the mesh data for viewing in the local WebXR renderer.
 
@@ -860,6 +862,8 @@ class Pipeline:
         :param bg_scene_name: The filename of the background scene without the file extension.
         :param metadata: The JSON-encodable metadata (e.g., fps, number of frames) dictionary.
         :param export_name: The name of the folder to write the exported mesh files to.
+
+        :return the export folder path.
         """
         webxr_output_path = pjoin(self.webxr_options.webxr_path, export_name)
         os.makedirs(webxr_output_path, exist_ok=self.storage_options.overwrite_ok)
@@ -876,6 +880,8 @@ class Pipeline:
         export_file(metadata_filename)
         export_file(f"{fg_scene_name}.glb")
         export_file(f"{bg_scene_name}.glb")
+
+        return webxr_output_path
 
     def _print_summary(self, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
                        foreground_scene_path: str, background_scene_path: str,

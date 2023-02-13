@@ -129,7 +129,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
 - `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
 - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
-- `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
+- `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
 
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
@@ -153,6 +153,7 @@ docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -c "im
   - Right click + dragging the mouse will pan.
   - Scrolling will zoom in and out.
   - `R` will reset the camera pose.
+  - `P` will add the camera pose to the metadata and download a copy. You will have to move this file to the video folder, overwrite (or backup) the old metadata, and reload the webpage for it to take effect.
 
 Refer to the [WebXR repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
 
