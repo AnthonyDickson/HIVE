@@ -351,11 +351,24 @@ class Trajectory:
 
         :return: The normalised camera trajectory.
         """
-        # TODO: Retain roll? What about pitch? Yaw can be safely discarded so that the scene is facing the
-        #  same direction for all scenes. Take angle modulus 90 degrees to account for when device is not held
-        #  perfectly level (pretty much always)?
         matrix_trajectory = self.to_homogenous_transforms()
         matrix_trajectory = np.linalg.inv(matrix_trajectory[0]) @ matrix_trajectory
+        vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
+
+        return vector_trajectory
+
+    def normalise_position(self) -> 'Trajectory':
+        """
+        Adjust the camera trajectory so that the translation is the origin.
+
+        :return: The normalised camera trajectory.
+        """
+        matrix_trajectory = self.to_homogenous_transforms()
+
+        first_pose = matrix_trajectory[0].copy()
+        first_pose[:3, :3] = np.eye(3)
+        matrix_trajectory = np.linalg.inv(first_pose) @ matrix_trajectory
+
         vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
 
         return vector_trajectory

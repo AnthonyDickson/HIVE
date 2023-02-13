@@ -541,7 +541,13 @@ class TUMAdaptor(DatasetAdaptor):
             self.num_frames = num_frames
 
         # Take inverse since TUM poses are cam-to-world, but most of the math assumes world-to-cam poses.
-        self.camera_trajectory = self.camera_trajectory.normalise().inverse()
+        self.camera_trajectory = self.camera_trajectory.normalise_position().inverse()
+
+        # When just resetting the position, the entire scene ends up rotated 90 degrees about the x-axis.
+        # We apply a rotation so that the scene appears the right way up.
+        rotation = np.eye(4)
+        rotation[:3, :3] = Rotation.from_euler('xyz', [-90, 0, 0], degrees=True).as_matrix()
+        self.camera_trajectory = self.camera_trajectory.apply(rotation)
         # TODO: Account for initial orientation of the kinect device?
 
     def _get_synced_frame_data(self):
@@ -1148,7 +1154,13 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
             camera_trajectory = camera_trajectory.apply(rotation)
 
-        camera_trajectory = camera_trajectory.normalise().inverse()
+        camera_trajectory = camera_trajectory.normalise_position().inverse()
+
+        # When only resetting the position, the scenes from this adaptor end upside down.
+        # We add this adjustment, so they appear the right way up.
+        rotation = np.eye(4)
+        rotation[:3, :3] = Rotation.from_euler('xyz', [180, 0, 0], degrees=True).as_matrix()
+        camera_trajectory = camera_trajectory.apply(rotation)
 
         return device_orientation, camera_trajectory
 

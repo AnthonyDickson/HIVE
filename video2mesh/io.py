@@ -994,15 +994,13 @@ class VTMDataset(Dataset):
 
         return self
 
-    def _load_camera_parameters(self, normalise=True) -> Tuple[np.ndarray, Trajectory]:
+    def _load_camera_parameters(self) -> Tuple[np.ndarray, Trajectory]:
         """
         Load the ground truth camera matrix and trajectory from disk.
 
         The camera matrix is expected to be saved as a 3x3 matrix in a file called "camera.txt".
         The camera trajectory is expected to be saved as a Nx7 matrix in a file called "trajectory.txt", where N is the
         number of frames in the sequence and each row is a quaternion rotation 'r' and translation vector 't'.
-
-        :param normalise: Whether to normalise the pose data s.t. the first pose is the identity.
         """
         camera_matrix = np.loadtxt(self.path_to_camera_matrix, dtype=np.float32)
         camera_trajectory = Trajectory.load(self.path_to_camera_trajectory)
@@ -1014,9 +1012,6 @@ class VTMDataset(Dataset):
         if len(camera_trajectory.shape) != 2 or camera_trajectory.shape[1] != 7:
             raise RuntimeError(f"Expected camera trajectory to be a Nx7 matrix,"
                                f" but got {camera_trajectory.shape} instead.")
-
-        if normalise:
-            camera_trajectory = camera_trajectory.normalise()
 
         return camera_matrix, camera_trajectory
 
