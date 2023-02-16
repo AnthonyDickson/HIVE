@@ -311,7 +311,8 @@ class COLMAPProcessor:
             sparse_recon_path = pjoin(self.sparse_path, models[0])
         else:
             raise RuntimeError(f"COLMAP reconstructed {num_models} models when 1 was expected meaning that the camera trajectory could not be estimated for the entire video."
-                               f"Sometimes this is due to COLMAP using a bad random initial guess of the camera parameters and can be fixed by running the program again."
+                               f"This may be due to COLMAP using a bad random initial guess of the camera parameters and sometimes can be fixed by running the program again. "
+                               f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal."
                                f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
 
         logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
