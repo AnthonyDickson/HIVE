@@ -1234,7 +1234,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         depth_map = depth_map.astype(np.float32)
         # Creators of StrayScanner suggest that nearest neighbour interpolation should be used.
         depth_map = cv2.resize(depth_map, dsize=(self.target_width, self.target_height),
-                               interpolation=cv2.INTER_NEAREST_EXACT)
+                               interpolation=cv2.INTER_LINEAR)
         depth_map = np.round(depth_map)
         depth_map = depth_map.astype(original_type)
 
