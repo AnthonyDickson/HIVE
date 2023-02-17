@@ -243,7 +243,7 @@ class MeshFilteringOptions(Options):
 
         group.add_argument('--max_depth_dist', type=float,
                            help='The maximum difference in depth between vertices of a '
-                                'face. Used when filtering mesh faces.', default=0.02)
+                                'face. Used when filtering mesh faces.', default=0.1)
         group.add_argument('--max_pixel_dist', type=float,
                            help='The maximum distance between vertices of a face in terms of their image space '
                                 'coordinates.', default=2)
