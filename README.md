@@ -130,6 +130,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
 - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
 - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
+- `--use_lama` Uses the inpainting method of lama for the background.
 
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
