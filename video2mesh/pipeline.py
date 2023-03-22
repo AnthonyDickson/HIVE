@@ -12,6 +12,10 @@ import time
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
+import debugpy
+import subprocess
+import docker
+from python_on_whales import docker
 
 import numpy as np
 import openmesh as om
@@ -33,6 +37,7 @@ from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOpti
     ForegroundTrajectorySmoothingOptions, WebXROptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
+
 
 
 class Pipeline:
@@ -196,23 +201,46 @@ class Pipeline:
 
         :return: The background scene.
         """
+        if self.options.use_lama: 
+            print("xxxxxxxxxxxxxxxxx") 
+            print("xxxxxxxxxxxxxxxxx")
+            subprocess.run(f"""
+                cd thirdparty/lama
+                pip install -r requirements.txt
+
+                export TORCH_HOME=$(pwd) && export PYTHONPATH=$(pwd)
+                python3 bin/predict.py model.path=$(pwd)/big-lama indir=$(pwd)/LaMa_test_images outdir=$(pwd)/output""",
+                shell=True, executable='/bin/bash', check=True)
+            print("xxxxxxxxxxxxxxxxx")
+            print("xxxxxxxxxxxxxxxxx")
+
+            exit()
+
+
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
+            print("1")
             static_background = self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.StaticRGBD
             background_scene = self._create_scene(dataset, include_background=True, background_only=True,
                                                   static_background=static_background)
         else:
+            print("2")
             background_scene = self._create_empty_scene(dataset)
 
             if self.num_frames >= 1:
+                print("3")
                 if self.options.frame_step > 1:
+                    print("4")
                     frame_set = list(range(0, self.num_frames, self.options.frame_step))
 
                     if frame_set[-1] != self.num_frames - 1:
+                        print("5")
                         frame_set.append(self.num_frames - 1)
                 else:
+                    print("6")
                     frame_set = list(range(self.num_frames))
             else:
+                print("7")
                 frame_set = None
 
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
@@ -645,6 +673,11 @@ class Pipeline:
     @classmethod
     def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
                             frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+        # debugpy.listen(5678)
+        # print("Waiting for debugger attach")
+        # debugpy.wait_for_client()
+        # debugpy.breakpoint()
+        # print('break on this line')
         """
         Create a mesh of the static elements from an RGB-D dataset.
 

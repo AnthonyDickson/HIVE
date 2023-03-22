@@ -431,7 +431,7 @@ class PipelineOptions(Options):
                  num_frames=-1, frame_step=15,
                  estimate_pose=False, estimate_depth=False,
                  background_only=False, align_scene=False,
-                 log_file='logs.log'):
+                 log_file='logs.log', use_lama=False):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
@@ -441,6 +441,7 @@ class PipelineOptions(Options):
         :param background_only: Whether to only reconstruct the static background.
         :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
         :param log_file: The path to save the logs to.
+        :param use_lama: Include lama inpainting in the pipeline process.
         """
         self.num_frames = num_frames
         self.frame_step = frame_step
@@ -449,6 +450,7 @@ class PipelineOptions(Options):
         self.background_only = background_only
         self.align_scene = align_scene
         self.log_file = log_file
+        self.use_lama = use_lama
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -470,6 +472,8 @@ class PipelineOptions(Options):
                            help='Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
+        group.add_argument('--use_lama', help='Whether to use lama inpainting in the pipeline process.',
+                           action='store_true')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
@@ -480,5 +484,6 @@ class PipelineOptions(Options):
             estimate_depth=args.estimate_depth,
             background_only=args.background_only,
             align_scene=args.align_scene,
-            log_file=args.log_file
+            log_file=args.log_file,
+            use_lama=args.use_lama
         )
