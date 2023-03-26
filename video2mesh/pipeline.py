@@ -12,10 +12,9 @@ import time
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
-import debugpy
 import subprocess
-import docker
-from python_on_whales import docker
+import cv2 
+from distutils.dir_util import copy_tree
 
 import numpy as np
 import openmesh as om
@@ -201,20 +200,55 @@ class Pipeline:
 
         :return: The background scene.
         """
+
         if self.options.use_lama: 
             print("xxxxxxxxxxxxxxxxx") 
             print("xxxxxxxxxxxxxxxxx")
+
+            bgPath = 'data/garden_landscape_output_bg'
+            if os.path.exists(bgPath):
+                shutil.rmtree(bgPath)
+            os.mkdir(bgPath)
+            copy_tree('data/garden_landscape_output', bgPath)
+
+            bgDepthPath = os.path.join(bgPath, "depth")
+            bgMaskPath = os.path.join(bgPath, "mask")
+            bgRgbPath = os.path.join(bgPath, "rgb")
+
+            for image in os.listdir(bgMaskPath):
+
+                # Create mask for inpainting and depth map
+                mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
+                kernel = np.ones((5, 5), np.uint8)
+                mask = cv2.dilate(mask,kernel,iterations = 5)
+                cv2.imwrite(os.path.join(bgMaskPath, image), mask)
+
+                # Create depth map
+                depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
+                dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
+                cv2.imwrite(os.path.join(bgDepthPath, image), dst)
+
+            # LaMa inpainting 
             subprocess.run(f"""
                 cd thirdparty/lama
                 pip install -r requirements.txt
 
                 export TORCH_HOME=$(pwd) && export PYTHONPATH=$(pwd)
-                python3 bin/predict.py model.path=$(pwd)/big-lama indir=$(pwd)/LaMa_test_images outdir=$(pwd)/output""",
+                cd ..
+                cd ..
+                python3 thirdparty/lama/bin/predict.py model.path=$(pwd)/thirdparty/lama/big-lama indir=$(pwd)/data/garden_landscape_output_bg outdir=$(pwd)/data/garden_landscape_output_bg/rgb""",
                 shell=True, executable='/bin/bash', check=True)
+
+            # Create black mask for background generation 
+            for image in os.listdir(bgMaskPath):
+                blackmask = np.zeros((480,640,1), np.uint8)                
+                cv2.imwrite(os.path.join(bgMaskPath, image), blackmask)
+            
+            dataset = VTMDataset(bgPath)
+
             print("xxxxxxxxxxxxxxxxx")
             print("xxxxxxxxxxxxxxxxx")
 
-            exit()
 
 
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
