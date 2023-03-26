@@ -1,5 +1,6 @@
 data/
 results/
+outputs/
 .DS_Store
 weights/
 checkpoints/
