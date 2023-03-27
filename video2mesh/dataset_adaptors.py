@@ -3,7 +3,6 @@ This module contains the code for converting datasets of various formats into th
 includes estimating camera parameters and depth maps (when specified).
 """
 
-import debugpy
 import contextlib
 import enum
 import functools
