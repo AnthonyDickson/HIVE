@@ -13,7 +13,6 @@ import time
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
-import subprocess
 import cv2 
 from distutils.dir_util import copy_tree
 
@@ -26,6 +25,7 @@ from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
+from thirdparty.lama.bin.predict import predict
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
@@ -229,16 +229,7 @@ class Pipeline:
                 dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
                 cv2.imwrite(os.path.join(bgDepthPath, image), dst)
 
-            # LaMa inpainting 
-            subprocess.run(f"""
-                cd thirdparty/lama
-                pip install -r requirements.txt
-
-                export TORCH_HOME=$(pwd) && export PYTHONPATH=$(pwd)
-                cd ..
-                cd ..
-                python3 thirdparty/lama/bin/predict.py model.path=$(pwd)/thirdparty/lama/big-lama indir=$(pwd)/data/garden_landscape_output_bg outdir=$(pwd)/data/garden_landscape_output_bg/rgb""",
-                shell=True, executable='/bin/bash', check=True)
+            predict(bgPath, bgRgbPath, 'thirdparty/lama/big-lama')
 
             # Create black mask for background generation 
             for image in os.listdir(bgMaskPath):
@@ -254,28 +245,21 @@ class Pipeline:
 
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
-            print("1")
             static_background = self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.StaticRGBD
             background_scene = self._create_scene(dataset, include_background=True, background_only=True,
                                                   static_background=static_background)
         else:
-            print("2")
             background_scene = self._create_empty_scene(dataset)
 
             if self.num_frames >= 1:
-                print("3")
                 if self.options.frame_step > 1:
-                    print("4")
                     frame_set = list(range(0, self.num_frames, self.options.frame_step))
 
                     if frame_set[-1] != self.num_frames - 1:
-                        print("5")
                         frame_set.append(self.num_frames - 1)
                 else:
-                    print("6")
                     frame_set = list(range(self.num_frames))
             else:
-                print("7")
                 frame_set = None
 
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
