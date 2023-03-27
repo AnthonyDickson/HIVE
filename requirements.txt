@@ -40,3 +40,17 @@ detectron2
 debugpy
 docker
 python_on_whales
+pyyaml
+easydict==1.9.0
+scikit-learn==0.24.2
+tensorflow
+joblib
+albumentations==0.5.2
+hydra-core==1.1.0
+pytorch-lightning==1.2.9
+tabulate
+kornia==0.5.0
+webdataset
+packaging
+scikit-learn==0.24.2
+wldhx.yadisk-direct
