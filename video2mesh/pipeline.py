@@ -39,7 +39,6 @@ from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
 
 
-
 class Pipeline:
     """Converts a 2D video to a 3D video."""
 
@@ -192,7 +191,43 @@ class Pipeline:
     def _reset_cuda_stats():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
+   
+    @staticmethod
+    def use_lama(base_path) -> VTMDataset: 
+        # Create folder structure for background 
+        bgPath = base_path+'_bg'
+        if os.path.exists(bgPath):
+            shutil.rmtree(bgPath)
+        os.mkdir(bgPath)
+        copy_tree(base_path, bgPath)
 
+        bgDepthPath = os.path.join(bgPath, "depth")
+        bgMaskPath = os.path.join(bgPath, "mask")
+        bgRgbPath = os.path.join(bgPath, "rgb")
+
+        for image in os.listdir(bgMaskPath):
+            # Create mask for inpainting and depth map
+            mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.dilate(mask,kernel,iterations = 5)
+            cv2.imwrite(os.path.join(bgMaskPath, image), mask)
+
+            # Create depth map
+            depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
+            dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
+            cv2.imwrite(os.path.join(bgDepthPath, image), dst)
+
+        # Run LaMa inpainting
+        predict(bgPath, bgRgbPath, 'thirdparty/lama/big-lama')
+
+        # Create black mask for background generation 
+        for image in os.listdir(bgMaskPath):
+            blackmask = np.zeros((480,640,1), np.uint8)                
+            cv2.imwrite(os.path.join(bgMaskPath, image), blackmask)
+        
+        # Set new dataset for Background 
+        return VTMDataset(bgPath)
+    
     def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
         """
         Create the background mesh(es) from an RGB-D dataset.
@@ -203,45 +238,8 @@ class Pipeline:
         """
 
         if self.options.use_lama: 
-            print("xxxxxxxxxxxxxxxxx") 
-            print("xxxxxxxxxxxxxxxxx")
-
-            bgPath = 'data/garden_landscape_output_bg'
-            if os.path.exists(bgPath):
-                shutil.rmtree(bgPath)
-            os.mkdir(bgPath)
-            copy_tree('data/garden_landscape_output', bgPath)
-
-            bgDepthPath = os.path.join(bgPath, "depth")
-            bgMaskPath = os.path.join(bgPath, "mask")
-            bgRgbPath = os.path.join(bgPath, "rgb")
-
-            for image in os.listdir(bgMaskPath):
-
-                # Create mask for inpainting and depth map
-                mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
-                kernel = np.ones((5, 5), np.uint8)
-                mask = cv2.dilate(mask,kernel,iterations = 5)
-                cv2.imwrite(os.path.join(bgMaskPath, image), mask)
-
-                # Create depth map
-                depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
-                dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
-                cv2.imwrite(os.path.join(bgDepthPath, image), dst)
-
-            predict(bgPath, bgRgbPath, 'thirdparty/lama/big-lama')
-
-            # Create black mask for background generation 
-            for image in os.listdir(bgMaskPath):
-                blackmask = np.zeros((480,640,1), np.uint8)                
-                cv2.imwrite(os.path.join(bgMaskPath, image), blackmask)
-            
-            dataset = VTMDataset(bgPath)
-
-            print("xxxxxxxxxxxxxxxxx")
-            print("xxxxxxxxxxxxxxxxx")
-
-
+            logging.info("Creating background mesh(es)... using Lama")
+            dataset = self.use_lama(dataset.base_path)
 
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
@@ -749,11 +747,6 @@ class Pipeline:
     @classmethod
     def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
                             frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
-        # debugpy.listen(5678)
-        # print("Waiting for debugger attach")
-        # debugpy.wait_for_client()
-        # debugpy.breakpoint()
-        # print('break on this line')
         """
         Create a mesh of the static elements from an RGB-D dataset.
 
