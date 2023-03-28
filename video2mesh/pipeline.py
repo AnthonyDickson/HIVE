@@ -218,7 +218,7 @@ class Pipeline:
             cv2.imwrite(os.path.join(bgDepthPath, image), dst)
 
         # Run LaMa inpainting
-        predict(bgPath, bgRgbPath, 'thirdparty/lama/big-lama')
+        predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
 
         # Create black mask for background generation 
         for image in os.listdir(bgMaskPath):
