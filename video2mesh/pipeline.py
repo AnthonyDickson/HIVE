@@ -20,7 +20,7 @@ import numpy as np
 import openmesh as om
 import torch
 import trimesh
-from PIL import Image
+from PIL import Image, ImageOps
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -192,8 +192,13 @@ class Pipeline:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
    
-    @staticmethod
-    def use_lama(base_path) -> VTMDataset: 
+    def use_inpainting(self, base_path) -> VTMDataset: 
+        # 1 = Depth: cv2, Background: cv2
+        # 2 = Depth: cv2, Background: LaMa
+        # 3 = Depth: LaMa, Background: cv2
+        # 4 = Depth: LaMa, Background: LaMa
+        mode = self.options.use_inpainting
+
         # Create folder structure for background 
         bgPath = base_path+'_bg'
         if os.path.exists(bgPath):
@@ -212,16 +217,43 @@ class Pipeline:
             mask = cv2.dilate(mask,kernel,iterations = 5)
             cv2.imwrite(os.path.join(bgMaskPath, image), mask)
 
-            # Create depth map
-            depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
-            dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
-            cv2.imwrite(os.path.join(bgDepthPath, image), dst)
+            if mode == 1 or mode == 2:
+                # Create depth using cv2.inpaint
+                depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
+                dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
+                cv2.imwrite(os.path.join(bgDepthPath, image), dst)
+    
+            if mode == 3 or mode == 4:
+                # Prepare data for depth inpainting with LaMa
+                depth16 = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
+                depth16 = depth16.reshape(480, 640, 1)
+                depth16 = np.repeat(depth16, 3, axis=2)
+                cv2.imwrite(os.path.join(bgDepthPath, image), depth16)
 
-        # Run LaMa inpainting
-        predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
+            if mode == 1 or mode == 3:
+                # Create background using cv2.inpaint
+                rgb = cv2.imread(os.path.join(bgRgbPath, image))
+                dst = cv2.inpaint(rgb,mask,30,cv2.INPAINT_TELEA)
+                cv2.imwrite(os.path.join(bgRgbPath, image), dst)
 
-        # Create black mask for background generation 
+        if mode == 3 or mode == 4:
+            # Create depth using LaMa
+            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
+
+        if mode == 2 or mode == 4:
+            # Create background using LaMa
+            predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
+        
         for image in os.listdir(bgMaskPath):
+
+            if mode == 3 or mode == 4:
+                # Refactor depth data after LaMa inpainting 
+                i = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED   )
+                i = i[::,::,::3]
+                i = np.squeeze(i, axis=2)
+                cv2.imwrite(os.path.join(bgDepthPath, image), i)
+
+            # Create black mask for background generation 
             blackmask = np.zeros((480,640,1), np.uint8)                
             cv2.imwrite(os.path.join(bgMaskPath, image), blackmask)
         
@@ -237,9 +269,9 @@ class Pipeline:
         :return: The background scene.
         """
 
-        if self.options.use_lama: 
-            logging.info("Creating background mesh(es)... using Lama")
-            dataset = self.use_lama(dataset.base_path)
+        if self.options.use_inpainting != 0: 
+            logging.info(f'Creating background mesh(es)... using Inpainting Mode {self.options.use_inpainting}')
+            dataset = self.use_inpainting(dataset.base_path)
 
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
