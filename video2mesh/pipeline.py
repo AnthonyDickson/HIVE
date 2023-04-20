@@ -210,53 +210,81 @@ class Pipeline:
         bgMaskPath = os.path.join(bgPath, "mask")
         bgRgbPath = os.path.join(bgPath, "rgb")
 
-        for image in os.listdir(bgMaskPath):
+        filenames = os.listdir(bgMaskPath)
+
+        def create_mask(mask_path): 
             # Create mask for inpainting and depth map
-            mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
             kernel = np.ones((5, 5), np.uint8)
             mask = cv2.dilate(mask,kernel,iterations = 5)
-            cv2.imwrite(os.path.join(bgMaskPath, image), mask)
+            cv2.imwrite(mask_path, mask)
 
-            if mode == 1 or mode == 2:
-                # Create depth using cv2.inpaint
-                depth = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
-                dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
-                cv2.imwrite(os.path.join(bgDepthPath, image), dst)
-    
-            if mode == 3 or mode == 4:
-                # Prepare data for depth inpainting with LaMa
-                depth16 = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED)
-                depth16 = depth16.reshape(480, 640, 1)
-                depth16 = np.repeat(depth16, 3, axis=2)
-                cv2.imwrite(os.path.join(bgDepthPath, image), depth16)
+        def use_cv2_inpaint(path): 
+            image = os.path.basename(path)
+            mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
+            # Create depth using cv2.inpaint
+            depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
+            cv2.imwrite(path, dst)
 
-            if mode == 1 or mode == 3:
-                # Create background using cv2.inpaint
-                rgb = cv2.imread(os.path.join(bgRgbPath, image))
-                dst = cv2.inpaint(rgb,mask,30,cv2.INPAINT_TELEA)
-                cv2.imwrite(os.path.join(bgRgbPath, image), dst)
+        def prepare_for_lama(path): 
+            depth16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            depth16 = depth16.reshape(480, 640, 1)
+            depth16 = np.repeat(depth16, 3, axis=2)
+            cv2.imwrite(path, depth16)
 
-        if mode == 3 or mode == 4:
-            # Create depth using LaMa
-            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
+        def refactor_after_lama(path): 
+            i = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            i = i[::,::,::3]
+            i = np.squeeze(i, axis=2)
+            cv2.imwrite(path, i)
+            
+        def refactor_after_lama(path): 
+            i = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            i = i[::,::,::3]
+            i = np.squeeze(i, axis=2)
+            cv2.imwrite(path, i)
 
-        if mode == 2 or mode == 4:
-            # Create background using LaMa
+        def create_black_mask(path): 
+            mask = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            blackmask = np.zeros(mask.shape, np.uint8)                
+            cv2.imwrite(path, blackmask)
+
+        logging.info(f'Create mask for inpainting and depth map')
+        tqdm_imap(create_mask, [os.path.join(bgMaskPath, file) for file in filenames])
+
+        if mode == 1:
+            logging.info(f'Create depth using cv2.inpaint')
+            tqdm_imap(use_cv2_inpaint, [os.path.join(bgDepthPath, file) for file in filenames])
+            logging.info(f'Create background using cv2.inpaint')
+            tqdm_imap(use_cv2_inpaint, [os.path.join(bgRgbPath, file) for file in filenames])
+        elif mode == 2:
+            logging.info(f'Create depth using cv2.inpaint')
+            tqdm_imap(use_cv2_inpaint, [os.path.join(bgDepthPath, file) for file in filenames])
+            logging.info(f'Create background using LaMa')
             predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
-        
-        for image in os.listdir(bgMaskPath):
+        elif mode == 3:
+            logging.info(f'Create background using cv2.inpaint')
+            tqdm_imap(use_cv2_inpaint, [os.path.join(bgRgbPath, file) for file in filenames])
+            logging.info(f'Prepare data for depth inpainting with LaMa')
+            tqdm_imap(prepare_for_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            logging.info(f'Create depth using LaMa')
+            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
+            logging.info(f'Refactor depth data after LaMa inpainting')
+            tqdm_imap(refactor_after_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+        elif mode == 4:
+            logging.info(f'Prepare data for depth inpainting with LaMa')
+            tqdm_imap(prepare_for_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            logging.info(f'Create depth using LaMa')
+            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
+            logging.info(f'Create background using LaMa')
+            predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
+            logging.info(f'Refactor depth data after LaMa inpainting')
+            tqdm_imap(refactor_after_lama, [os.path.join(bgDepthPath, file) for file in filenames])
 
-            if mode == 3 or mode == 4:
-                # Refactor depth data after LaMa inpainting 
-                i = cv2.imread(os.path.join(bgDepthPath, image), cv2.IMREAD_UNCHANGED   )
-                i = i[::,::,::3]
-                i = np.squeeze(i, axis=2)
-                cv2.imwrite(os.path.join(bgDepthPath, image), i)
+        logging.info(f'Create black mask for background generation')
+        tqdm_imap(create_black_mask, [os.path.join(bgMaskPath, file) for file in filenames])
 
-            # Create black mask for background generation 
-            blackmask = np.zeros((480,640,1), np.uint8)                
-            cv2.imwrite(os.path.join(bgMaskPath, image), blackmask)
-        
         # Set new dataset for Background 
         return VTMDataset(bgPath)
     
