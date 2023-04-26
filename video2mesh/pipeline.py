@@ -199,7 +199,7 @@ class Pipeline:
         # 4 = Depth: LaMa, Background: LaMa
         mode = self.options.use_inpainting
 
-        # Create folder structure for background 
+        logging.info(f'Create folders for background')
         bgPath = base_path+'_bg'
         if os.path.exists(bgPath):
             shutil.rmtree(bgPath)
