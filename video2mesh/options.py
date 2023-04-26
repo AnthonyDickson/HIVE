@@ -441,7 +441,7 @@ class PipelineOptions(Options):
         :param background_only: Whether to only reconstruct the static background.
         :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
         :param log_file: The path to save the logs to.
-        :param use_inpainting: Include lama inpainting in the pipeline process.
+        :param use_inpainting: Include inpainting in the pipeline process.
         """
         self.num_frames = num_frames
         self.frame_step = frame_step
