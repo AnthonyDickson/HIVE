@@ -71,10 +71,8 @@ class StorageOptions(Options):
         group = parser.add_argument_group('Storage Options')
 
         group.add_argument('--dataset_path', type=str,
-                           help='Path to the folder containing the RGB and depth image folders.',
-                           required=True)
-        group.add_argument('--output_path', type=str, required=True,
-                           help='Where to save the outputs.')
+                           help='Path to the folder containing the RGB and depth image folders.')
+        group.add_argument('--output_path', type=str, help='Where to save the outputs.')
         group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
                            action='store_true')
         group.add_argument('--no_cache', help='Whether cached datasets/results should be ignored.',
