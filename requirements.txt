@@ -38,6 +38,7 @@ torchvision==0.11.3+cu113
 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu113/torch1.10/index.html
 detectron2
 debugpy
+gradio
 docker
 python_on_whales
 pyyaml

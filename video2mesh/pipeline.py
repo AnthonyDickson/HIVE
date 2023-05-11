@@ -14,7 +14,6 @@ from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
 import cv2 
-from distutils.dir_util import copy_tree
 
 import numpy as np
 import openmesh as om
@@ -203,12 +202,11 @@ class Pipeline:
         bgPath = base_path+'_bg'
         if os.path.exists(bgPath):
             shutil.rmtree(bgPath)
-        os.mkdir(bgPath)
-        copy_tree(base_path, bgPath)
+        shutil.copytree(base_path, bgPath)
 
-        bgDepthPath = os.path.join(bgPath, "depth")
-        bgMaskPath = os.path.join(bgPath, "mask")
-        bgRgbPath = os.path.join(bgPath, "rgb")
+        bgDepthPath = pjoin(bgPath, "depth")
+        bgMaskPath = pjoin(bgPath, "mask")
+        bgRgbPath = pjoin(bgPath, "rgb")
 
         filenames = os.listdir(bgMaskPath)
 
@@ -221,7 +219,7 @@ class Pipeline:
 
         def use_cv2_inpaint(path): 
             image = os.path.basename(path)
-            mask = cv2.imread(os.path.join(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
+            mask = cv2.imread(pjoin(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
             # Create depth using cv2.inpaint
             depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
             dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
@@ -251,39 +249,39 @@ class Pipeline:
             cv2.imwrite(path, blackmask)
 
         logging.info(f'Create mask for inpainting and depth map')
-        tqdm_imap(create_mask, [os.path.join(bgMaskPath, file) for file in filenames])
+        tqdm_imap(create_mask, [pjoin(bgMaskPath, file) for file in filenames])
 
         if mode == 1:
             logging.info(f'Create depth using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(use_cv2_inpaint, [pjoin(bgDepthPath, file) for file in filenames])
             logging.info(f'Create background using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [os.path.join(bgRgbPath, file) for file in filenames])
+            tqdm_imap(use_cv2_inpaint, [pjoin(bgRgbPath, file) for file in filenames])
         elif mode == 2:
             logging.info(f'Create depth using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(use_cv2_inpaint, [pjoin(bgDepthPath, file) for file in filenames])
             logging.info(f'Create background using LaMa')
             predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
         elif mode == 3:
             logging.info(f'Create background using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [os.path.join(bgRgbPath, file) for file in filenames])
+            tqdm_imap(use_cv2_inpaint, [pjoin(bgRgbPath, file) for file in filenames])
             logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_for_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(prepare_for_lama, [pjoin(bgDepthPath, file) for file in filenames])
             logging.info(f'Create depth using LaMa')
             predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
             logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_after_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(refactor_after_lama, [pjoin(bgDepthPath, file) for file in filenames])
         elif mode == 4:
             logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_for_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(prepare_for_lama, [pjoin(bgDepthPath, file) for file in filenames])
             logging.info(f'Create depth using LaMa')
             predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
             logging.info(f'Create background using LaMa')
             predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
             logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_after_lama, [os.path.join(bgDepthPath, file) for file in filenames])
+            tqdm_imap(refactor_after_lama, [pjoin(bgDepthPath, file) for file in filenames])
 
         logging.info(f'Create black mask for background generation')
-        tqdm_imap(create_black_mask, [os.path.join(bgMaskPath, file) for file in filenames])
+        tqdm_imap(create_black_mask, [pjoin(bgMaskPath, file) for file in filenames])
 
         # Set new dataset for Background 
         return VTMDataset(bgPath)
