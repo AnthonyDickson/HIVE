@@ -72,6 +72,9 @@ class Pipeline:
         self.background_mesh_options = static_mesh_options
         self.webxr_options = webxr_options
         self.fts_options = fts_options
+        
+        # TODO: Dump logs to output folder.
+        setup_logger(self.options.log_file)
 
     @staticmethod
     def from_command_line() -> 'Pipeline':
@@ -102,11 +105,7 @@ class Pipeline:
         static_mesh_options = BackgroundMeshOptions.from_args(args)
         webxr_options = WebXROptions.from_args(args)
 
-        # TODO: Dump logs to output folder.
-        setup_logger(video2mesh_options.log_file)
-        logging.debug(args)
-
-        return Pipeline(
+        pipeline = Pipeline(
             options=video2mesh_options,
             storage_options=storage_options,
             decimation_options=decimation_options,
@@ -116,6 +115,10 @@ class Pipeline:
             static_mesh_options=static_mesh_options,
             webxr_options=webxr_options
         )
+    
+        logging.debug(args)
+
+        return pipeline
 
     @property
     def num_frames(self) -> int:
