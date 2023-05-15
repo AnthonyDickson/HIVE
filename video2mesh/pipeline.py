@@ -4,6 +4,7 @@ This module contains the code for running the pipeline end-to-end (minus the ren
 
 import argparse
 import datetime
+import itertools
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from trimesh.exchange.export import export_mesh
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components
+from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components, image2world
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
@@ -325,6 +326,7 @@ class Pipeline:
 
                 # TODO: Filter long stretched out bits of floor attached to peoples' feet.
                 faces = self._triangulate_faces(points2d)
+                vertices, faces = self._triangulate_faces2(depth, mask, camera_matrix, pose)
                 faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
                 vertices, faces = self._decimate_mesh(vertices, faces, is_object, self.decimation_options)
 
@@ -421,6 +423,62 @@ class Pipeline:
                 focal=(dataset.fx, dataset.fy)
             )
         )
+
+    @staticmethod
+    def _triangulate_faces2(depth, mask, camera_matrix, pose):
+        height, width = depth.shape
+
+        points2d = np.array(list(itertools.product(range(480), range(640))))
+
+        vertices = image2world(points2d, depth.flatten(), camera_matrix, *get_pose_components(pose))
+
+        num_rows, num_cols = depth.shape
+
+        col_i, row_i = np.meshgrid(range(width), range(height))
+
+        # Generates the triangle indices a -> b
+        #                                   /
+        #                                  /
+        #                                 /
+        #                                c -> d
+        # where the indices (a, b, c) and (c, b, d) each form a single triangle when using a clockwise winding order.
+        a = row_i[:-1, :-1] * num_cols + col_i[:-1, :-1]
+        b = (row_i[:-1, :-1] + 1) * num_cols + col_i[:-1, :-1]
+        c = a + 1
+        d = b + 1
+
+        def flatten_arrays(arrays):
+            """
+            Flatten multiple multidimensional arrays.
+
+            :param arrays: The arrays to flatten.
+            :return: A tuple of the flattened arrays.
+            """
+            return tuple(map(np.ravel, arrays))
+
+        def interweave_arrays(arrays):
+            """
+            Interweaves multiple arrays.
+
+            >>> interweave_arrays([[1, 3, 5], [2, 4, 6]])
+            [1, 2, 3, 4, 5, 6]
+            """
+            total_num_elements = sum(map(lambda array: array.size, arrays))
+            dtype = arrays[0].dtype
+
+            combined_array = np.empty(total_num_elements, dtype=dtype)
+
+            for i, array in enumerate(arrays):
+                combined_array[i::len(arrays)] = array
+
+            return combined_array
+
+        indices = interweave_arrays(flatten_arrays([a, b, c, c, b, d]))
+
+        vertices = np.array(vertices, dtype=np.float32)
+        indices = np.array(indices, dtype=np.uint32)
+
+        return vertices, indices
 
     @staticmethod
     def _triangulate_faces(points: np.ndarray) -> np.ndarray:
