@@ -1711,7 +1711,7 @@ def main():
     if not VTMDataset.is_valid_folder_structure(args.dataset_path):
         raise RuntimeError(f"The path {args.dataset_path} does not point to a valid dataset.")
 
-    dataset = VTMDataset(args.dataset_path, overwrite_ok=False)
+    dataset = VTMDataset(args.dataset_path)
 
     num_frames = args.num_frames
 

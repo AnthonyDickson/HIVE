@@ -58,7 +58,7 @@ class StorageOptions(Options):
         """
         :param dataset_path: Path to the folder containing the RGB and depth image folders.
         :param output_path: Where to save the outputs.
-        :param overwrite_ok: Whether it is okay to replace old results.
+        :param overwrite_ok: Whether it is okay to overwrite preexisting mesh data in the output and export folders.
         :param no_cache: Whether cached datasets/results should be ignored.
         """
         self.dataset_path = dataset_path
@@ -75,7 +75,7 @@ class StorageOptions(Options):
                            required=True)
         group.add_argument('--output_path', type=str, required=True,
                            help='Where to save the outputs.')
-        group.add_argument('--overwrite_ok', help='Whether it is okay to replace old results.',
+        group.add_argument('--overwrite_ok', help='Whether it is okay to overwrite preexisting mesh data in the output and export folders.',
                            action='store_true')
         group.add_argument('--no_cache', help='Whether cached datasets/results should be ignored.',
                            action='store_true')

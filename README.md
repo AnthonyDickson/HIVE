@@ -123,7 +123,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
 ### Common CLI Options
 - `--dataset_path <path/to/dataset>` Specify the path to either: a video file, TUM dataset or an iPhone dataset (StrayScanner).
 - `--output_path <path/to/folder>` Specify where the results should be written to.
-- `--overwrite_ok` Allow existing video files in `output_path` to be overwritten.
+- `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
 - `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
 - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.

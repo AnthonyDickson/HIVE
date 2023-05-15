@@ -248,7 +248,7 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
     dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
     dataset_path = os.path.abspath(dataset.base_path)
     bundle_fusion_output_path = pjoin(dataset_path, output_folder)
-    os.makedirs(bundle_fusion_output_path, exist_ok=dataset.overwrite_ok)
+    os.makedirs(bundle_fusion_output_path)
 
     logging.info("Configuring BundleFusion...")
     bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']

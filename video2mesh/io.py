@@ -144,14 +144,13 @@ class BatchPredictor(DefaultPredictor):
         return predictions
 
 
-def create_masks(rgb_loader: TorchDataLoader, mask_folder: Union[str, Path],
-                 overwrite_ok=False, for_colmap=False, filename_fmt: Optional[Callable[[int], str]] = None):
+def create_masks(rgb_loader: TorchDataLoader, mask_folder: Union[str, Path], for_colmap=False,
+                 filename_fmt: Optional[Callable[[int], str]] = None):
     """
     Create instance segmentation masks for the given RGB video sequence and save the masks to disk.
 
     :param rgb_loader: The PyTorch DataLoader that loads the RGB frames (no data augmentations applied).
     :param mask_folder: The path to save the masks to.
-    :param overwrite_ok: Whether it is okay to write over any mask files in `mask_folder` if it already exists.
     :param for_colmap: Whether the masks are intended for use with COLMAP or 3D video generation.
         Masks will be black and white with the background coloured white and using the
         corresponding input image's filename.
@@ -178,7 +177,7 @@ def create_masks(rgb_loader: TorchDataLoader, mask_folder: Union[str, Path],
     predictor = BatchPredictor(cfg)
 
     logging.info(f"Creating segmentation masks...")
-    os.makedirs(mask_folder, exist_ok=overwrite_ok)
+    os.makedirs(mask_folder)
     i = 0
 
     # noinspection PyTypeChecker
@@ -257,7 +256,7 @@ class COLMAPProcessor:
             logging.info(f"Could not find masks in folder: {self.mask_path}.")
             logging.info(f"Creating masks for COLMAP...")
             rgb_loader = TorchDataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
-            create_masks(rgb_loader, self.mask_path, overwrite_ok=True, for_colmap=True)
+            create_masks(rgb_loader, self.mask_path, for_colmap=True)
         else:
             logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
@@ -619,13 +618,11 @@ class Dataset(abc.ABC):
     """The folders required to be in the root folder of a dataset."""
     required_folders = []
 
-    def __init__(self, base_path: File, overwrite_ok=False):
+    def __init__(self, base_path: File):
         """
         :param base_path: The path to the dataset.
-        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
         """
         self.base_path = base_path
-        self.overwrite_ok = overwrite_ok
 
         self.__class__._validate_dataset(base_path)
 
@@ -851,12 +848,11 @@ class VTMDataset(Dataset):
     # This scaling factor converts the mm depth values to meters.
     depth_scaling_factor = 1. / 1000.
 
-    def __init__(self, base_path, overwrite_ok=False):
+    def __init__(self, base_path):
         """
         :param base_path: The path to the dataset.
-        :param overwrite_ok: Whether it is okay to overwrite existing adapted dataset.
         """
-        super().__init__(base_path=base_path, overwrite_ok=overwrite_ok)
+        super().__init__(base_path=base_path)
 
         self.metadata = DatasetMetadata.load(self.path_to_metadata)
 
