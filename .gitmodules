@@ -24,4 +24,4 @@
 	url = https://github.com/AnthonyDickson/UnrealDataset.git
 [submodule "thirdparty/lama"]
 	path = thirdparty/lama
-	url = https://github.com/felixschrimper/lama.git
+	url = https://github.com/AnthonyDickson/lama.git
