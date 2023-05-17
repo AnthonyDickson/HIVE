@@ -1,6 +1,6 @@
 import argparse
 import enum
-from typing import Optional
+from typing import Optional, List
 
 import cv2
 
@@ -425,13 +425,64 @@ class WebXROptions(Options):
             webxr_add_sky_box=args.webxr_add_sky_box
         )
 
+class InpaintingMode(enum.Flag):
+    Off = 0
+    CV2_Image = enum.auto()
+    CV2_Depth = enum.auto()
+    Lama_Image = enum.auto()
+    Lama_Depth = enum.auto()
+
+    CV2_Image_Depth = CV2_Image | CV2_Depth
+    Lama_Image_CV2_Depth = Lama_Image | CV2_Depth
+    CV2_Image_Lama_Depth = CV2_Image | Lama_Depth
+    Lama_Image_Depth = Lama_Image | Lama_Depth
+
+    @classmethod
+    def get_modes(cls) -> List['InpaintingMode']:
+        return [cls.Off, cls.CV2_Image_Depth, cls.Lama_Image_CV2_Depth, cls.CV2_Image_Lama_Depth, cls.Lama_Image_Depth]
+
+    def to_integer(self):
+        if self == self.Off:
+            return 0
+        elif self == self.CV2_Image_Depth:
+            return 1
+        elif self == self.Lama_Image_CV2_Depth:
+            return 2
+        elif self == self.CV2_Image_Lama_Depth:
+            return 3
+        elif self.Lama_Image_Depth:
+            return 4
+        else:
+            raise RuntimeError(f"{self.name} does not have an integer mapping, only {self.get_modes()} have an integer mapping.")
+
+    @classmethod
+    def from_integer(cls, value: int) -> 'InpaintingMode':
+        if value == cls.Off.to_integer():
+            return cls.Off
+        elif value == cls.CV2_Image_Depth.to_integer():
+            return cls.CV2_Image_Depth
+        elif value == cls.Lama_Image_CV2_Depth.to_integer():
+            return cls.Lama_Image_CV2_Depth
+        elif value == cls.CV2_Image_Lama_Depth.to_integer():
+            return cls.CV2_Image_Lama_Depth
+        elif value == cls.Lama_Image_Depth.to_integer():
+            return cls.Lama_Image_Depth
+        else:
+            raise RuntimeError(f"Unrecognised integer value for {cls.__name__}, expected one of {cls.get_modes()}.")
+
+
+    @classmethod
+    def get_name(cls, value: int) -> str:
+        return cls.from_integer(value).name
+
+    @classmethod
+    def get_modes_as_integer(cls) -> List[int]:
+        return [mode.to_integer() for mode in cls.get_modes()]
+
 class PipelineOptions(Options):
 
-    def __init__(self,
-                 num_frames=-1, frame_step=15,
-                 estimate_pose=False, estimate_depth=False,
-                 background_only=False, align_scene=False,
-                 log_file='logs.log', use_inpainting=0):
+    def __init__(self, num_frames=-1, frame_step=15, estimate_pose=False, estimate_depth=False, background_only=False,
+                 align_scene=False, inpainting_mode=InpaintingMode.Off, use_billboard=False, log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
@@ -440,8 +491,9 @@ class PipelineOptions(Options):
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param background_only: Whether to only reconstruct the static background.
         :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
+        :param inpainting_mode: Include inpainting in the pipeline process.
+        :param use_billboard: Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes or missing body parts.
         :param log_file: The path to save the logs to.
-        :param use_inpainting: Include inpainting in the pipeline process.
         """
         self.num_frames = num_frames
         self.frame_step = frame_step
@@ -449,8 +501,9 @@ class PipelineOptions(Options):
         self.estimate_depth = estimate_depth
         self.background_only = background_only
         self.align_scene = align_scene
+        self.inpainting_mode = inpainting_mode
+        self.use_billboard = use_billboard
         self.log_file = log_file
-        self.use_inpainting = use_inpainting
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -470,19 +523,17 @@ class PipelineOptions(Options):
                            help='Whether to only reconstruct the static background.')
         group.add_argument('--align_scene', action='store_true',
                            help='Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.')
+        group.add_argument('--inpainting_mode', type=int, default=0, choices=InpaintingMode.get_modes_as_integer(),
+                           help=f'Whether to use lama inpainting in the pipeline process. {", ".join([f"{mode.to_integer()}={mode.name}" for mode in InpaintingMode.get_modes()])}')
+        group.add_argument('--use_billboard', action='store_true', help='Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
-        group.add_argument('--use_inpainting', type=int, default=0, help='Whether to use lama inpainting in the pipeline process.')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
-        return PipelineOptions(
-            num_frames=args.num_frames,
-            frame_step=args.frame_step,
-            estimate_pose=args.estimate_pose,
-            estimate_depth=args.estimate_depth,
-            background_only=args.background_only,
-            align_scene=args.align_scene,
-            log_file=args.log_file,
-            use_inpainting=args.use_inpainting
-        )
+        return PipelineOptions(num_frames=args.num_frames, frame_step=args.frame_step, estimate_pose=args.estimate_pose,
+                               estimate_depth=args.estimate_depth, background_only=args.background_only,
+                               align_scene=args.align_scene,
+                               inpainting_mode=InpaintingMode.from_integer(args.inpainting_mode),
+                               use_billboard=args.use_billboard,
+                               log_file=args.log_file)

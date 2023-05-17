@@ -177,7 +177,6 @@ def create_masks(rgb_loader: TorchDataLoader, mask_folder: Union[str, Path], for
     predictor = BatchPredictor(cfg)
 
     logging.info(f"Creating segmentation masks...")
-    os.makedirs(mask_folder)
     i = 0
 
     # noinspection PyTypeChecker
@@ -251,8 +250,9 @@ class COLMAPProcessor:
 
     def run(self):
         os.makedirs(self.workspace_path, exist_ok=True)
+        os.makedirs(self.mask_path, exist_ok=True)
 
-        if not os.path.isdir(self.mask_path) or len(os.listdir(self.mask_path)) == 0:
+        if len(os.listdir(self.mask_path)) == 0:
             logging.info(f"Could not find masks in folder: {self.mask_path}.")
             logging.info(f"Creating masks for COLMAP...")
             rgb_loader = TorchDataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)

@@ -13,6 +13,7 @@
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/colmap/doc/_build/html" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/consistent_depth/third_party/flownet2" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/dpt" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/thirdparty/lama" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/tsdf_fusion_python" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/unreal_dataset" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/thirdparty/webxr3dvideo" vcs="Git" />

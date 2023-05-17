@@ -13,7 +13,9 @@ RUN apt update && \
     # Packages for Ceres Solver
     libatlas-base-dev libsuitesparse-dev libeigen3-dev  \
     # BundleFusion
-    libncurses5-dev libncursesw5-dev && \
+    libncurses5-dev libncursesw5-dev \
+    # For downloading the weights for Lama inpainting \
+    curl && \
     apt -y autoremove && \
     apt -y clean && \
     apt -y autoclean && \
@@ -39,6 +41,7 @@ RUN cd / && \
     cd opencv && \
     mkdir -p build &&  \
     cd build && \
+    # Can add `-D WITH_CUDA=ON` to force build with CUDA extensions enabled, however this adds a lot to the image build time and is not really used in the code anyway.
     cmake -D BUILD_EXAMPLES=OFF -D BUILD_opencv_apps=OFF -D BUILD_DOCS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_TESTS=OFF .. && \
     cmake --build . -- -j 8 && \
     make install && \
@@ -73,6 +76,12 @@ RUN mkdir -p ${WEIGHTS_PATH} &&  \
     mkdir -p ${COLMAP_VOCAB_PATH} && \
     wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \
     rm download_weights.py
+
+# Download weights for lama inpainting.
+RUN cd ${WEIGHTS_PATH} && \
+    curl -L $(yadisk-direct https://disk.yandex.ru/d/ouP6l8VJ0HpMZg) -o big-lama.zip &&  \
+    unzip big-lama.zip && \
+    rm big-lama.zip
 
 WORKDIR /app
 CMD ["python3"]
