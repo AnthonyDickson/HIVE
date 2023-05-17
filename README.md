@@ -148,6 +148,17 @@ For example, if you wanted to test whether the container is CUDA enabled:
 docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
+### Gradio Web Interface
+You can run the pipeline from a web based interface instead of the CLI.
+Assuming you are using Docker, you can run this by running the following command:
+```shell
+docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it dican732/video2mesh:runtime-cu116 python3 -m video2mesh.interface
+```
+and navigating to `localhost:8081`.
+Note that if you are using Docker, the dataset path and output paths should be relative to the project root folder.
+
+Thank you to Felix for implementing this web interface and the image inpainting.
+
 ### Viewing the 3D Video
 - Start the Docker container:
    ```shell
