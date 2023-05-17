@@ -9,7 +9,7 @@
 	url = https://github.com/AnthonyDickson/webxr3dvideo.git
 [submodule "thirdparty/tsdf_fusion_python"]
 	path = thirdparty/tsdf_fusion_python
-	url = https://github.com/felixschrimper/tsdf-fusion-python.git
+	url = https://github.com/AnthonyDickson/tsdf-fusion-python.git
 [submodule "thirdparty/adelai_depth"]
 	path = thirdparty/adelai_depth
 	url = https://github.com/AnthonyDickson/AdelaiDepth.git
