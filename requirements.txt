@@ -26,17 +26,7 @@ h5py==3.6.0
 pypng==0.0.21
 # Creating Excel spreadsheets with Pandas
 openpyxl==3.0.10
-# Needs to be this version in order to run the FlowNet2 install.sh script.
-# Later versions will error on CUDA version mismatch instead of warn.
-setuptools==59.5.0
--f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py38_cu113_pyt1100/download.html
-pytorch3d
-# General
--f https://download.pytorch.org/whl/cu113/torch_stable.html
-torch==1.10.2+cu113
-torchvision==0.11.3+cu113
--f https://dl.fbaipublicfiles.com/detectron2/wheels/cu113/torch1.10/index.html
-detectron2
+# Packages from the LaMa integration branch
 debugpy
 gradio
 docker
@@ -55,3 +45,14 @@ webdataset
 packaging
 scikit-learn==0.24.2
 wldhx.yadisk-direct
+# Needs to be this version in order to run the FlowNet2 install.sh script.
+# Later versions will error on CUDA version mismatch instead of warn.
+setuptools==59.5.0
+-f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py38_cu113_pyt1100/download.html
+pytorch3d
+# General
+-f https://download.pytorch.org/whl/cu113/torch_stable.html
+torch==1.10.2+cu113
+torchvision==0.11.3+cu113
+-f https://dl.fbaipublicfiles.com/detectron2/wheels/cu113/torch1.10/index.html
+detectron2

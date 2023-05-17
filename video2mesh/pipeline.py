@@ -12,19 +12,19 @@ import time
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
-import cv2 
 
+import cv2
 import numpy as np
 import openmesh as om
 import torch
 import trimesh
-from PIL import Image, ImageOps
+from PIL import Image
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
-from thirdparty.lama.bin.predict import predict
 
+from thirdparty.lama.bin.predict import predict
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components
@@ -32,7 +32,7 @@ from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
-    ForegroundTrajectorySmoothingOptions, WebXROptions
+    ForegroundTrajectorySmoothingOptions, WebXROptions, InpaintingMode
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
 from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
 
@@ -193,100 +193,88 @@ class Pipeline:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
    
-    def use_inpainting(self, base_path) -> VTMDataset: 
-        # 1 = Depth: cv2, Background: cv2
-        # 2 = Depth: cv2, Background: LaMa
-        # 3 = Depth: LaMa, Background: cv2
-        # 4 = Depth: LaMa, Background: LaMa
-        mode = self.options.use_inpainting
+    def use_inpainting(self, base_path) -> VTMDataset:
+        # TODO: Integrate inpainting into dataset adaptor's `.convert()` method.
+        mode = self.options.inpainting_mode
 
         logging.info(f'Create folders for background')
-        bgPath = base_path+'_bg'
-        if os.path.exists(bgPath):
-            shutil.rmtree(bgPath)
-        shutil.copytree(base_path, bgPath)
+        bg_path = base_path + '_bg'
 
-        bgDepthPath = pjoin(bgPath, "depth")
-        bgMaskPath = pjoin(bgPath, "mask")
-        bgRgbPath = pjoin(bgPath, "rgb")
+        if os.path.exists(bg_path):
+            shutil.rmtree(bg_path)
 
-        filenames = os.listdir(bgMaskPath)
+        shutil.copytree(base_path, bg_path)
 
-        def create_mask(mask_path): 
+        bg_rgb_path = pjoin(bg_path, VTMDataset.rgb_folder)
+        bg_depth_path = pjoin(bg_path, VTMDataset.depth_folder)
+        bg_mask_path = pjoin(bg_path, VTMDataset.mask_folder)
+
+        filenames = os.listdir(bg_mask_path)
+
+        lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
+
+        def create_mask(mask_path):
             # Create mask for inpainting and depth map
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
             kernel = np.ones((5, 5), np.uint8)
-            mask = cv2.dilate(mask,kernel,iterations = 5)
+            mask = cv2.dilate(mask, kernel, iterations=5)
             cv2.imwrite(mask_path, mask)
 
-        def use_cv2_inpaint(path): 
-            image = os.path.basename(path)
-            mask = cv2.imread(pjoin(bgMaskPath, image), cv2.IMREAD_GRAYSCALE)
-            # Create depth using cv2.inpaint
-            depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            dst = cv2.inpaint(depth,mask,30,cv2.INPAINT_TELEA)
-            cv2.imwrite(path, dst)
+        def use_cv2_inpaint(path):
+            image_name = os.path.basename(path)
+            mask = cv2.imread(pjoin(bg_mask_path, image_name), cv2.IMREAD_GRAYSCALE)
+            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            inpainted_image = cv2.inpaint(image, mask, 30, cv2.INPAINT_TELEA)
+            cv2.imwrite(path, inpainted_image)
 
-        def prepare_for_lama(path): 
+        def prepare_depth_for_lama(path):
             depth16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            depth16 = depth16.reshape(480, 640, 1)
-            depth16 = np.repeat(depth16, 3, axis=2)
+
+            if len(depth16.shape) == 2:
+                depth16 = np.expand_dims(depth16, axis=2)
+
+            if depth16.shape[2] != 3:
+                depth16 = np.repeat(depth16, 3, axis=2)
+
             cv2.imwrite(path, depth16)
 
-        def refactor_after_lama(path): 
+        def refactor_depth_after_lama(path):
             i = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            i = i[::,::,::3]
-            i = np.squeeze(i, axis=2)
-            cv2.imwrite(path, i)
-            
-        def refactor_after_lama(path): 
-            i = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            i = i[::,::,::3]
+            i = i[::, ::, ::3]
             i = np.squeeze(i, axis=2)
             cv2.imwrite(path, i)
 
-        def create_black_mask(path): 
+        def create_black_mask(path):
             mask = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            blackmask = np.zeros(mask.shape, np.uint8)                
-            cv2.imwrite(path, blackmask)
+            black_mask = np.zeros(mask.shape, np.uint8)
+            cv2.imwrite(path, black_mask)
 
         logging.info(f'Create mask for inpainting and depth map')
-        tqdm_imap(create_mask, [pjoin(bgMaskPath, file) for file in filenames])
+        tqdm_imap(create_mask, [pjoin(bg_mask_path, file) for file in filenames])
 
-        if mode == 1:
-            logging.info(f'Create depth using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bgDepthPath, file) for file in filenames])
+        if InpaintingMode.CV2_Image in mode:
             logging.info(f'Create background using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bgRgbPath, file) for file in filenames])
-        elif mode == 2:
+            tqdm_imap(use_cv2_inpaint, [pjoin(bg_rgb_path, file) for file in filenames])
+        elif InpaintingMode.Lama_Image in mode:
+            logging.info(f'Create background using LaMa')
+            predict(bg_rgb_path, bg_mask_path, bg_rgb_path, lama_weights_path)
+
+        if InpaintingMode.CV2_Depth in mode:
             logging.info(f'Create depth using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bgDepthPath, file) for file in filenames])
-            logging.info(f'Create background using LaMa')
-            predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
-        elif mode == 3:
-            logging.info(f'Create background using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bgRgbPath, file) for file in filenames])
+            tqdm_imap(use_cv2_inpaint, [pjoin(bg_depth_path, file) for file in filenames])
+        elif InpaintingMode.Lama_Depth in mode:
             logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_for_lama, [pjoin(bgDepthPath, file) for file in filenames])
+            tqdm_imap(prepare_depth_for_lama, [pjoin(bg_depth_path, file) for file in filenames])
             logging.info(f'Create depth using LaMa')
-            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
+            predict(bg_depth_path, bg_mask_path, bg_depth_path, lama_weights_path, depth=True)
             logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_after_lama, [pjoin(bgDepthPath, file) for file in filenames])
-        elif mode == 4:
-            logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_for_lama, [pjoin(bgDepthPath, file) for file in filenames])
-            logging.info(f'Create depth using LaMa')
-            predict(bgDepthPath, bgMaskPath, bgDepthPath, 'thirdparty/lama/big-lama', depth=True)
-            logging.info(f'Create background using LaMa')
-            predict(bgRgbPath, bgMaskPath, bgRgbPath, 'thirdparty/lama/big-lama')
-            logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_after_lama, [pjoin(bgDepthPath, file) for file in filenames])
+            tqdm_imap(refactor_depth_after_lama, [pjoin(bg_depth_path, file) for file in filenames])
 
         logging.info(f'Create black mask for background generation')
-        tqdm_imap(create_black_mask, [pjoin(bgMaskPath, file) for file in filenames])
+        tqdm_imap(create_black_mask, [pjoin(bg_mask_path, file) for file in filenames])
 
         # Set new dataset for Background 
-        return VTMDataset(bgPath)
+        return VTMDataset(bg_path)
     
     def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
         """
@@ -296,9 +284,8 @@ class Pipeline:
 
         :return: The background scene.
         """
-
-        if self.options.use_inpainting != 0: 
-            logging.info(f'Creating background mesh(es)... using Inpainting Mode {self.options.use_inpainting}')
+        if self.options.inpainting_mode != InpaintingMode.Off:
+            logging.info(f'Inpainting with {self.options.inpainting_mode}')
             dataset = self.use_inpainting(dataset.base_path)
 
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
@@ -411,8 +398,9 @@ class Pipeline:
 
                 if is_object:
                     mask = dilate_mask(mask, self.dilation_options)
-                    # # TODO: Make depth filtering offset configurable via CLI.
-                    # depth[depth > np.median(depth) + 0.75] = 0.0
+
+                if is_object and self.options.use_billboard:
+                    depth[mask] = np.median(depth[mask])
 
                 vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
 
@@ -838,6 +826,7 @@ class Pipeline:
         if self.options.align_scene:
             # Scenes where the recording device was held at an angle and estimated pose is used will not sit flat on the
             # ground plane, this step attempts to fix that.
+            # noinspection PyUnresolvedReferences
             transform_to_origin, _ = trimesh.bounds.oriented_bounds(background_scene, angle_digits=1)
             # This transform will result in the mesh being rotated 90 degrees about the local x-axis and then the local z-axis.
             # This rotation undoes that last bit.
@@ -1059,9 +1048,9 @@ class Pipeline:
             f"        Background Mesh: {format_bytes(bg_file_size)} ({format_bytes(bg_file_size_per_frame)} per frame)")
 
         logging.info(
-            f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} GB ({torch.cuda.max_memory_allocated():,d} Bytes)")
+            f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} ({torch.cuda.max_memory_allocated():,d} Bytes)")
         logging.info(
-            f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} GB ({torch.cuda.max_memory_reserved():,d} Bytes)")
+            f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} ({torch.cuda.max_memory_reserved():,d} Bytes)")
 
 
 def main():

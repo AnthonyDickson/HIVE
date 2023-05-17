@@ -12,5 +12,5 @@ if __name__ == '__main__':
     if args.dataset_path is not None:
         main()
     else:
-        interface = Interface.getInterface()
+        interface = Interface.get_interface()
         interface.launch(server_name="0.0.0.0", server_port=8081)
