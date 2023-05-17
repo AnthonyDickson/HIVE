@@ -46,9 +46,9 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     for i in frame_range:
         # Read depth image and camera pose
-        mask = dataset.mask_dataset[i]
+        mask = dataset.bg_mask_dataset[i]
         mask = dilate_mask(mask, mask_dilation_options)
-        depth_im = dataset.depth_dataset[i]
+        depth_im = dataset.bg_depth_dataset[i]
         depth_im[mask > 0] = 0.0
         cam_pose = camera_trajectory[i]  # 4x4 rigid transformation matrix
 
@@ -73,10 +73,10 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
     logging.info("Fusing frames...")
 
     for i in tqdm(frame_range):
-        color_image = dataset.rgb_dataset[i]
-        mask = dataset.mask_dataset[i]
+        color_image = dataset.bg_rgb_dataset[i]
+        mask = dataset.bg_mask_dataset[i]
         mask = dilate_mask(mask, mask_dilation_options)
-        depth_im = dataset.depth_dataset[i]
+        depth_im = dataset.bg_depth_dataset[i]
         depth_im[mask > 0] = 0.0
         cam_pose = camera_trajectory[i]
 
@@ -243,6 +243,11 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
     """
     if num_frames == -1:
         num_frames = dataset.num_frames
+
+    if dataset.has_inpainted_frame_data:
+        # TODO: Make Bundle Fusion capable of using the inpainted frame data.
+        logging.warning("The dataset has inpainted frame data available, "
+                        "but Bundle Fusion is only set up to use the original frame data.")
 
     logging.info("Creating masked depth maps for BundleFusion...")
     dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))

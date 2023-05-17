@@ -4,7 +4,6 @@ import datetime
 import json
 import logging
 import os
-import shutil
 import struct
 import subprocess
 from os.path import join as pjoin
@@ -24,8 +23,8 @@ from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
 
-from thirdparty.colmap.scripts.python.read_write_model import read_model
 from thirdparty.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
+from thirdparty.colmap.scripts.python.read_write_model import read_model
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
@@ -246,7 +245,7 @@ class COLMAPProcessor:
         min_files_for_recon = 4
 
         return os.path.isdir(self.sparse_path) and len(os.listdir(self.sparse_path)) > 0 and \
-               (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
+            (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
 
     def run(self):
         os.makedirs(self.workspace_path, exist_ok=True)
@@ -309,10 +308,11 @@ class COLMAPProcessor:
         if num_models == 1:
             sparse_recon_path = pjoin(self.sparse_path, models[0])
         else:
-            raise RuntimeError(f"COLMAP reconstructed {num_models} models when 1 was expected meaning that the camera trajectory could not be estimated for the entire video."
-                               f"This may be due to COLMAP using a bad random initial guess of the camera parameters and sometimes can be fixed by running the program again. "
-                               f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal."
-                               f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
+            raise RuntimeError(
+                f"COLMAP reconstructed {num_models} models when 1 was expected meaning that the camera trajectory could not be estimated for the entire video."
+                f"This may be due to COLMAP using a bad random initial guess of the camera parameters and sometimes can be fixed by running the program again. "
+                f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal."
+                f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
 
         logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
@@ -726,16 +726,16 @@ class DatasetMetadata:
 
     def __eq__(self, other: 'DatasetMetadata') -> bool:
         return self.num_frames == other.num_frames and \
-               np.isclose(self.fps, other.fps) and \
-               self.frame_step == other.frame_step and \
-               self.width == other.width and \
-               self.height == other.height and \
-               np.isclose(self.depth_scale, other.depth_scale) and \
-               np.isclose(self.max_depth, other.max_depth) and \
-               self.depth_mask_dilation_iterations == other.depth_mask_dilation_iterations and \
-               self.estimate_pose == other.estimate_pose and \
-               self.estimate_depth == other.estimate_depth and \
-               self.colmap_options == other.colmap_options
+            np.isclose(self.fps, other.fps) and \
+            self.frame_step == other.frame_step and \
+            self.width == other.width and \
+            self.height == other.height and \
+            np.isclose(self.depth_scale, other.depth_scale) and \
+            np.isclose(self.max_depth, other.max_depth) and \
+            self.depth_mask_dilation_iterations == other.depth_mask_dilation_iterations and \
+            self.estimate_pose == other.estimate_pose and \
+            self.estimate_depth == other.estimate_depth and \
+            self.colmap_options == other.colmap_options
 
     def __repr__(self):
         return f"{self.__class__.__name__}(num_frames={self.num_frames}, fps={self.fps}, " \
@@ -842,6 +842,10 @@ class VTMDataset(Dataset):
     mask_folder = "mask"
     masked_depth_folder = 'masked_depth'
 
+    inpainted_rgb_folder = f"{rgb_folder}_inpainted"
+    inpainted_depth_folder = f"{depth_folder}_inpainted"
+    inpainted_mask_folder = f"{mask_folder}_inpainted"
+
     required_folders = [rgb_folder, depth_folder, mask_folder]
 
     # Dataset adaptors are expected to convert depth maps to mm.
@@ -862,7 +866,54 @@ class VTMDataset(Dataset):
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
         self.mask_dataset = ImageFolderDataset(self.path_to_masks)
 
+        self.inpainted_rgb_dataset, self.inpainted_depth_dataset, self.inpainted_mask_dataset = self._get_inpainted_frame_data()
+
         self._masked_depth_path: Optional[str] = None
+
+    def _get_inpainted_frame_data(self) -> \
+            Tuple[Optional[ImageFolderDataset], Optional[ImageFolderDataset], Optional[ImageFolderDataset]]:
+        """
+        Returns the inpainted RGB, depth and mask datasets, if they exist.
+        """
+        if not os.path.isdir(self.path_to_inpainted_rgb_frames) or \
+                not os.path.isdir(self.path_to_inpainted_depth_maps) or \
+                not os.path.isdir(self.path_to_inpainted_masks):
+            return None, None, None
+
+        inpainted_rgb_dataset = ImageFolderDataset(self.path_to_inpainted_rgb_frames)
+        inpainted_depth_dataset = ImageFolderDataset(self.path_to_inpainted_depth_maps,
+                                                     transform=self._get_depth_map_transform())
+        inpainted_mask_dataset = ImageFolderDataset(self.path_to_inpainted_masks)
+
+        num_frames = self.num_frames
+
+        if len(inpainted_rgb_dataset) != num_frames or len(inpainted_rgb_dataset) != num_frames or \
+                len(inpainted_mask_dataset) != num_frames:
+            raise RuntimeError(f"Expected inpainted frame data to have {num_frames} frames, "
+                               f"but got {len(inpainted_rgb_dataset)}, {len(inpainted_depth_dataset)} "
+                               f"and {len(inpainted_mask_dataset)}.")
+
+        return inpainted_rgb_dataset, inpainted_depth_dataset, inpainted_mask_dataset
+
+    @property
+    def bg_rgb_dataset(self) -> ImageFolderDataset:
+        """The RGB frames for the background. Will use inpainted frame data if available."""
+        return self.inpainted_rgb_dataset or self.rgb_dataset
+
+    @property
+    def bg_depth_dataset(self) -> ImageFolderDataset:
+        """The depth maps for the background. Will use inpainted frame data if available."""
+        return self.inpainted_depth_dataset or self.depth_dataset
+
+    @property
+    def bg_mask_dataset(self) -> ImageFolderDataset:
+        """The masks for the background. Will use inpainted frame data if available."""
+        return self.inpainted_mask_dataset or self.mask_dataset
+
+    @property
+    def has_inpainted_frame_data(self) -> bool:
+        return self.inpainted_rgb_dataset is not None and self.inpainted_depth_dataset is not None and \
+            self.inpainted_mask_dataset is not None
 
     @property
     def path_to_metadata(self):
@@ -887,6 +938,18 @@ class VTMDataset(Dataset):
     @property
     def path_to_masks(self):
         return pjoin(self.base_path, self.mask_folder)
+
+    @property
+    def path_to_inpainted_rgb_frames(self):
+        return pjoin(self.base_path, self.inpainted_rgb_folder)
+
+    @property
+    def path_to_inpainted_depth_maps(self):
+        return pjoin(self.base_path, self.inpainted_depth_folder)
+
+    @property
+    def path_to_inpainted_masks(self):
+        return pjoin(self.base_path, self.inpainted_mask_folder)
 
     @property
     def num_frames(self) -> int:

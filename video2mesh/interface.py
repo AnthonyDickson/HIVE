@@ -17,6 +17,7 @@ class Interface:
                                       estimate_pose=o[estimate_pose], estimate_depth=o[estimate_depth],
                                       background_only=o[background_only], align_scene=o[align_scene],
                                       inpainting_mode=InpaintingMode.from_integer(int(o[use_inpainting])),
+                                      use_billboard=o[use_billboard],
                                       log_file=o[log_file])
             storage_options = StorageOptions(dataset_path=o[dataset_path], output_path=o[output_path],
                                              overwrite_ok=o[overwrite_ok], no_cache=o[no_cache])
@@ -61,22 +62,21 @@ class Interface:
                 with gr.Row():
                     with gr.Column():
                         num_frames = gr.Number(value=-1, label="num_frames", interactive=True)
-                    with gr.Column():
                         frame_step = gr.Number(value=15, label="frame_step", interactive=True)
-                    with gr.Column():
-                        estimate_pose = gr.Checkbox(value=False, label="estimate_pose", interactive=True)
-                        estimate_depth = gr.Checkbox(value=False, label="estimate_depth", interactive=True)
-                        background_only = gr.Checkbox(value=False, label="background_only", interactive=True)
-                        align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
-                    with gr.Column():
-                        log_file = gr.Text(value="logs.log", label="log_file", interactive=True)
-
                     with gr.Column():
                         use_inpainting = gr.Dropdown(
                             choices=[mode.name for mode in InpaintingMode.get_modes()],
                             value=InpaintingMode.get_name(0), type="index",
                             multiselect=False, label="inpainting_mode", interactive=True
                         )
+                        log_file = gr.Text(value="logs.log", label="log_file", interactive=True)
+
+                    with gr.Column():
+                        estimate_pose = gr.Checkbox(value=False, label="estimate_pose", interactive=True)
+                        estimate_depth = gr.Checkbox(value=False, label="estimate_depth", interactive=True)
+                        background_only = gr.Checkbox(value=False, label="background_only", interactive=True)
+                        align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
+                        use_billboard = gr.Checkbox(value=False, label="use_billboard", interactive=True)
 
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
@@ -146,7 +146,7 @@ class Interface:
 
             btn = gr.Button(value="Start Pipeline")
             inputs = {num_frames, frame_step, estimate_pose, estimate_depth, background_only, align_scene, log_file,
-                      use_inpainting,
+                      use_inpainting, use_billboard,
                       dataset_path, output_path, overwrite_ok, no_cache,
                       num_vertices_background, num_vertices_object, decimation_max_error,
                       dilate_mask_iter,
