@@ -193,89 +193,6 @@ class Pipeline:
     def _reset_cuda_stats():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
-   
-    def use_inpainting(self, base_path) -> VTMDataset:
-        # TODO: Integrate inpainting into dataset adaptor's `.convert()` method.
-        mode = self.options.inpainting_mode
-
-        logging.info(f'Create folders for background')
-        bg_path = base_path + '_bg'
-
-        if os.path.exists(bg_path):
-            shutil.rmtree(bg_path)
-
-        shutil.copytree(base_path, bg_path)
-
-        bg_rgb_path = pjoin(bg_path, VTMDataset.rgb_folder)
-        bg_depth_path = pjoin(bg_path, VTMDataset.depth_folder)
-        bg_mask_path = pjoin(bg_path, VTMDataset.mask_folder)
-
-        filenames = os.listdir(bg_mask_path)
-
-        lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
-
-        def create_mask(mask_path):
-            # Create mask for inpainting and depth map
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            kernel = np.ones((5, 5), np.uint8)
-            mask = cv2.dilate(mask, kernel, iterations=5)
-            cv2.imwrite(mask_path, mask)
-
-        def use_cv2_inpaint(path):
-            image_name = os.path.basename(path)
-            mask = cv2.imread(pjoin(bg_mask_path, image_name), cv2.IMREAD_GRAYSCALE)
-            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            inpainted_image = cv2.inpaint(image, mask, 30, cv2.INPAINT_TELEA)
-            cv2.imwrite(path, inpainted_image)
-
-        def prepare_depth_for_lama(path):
-            depth16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-
-            if len(depth16.shape) == 2:
-                depth16 = np.expand_dims(depth16, axis=2)
-
-            if depth16.shape[2] != 3:
-                depth16 = np.repeat(depth16, 3, axis=2)
-
-            cv2.imwrite(path, depth16)
-
-        def refactor_depth_after_lama(path):
-            i = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            i = i[::, ::, ::3]
-            i = np.squeeze(i, axis=2)
-            cv2.imwrite(path, i)
-
-        def create_black_mask(path):
-            mask = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            black_mask = np.zeros(mask.shape, np.uint8)
-            cv2.imwrite(path, black_mask)
-
-        logging.info(f'Create mask for inpainting and depth map')
-        tqdm_imap(create_mask, [pjoin(bg_mask_path, file) for file in filenames])
-
-        if InpaintingMode.CV2_Image in mode:
-            logging.info(f'Create background using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bg_rgb_path, file) for file in filenames])
-        elif InpaintingMode.Lama_Image in mode:
-            logging.info(f'Create background using LaMa')
-            predict(bg_rgb_path, bg_mask_path, bg_rgb_path, lama_weights_path)
-
-        if InpaintingMode.CV2_Depth in mode:
-            logging.info(f'Create depth using cv2.inpaint')
-            tqdm_imap(use_cv2_inpaint, [pjoin(bg_depth_path, file) for file in filenames])
-        elif InpaintingMode.Lama_Depth in mode:
-            logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_depth_for_lama, [pjoin(bg_depth_path, file) for file in filenames])
-            logging.info(f'Create depth using LaMa')
-            predict(bg_depth_path, bg_mask_path, bg_depth_path, lama_weights_path, depth=True)
-            logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_depth_after_lama, [pjoin(bg_depth_path, file) for file in filenames])
-
-        logging.info(f'Create black mask for background generation')
-        tqdm_imap(create_black_mask, [pjoin(bg_mask_path, file) for file in filenames])
-
-        # Set new dataset for Background 
-        return VTMDataset(bg_path)
     
     def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
         """
@@ -285,10 +202,6 @@ class Pipeline:
 
         :return: The background scene.
         """
-        if self.options.inpainting_mode != InpaintingMode.Off:
-            logging.info(f'Inpainting with {self.options.inpainting_mode}')
-            dataset = self.use_inpainting(dataset.base_path)
-
         if self.background_mesh_options.reconstruction_method in (MeshReconstructionMethod.StaticRGBD,
                                                                   MeshReconstructionMethod.RGBD):
             static_background = self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.StaticRGBD
@@ -358,15 +271,24 @@ class Pipeline:
         else:
             num_frames = self.num_frames
 
+        if background_only:
+            rgb_dataset = dataset.bg_rgb_dataset
+            depth_dataset = dataset.bg_depth_dataset
+            mask_dataset = dataset.bg_mask_dataset
+        else:
+            rgb_dataset = dataset.rgb_dataset
+            depth_dataset = dataset.depth_dataset
+            mask_dataset = dataset.mask_dataset
+
         camera_matrix = dataset.camera_matrix
 
         scene = self._create_empty_scene(dataset)
         homogeneous_transformations = dataset.camera_trajectory.to_homogenous_transforms()
 
         def process_frame(index):
-            rgb = dataset.rgb_dataset[index]
-            depth = dataset.depth_dataset[index]
-            mask_encoded = dataset.mask_dataset[index]
+            rgb = rgb_dataset[index]
+            depth = depth_dataset[index]
+            mask_encoded = mask_dataset[index]
             # noinspection PyShadowingNames
             pose = homogeneous_transformations[index]
 

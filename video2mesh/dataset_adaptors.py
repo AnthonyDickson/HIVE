@@ -26,12 +26,13 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from thirdparty.dpt import dpt
+from thirdparty.lama.bin.predict import predict as lama_predict
 from thirdparty.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
-from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions
+from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
 from video2mesh.types import Size, File
 from video2mesh.utils import tqdm_imap
 
@@ -157,12 +158,13 @@ class DatasetAdaptor(Dataset, ABC):
 
         tqdm_imap(copy_image, range(self.num_frames))
 
-    def convert(self, estimate_pose: bool, estimate_depth: bool, no_cache=False) -> VTMDataset:
+    def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, no_cache=False) -> VTMDataset:
         """
         Convert a dataset into the standard format.
 
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
             camera parameters.
+        :param inpainting_mode: Which type of image+depth inpainting to use.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param no_cache: Whether cached datasets/results should be ignored.
         :return: The converted dataset.
@@ -174,6 +176,8 @@ class DatasetAdaptor(Dataset, ABC):
             logging.info(f"Found cached dataset at {self.output_path}.")
 
             return cached_dataset
+
+        # TODO: Save RGB and mask frames as jpg to save disk space.
 
         logging.info(f"Converting input dataset at {self.base_path} and "
                      f"writing converted dataset to {self.output_path}.")
@@ -204,6 +208,8 @@ class DatasetAdaptor(Dataset, ABC):
         else:
             camera_matrix = self.get_camera_matrix()
             camera_trajectory = self.get_camera_trajectory()
+
+        self._inpaint_frame_data(mode=inpainting_mode)
 
         logging.info(f"Creating camera matrix file.")
         camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
@@ -454,6 +460,96 @@ class DatasetAdaptor(Dataset, ABC):
             interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
 
         return Trajectory(interpolated_poses)
+
+    def _inpaint_frame_data(self, mode: InpaintingMode):
+        """
+        Inpaints the RGB frames, depth maps and masks and writes them to disk.
+
+        :param mode: Which methods to use for inpainting.
+        """
+        if mode == InpaintingMode.Off:
+            return
+
+        logging.info("Creating inpainted frame data.")
+
+        rgb_path = pjoin(self.output_path, VTMDataset.rgb_folder)
+        depth_path = pjoin(self.output_path, VTMDataset.depth_folder)
+        mask_path = pjoin(self.output_path, VTMDataset.mask_folder)
+
+        inpainted_rgb_path = create_folder(self.output_path, VTMDataset.inpainted_rgb_folder)
+        inpainted_depth_path = create_folder(self.output_path, VTMDataset.inpainted_depth_folder)
+        inpainted_mask_path = create_folder(self.output_path, VTMDataset.inpainted_mask_folder)
+
+        filenames = os.listdir(rgb_path)
+
+        lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
+
+        def create_mask(mask_filename):
+            # Create mask for inpainting and depth map
+            mask = cv2.imread(pjoin(mask_path, mask_filename), cv2.IMREAD_GRAYSCALE)
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=5)
+            cv2.imwrite(pjoin(inpainted_mask_path, mask_filename), mask)
+
+        def inpaint_with_cv2(input_path, output_path, image_filename):
+            mask = cv2.imread(pjoin(inpainted_mask_path, image_filename), cv2.IMREAD_GRAYSCALE)
+            image = cv2.imread(pjoin(input_path, image_filename), cv2.IMREAD_UNCHANGED)
+            inpainted_image = cv2.inpaint(image, mask, 30, cv2.INPAINT_TELEA)
+            cv2.imwrite(pjoin(output_path, image_filename), inpainted_image)
+
+        def inpaint_rgb_with_cv2(image_filename):
+            inpaint_with_cv2(input_path=rgb_path, output_path=inpainted_rgb_path, image_filename=image_filename)
+
+        def inpaint_depth_with_cv2(image_filename):
+            inpaint_with_cv2(input_path=depth_path, output_path=inpainted_depth_path, image_filename=image_filename)
+
+        def prepare_depth_for_lama(depth_filename):
+            depth16 = cv2.imread(pjoin(depth_path, depth_filename), cv2.IMREAD_UNCHANGED)
+
+            if len(depth16.shape) == 2:
+                depth16 = np.expand_dims(depth16, axis=2)
+
+            if depth16.shape[2] != 3:
+                depth16 = np.repeat(depth16, 3, axis=2)
+
+            cv2.imwrite(pjoin(inpainted_depth_path, depth_filename), depth16)
+
+        def refactor_depth_after_lama(depth_filename):
+            i = cv2.imread(pjoin(inpainted_depth_path, depth_filename), cv2.IMREAD_UNCHANGED)
+            i = i[::, ::, ::3]
+            i = np.squeeze(i, axis=2)
+            cv2.imwrite(pjoin(inpainted_depth_path, depth_filename), i)
+
+        def create_black_mask(filename):
+            mask = cv2.imread(pjoin(inpainted_mask_path, filename), cv2.IMREAD_UNCHANGED)
+            black_mask = np.zeros(mask.shape, np.uint8)
+            cv2.imwrite(pjoin(inpainted_mask_path, filename), black_mask)
+
+        logging.info(f'Create mask for inpainting and depth map')
+        tqdm_imap(create_mask, filenames)
+
+        if InpaintingMode.CV2_Image in mode:
+            logging.info(f'Create inpainted RGB frames using cv2.inpaint')
+            tqdm_imap(inpaint_rgb_with_cv2, filenames)
+        elif InpaintingMode.Lama_Image in mode:
+            logging.info(f'Create inpainted RGB frames using LaMa')
+            lama_predict(imageDir=rgb_path, maskDir=inpainted_mask_path, outdir=inpainted_rgb_path,
+                         model_path=lama_weights_path)
+
+        if InpaintingMode.CV2_Depth in mode:
+            logging.info(f'Create inpainted depth using cv2.inpaint')
+            tqdm_imap(inpaint_depth_with_cv2, filenames)
+        elif InpaintingMode.Lama_Depth in mode:
+            logging.info(f'Prepare data for depth inpainting with LaMa')
+            tqdm_imap(prepare_depth_for_lama, filenames)
+            logging.info(f'Create inpainted depth using LaMa')
+            lama_predict(imageDir=inpainted_depth_path, maskDir=inpainted_mask_path, outdir=inpainted_depth_path,
+                         model_path=lama_weights_path, depth=True)
+            logging.info(f'Refactor depth data after LaMa inpainting')
+            tqdm_imap(refactor_depth_after_lama, filenames)
+
+        logging.info(f'Create black mask for background generation')
+        tqdm_imap(create_black_mask, filenames)
 
 
 class TUMAdaptor(DatasetAdaptor):
@@ -1373,6 +1469,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
 
         dataset = dataset_converter.convert(estimate_pose=pipeline_options.estimate_pose,
                                             estimate_depth=pipeline_options.estimate_depth,
+                                            inpainting_mode=pipeline_options.inpainting_mode,
                                             no_cache=storage_options.no_cache)
 
     return dataset
