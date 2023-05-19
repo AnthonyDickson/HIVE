@@ -242,7 +242,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
     tsdf_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
                                               sdf_max_voxels=80000000, sdf_volume_size=10.0)
     rgbd_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.RGBD)
-    mesh_decimation_options = MeshDecimationOptions(num_vertices_object=-1, num_vertices_background=-1)
+    mesh_decimation_options = MeshDecimationOptions(num_faces_object=-1, num_faces_background=-1)
 
     # TODO: Make the dataset list configurable.
     dataset_names = ['rgbd_dataset_freiburg1_desk',
