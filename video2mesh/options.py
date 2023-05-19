@@ -162,25 +162,25 @@ class COLMAPOptions(Options):
 class MeshDecimationOptions(Options):
     """Options for mesh decimation."""
 
-    def __init__(self, num_vertices_background=2 ** 14, num_vertices_object=2 ** 10, max_error=0.001):
+    def __init__(self, num_faces_background=2 ** 14, num_faces_object=2 ** 10, max_error=0.001):
         """
-        :param num_vertices_background: The target number of vertices for the background mesh.
+        :param num_faces_background: The target number of faces for the background mesh.
             If set to -1, no mesh decimation is applied to the background.
-        :param num_vertices_object: The target number of vertices for any object meshes.
-            If set to -1, no mesh decimation is applied to the foreground meshes..
+        :param num_faces_object: The target number of faces for any object meshes.
+            If set to -1, no mesh decimation is applied to the foreground meshes.
         :param max_error: Not sure what this parameter does exactly...
         """
-        self.num_vertices_background = num_vertices_background
-        self.num_vertices_object = num_vertices_object
+        self.num_faces_background = num_faces_background
+        self.num_faces_object = num_faces_object
         self.max_error = max_error
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('Mesh Decimation Options')
 
-        group.add_argument('--num_vertices_background', type=int,
+        group.add_argument('--num_faces_background', type=int,
                            help="The target number of vertices for the background mesh.", default=2 ** 14)
-        group.add_argument('--num_vertices_object', type=int,
+        group.add_argument('--num_faces_object', type=int,
                            help="The target number of vertices for any object meshes.", default=2 ** 10)
         group.add_argument('--decimation_max_error', type=float, help="Not sure what this parameter does exactly...",
                            default=0.001)
@@ -188,8 +188,8 @@ class MeshDecimationOptions(Options):
     @staticmethod
     def from_args(args) -> 'MeshDecimationOptions':
         return MeshDecimationOptions(
-            num_vertices_background=args.num_vertices_background,
-            num_vertices_object=args.num_vertices_object,
+            num_faces_background=args.num_faces_background,
+            num_faces_object=args.num_faces_object,
             max_error=args.decimation_max_error,
         )
 

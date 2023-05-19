@@ -555,7 +555,7 @@ class Pipeline:
         validate_shape(vertices, 'vertices', expected_shape=(None, 3))
         validate_shape(faces, 'faces', expected_shape=(None, 3))
 
-        if (is_object and options.num_vertices_object == -1) or (options.num_vertices_background == -1):
+        if (is_object and options.num_faces_object == -1) or (options.num_faces_background == -1):
             return vertices, faces
 
         # Construct temporary mesh.
@@ -572,8 +572,8 @@ class Pipeline:
 
         # decimate
         d.initialize()
-        num_vertices = options.num_vertices_object if is_object else options.num_vertices_background
-        d.decimate_to(num_vertices)
+        num_faces = options.num_faces_object if is_object else options.num_faces_background
+        d.decimate_to_faces(n_faces=num_faces)
 
         mesh.garbage_collection()
 

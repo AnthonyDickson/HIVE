@@ -21,8 +21,8 @@ class Interface:
                                       log_file=o[log_file])
             storage_options = StorageOptions(dataset_path=o[dataset_path], output_path=o[output_path],
                                              overwrite_ok=o[overwrite_ok], no_cache=o[no_cache])
-            decimation_options = MeshDecimationOptions(num_vertices_background=int(o[num_vertices_background]),
-                                                       num_vertices_object=int(o[num_vertices_object]),
+            decimation_options = MeshDecimationOptions(num_faces_background=int(o[num_faces_background]),
+                                                       num_faces_object=int(o[num_faces_object]),
                                                        max_error=o[decimation_max_error])
             dilation_options = MaskDilationOptions(num_iterations=int(o[dilate_mask_iter]))
             filtering_options = MeshFilteringOptions(max_pixel_distance=int(o[max_pixel_dist]),
@@ -123,10 +123,10 @@ class Interface:
             with gr.Accordion("Mesh Decimation Options", open=False):
                 with gr.Row():
                     with gr.Column():
-                        num_vertices_background = gr.Number(value=2 ** 14, label="num_vertices_background",
+                        num_faces_background = gr.Number(value=2 ** 14, label="num_faces_background",
                                                             interactive=True)
                     with gr.Column():
-                        num_vertices_object = gr.Number(value=2 ** 10, label="num_vertices_object", interactive=True)
+                        num_faces_object = gr.Number(value=2 ** 10, label="num_faces_object", interactive=True)
                     with gr.Column():
                         decimation_max_error = gr.Number(value=0.001, label="decimation_max_error", interactive=True)
 
@@ -148,7 +148,7 @@ class Interface:
             inputs = {num_frames, frame_step, estimate_pose, estimate_depth, background_only, align_scene, log_file,
                       use_inpainting, use_billboard,
                       dataset_path, output_path, overwrite_ok, no_cache,
-                      num_vertices_background, num_vertices_object, decimation_max_error,
+                      num_faces_background, num_faces_object, decimation_max_error,
                       dilate_mask_iter,
                       max_pixel_dist, max_depth_dist, min_num_components,
                       is_single_camera, dense, quality, binary_path, vocab_path,
