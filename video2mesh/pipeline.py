@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
 from os.path import join as pjoin
 from pathlib import Path
@@ -704,8 +705,8 @@ class Pipeline:
 
         return foreground_scene_path, background_scene_path
 
-    @staticmethod
-    def _write_results(base_folder, scene_name, scene) -> str:
+    @classmethod
+    def _write_results(cls, base_folder, scene_name, scene) -> str:
         """
         Write a scene to disk.
 
@@ -719,7 +720,33 @@ class Pipeline:
         trimesh.exchange.export.export_scene(scene, output_path)
         logging.info(f"Wrote mesh data to {output_path}")
 
+        cls._compress_with_draco(output_path)
+
         return output_path
+
+    @classmethod
+    def _compress_with_draco(cls, path_to_glb: str):
+        """
+        Compress a glTF mesh (.glb, binary format) with draco compression to reduce the file size.
+
+        :param path_to_glb: The path a glTF mesh file.
+        """
+        src_path = Path(path_to_glb)
+        tmp_path = Path(os.path.join(src_path.parent, f"{src_path.stem}_tmp{src_path.suffix}"))
+
+        logging.info(f"Attempting to compress {src_path} with draco...")
+
+        command = ['draco_transcoder', '-i', str(src_path), '-o', str(tmp_path)]
+
+        with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
+            for line in p.stdout:
+                logging.debug(line.rstrip('\n'))
+
+        if (return_code := p.wait()) != 0:
+            logging.warning(f"draco_transcoder exited with code {return_code}.")
+
+        shutil.move(tmp_path, src_path)
+        logging.info(f"Compressed {src_path} with draco successfully.")
 
     def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
             Tuple[trimesh.Scene, trimesh.Scene]:

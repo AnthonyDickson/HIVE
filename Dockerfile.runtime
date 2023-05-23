@@ -2,12 +2,11 @@ FROM nvidia/cuda:11.6.1-devel-ubuntu20.04
 
 RUN apt update && \
     DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends \
-    python3 python3-dev python3-pip wget unzip make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
+    python3 python3-dev python3-pip git wget unzip make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
     # COLMAP Dependencies
-    build-essential \
-    git libboost-program-options-dev libboost-filesystem-dev libboost-graph-dev  \
-    libboost-regex-dev libboost-system-dev libboost-test-dev libeigen3-dev libsuitesparse-dev libfreeimage-dev  \
-    libgoogle-glog-dev libgflags-dev libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev libcgal-qt5-dev \
+    build-essential libboost-program-options-dev libboost-filesystem-dev libboost-graph-dev libboost-system-dev \
+    libboost-test-dev libeigen3-dev libflann-dev libfreeimage-dev libmetis-dev libgoogle-glog-dev libgflags-dev \
+    libsqlite3-dev libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev libceres-dev libcgal-qt5-dev \
     # I think these are for FFMPEG.
     ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgtk2.0-dev pkg-config \
     # Packages for Ceres Solver
@@ -20,20 +19,6 @@ RUN apt update && \
     apt -y clean && \
     apt -y autoclean && \
     rm -rf /var/lib/apt/lists/*
-
-# COLMAP
-## Ceres solver
-RUN cd / && \
-    git clone --depth 1 --branch 2.1.0 https://ceres-solver.googlesource.com/ceres-solver && \
-    cd ceres-solver && \
-    git checkout $(git describe --tags) && \
-    mkdir build && \
-    cd build && \
-    cmake .. -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && \
-    make -j 8 && \
-    make install && \
-    cd .. && \
-    rm -rf ceres-solver
 
 ## Download and install OpenCV
 RUN cd / && \
@@ -50,15 +35,28 @@ RUN cd / && \
 
 ## Install COLMAP from source
 RUN cd / && \
-    git clone --depth 1 --branch 3.7 https://github.com/colmap/colmap.git && \
+    git clone --depth 1 --branch 3.8 https://github.com/colmap/colmap.git && \
     cd colmap && \
     mkdir build && \
     cd build && \
-    cmake .. && \
+    cmake .. -DCMAKE_CUDA_ARCHITECTURES=all && \
     make -j 8 && \
     make install && \
     cd / && \
     rm -rf colmap
+
+# Install the glTF branch of the draco mesh compression library.
+RUN git clone --depth 1 --branch gltf_2.0_draco_extension --single-branch https://github.com/google/draco.git draco && \
+    cd draco && \
+    git checkout 9f856ab && \
+    git submodule update --init && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DDRACO_TRANSCODER_SUPPORTED=ON && \
+    make -j 8 && \
+    make install && \
+    cd ../../ && \
+    rm -rf draco
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -67,21 +65,24 @@ ENV WEIGHTS_PATH=/root/.cache/pretrained
 ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
 
 COPY scripts/download_weights.py download_weights.py
+
 # The first line downloads the weights for the MC depth estimation model, the AdaBins base model and Detectron2.
 RUN mkdir -p ${WEIGHTS_PATH} &&  \
     python3 download_weights.py && \
-    # DPT weights
-    wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt && \
-    # COLMAP vocab file.
-    mkdir -p ${COLMAP_VOCAB_PATH} && \
-    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin && \
     rm download_weights.py
+
+# DPT weights
+RUN wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt
 
 # Download weights for lama inpainting.
 RUN cd ${WEIGHTS_PATH} && \
     curl -L $(yadisk-direct https://disk.yandex.ru/d/ouP6l8VJ0HpMZg) -o big-lama.zip &&  \
     unzip big-lama.zip && \
     rm big-lama.zip
+
+# COLMAP vocab file.
+RUN mkdir -p ${COLMAP_VOCAB_PATH} &&  \
+    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
 
 WORKDIR /app
 CMD ["python3"]
