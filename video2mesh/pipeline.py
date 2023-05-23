@@ -15,7 +15,6 @@ from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple
 
-import cv2
 import numpy as np
 import openmesh as om
 import torch
@@ -26,7 +25,6 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
 
-from thirdparty.lama.bin.predict import predict
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components, image2world
@@ -34,9 +32,9 @@ from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
-    ForegroundTrajectorySmoothingOptions, WebXROptions, InpaintingMode
+    ForegroundTrajectorySmoothingOptions, WebXROptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
-from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger
+from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger, format_bytes
 
 
 class Pipeline:
@@ -792,8 +790,6 @@ class Pipeline:
         src_path = Path(path_to_glb)
         tmp_path = Path(os.path.join(src_path.parent, f"{src_path.stem}_tmp{src_path.suffix}"))
 
-        logging.info(f"Attempting to compress {src_path} with draco...")
-
         command = ['draco_transcoder', '-i', str(src_path), '-o', str(tmp_path)]
 
         with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
@@ -803,8 +799,16 @@ class Pipeline:
         if (return_code := p.wait()) != 0:
             logging.warning(f"draco_transcoder exited with code {return_code}.")
 
+        size_before = os.path.getsize(src_path)
+        size_after = os.path.getsize(tmp_path)
+
+        data_saving = 1 - size_after / size_before
+        compression_ratio = size_before / size_after
+
         shutil.move(tmp_path, src_path)
-        logging.info(f"Compressed {src_path} with draco successfully.")
+        logging.info(f"Compressed {src_path} with draco successfully "
+                     f"({format_bytes(size_before)} before compression, {format_bytes(size_after)} after compression, "
+                     f"{data_saving * 100:.2f}% data saving, {compression_ratio:.2f}:1 compression ratio).")
 
     def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
             Tuple[trimesh.Scene, trimesh.Scene]:
@@ -996,15 +1000,6 @@ class Pipeline:
         :param background_scene_path: The path to where the background scene was saved.
         :param elapsed_time_seconds: How long the pipeline took to run.
         """
-
-        def format_bytes(num):
-            for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
-                if abs(num) < 1024.0:
-                    return f"{num:3.1f} {unit}B"
-
-                num /= 1024.0
-
-            return f"{num:3.1f} PiB"
 
         def count_tris(scene: trimesh.Scene):
             total = 0

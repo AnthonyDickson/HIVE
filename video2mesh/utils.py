@@ -221,3 +221,14 @@ def setup_logger(log_path: Optional[str] = None):
     # TODO: Get rid of matplotlib and trimesh debug output.
     # This line prevents PILLOW from polluting the debug logs.
     logging.getLogger('PIL').setLevel(logging.INFO)
+
+
+def format_bytes(bytes_count: int) -> str:
+    """Format a number of bytes as the appropriate unit (e.g., KiB, MiB, GiB)."""
+    for unit in ["", "Ki", "Mi", "Gi", "Ti"]:
+        if abs(bytes_count) < 1024.0:
+            return f"{bytes_count:3.1f} {unit}B"
+
+        bytes_count /= 1024.0
+
+    return f"{bytes_count:3.1f} PiB"
