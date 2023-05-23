@@ -1,6 +1,5 @@
 data/
-results/
-thirdparty/
-checkpoints/
+outputs/
+third_party/
 experiment_results/
 *.log

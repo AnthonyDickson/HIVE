@@ -2,7 +2,6 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/thirdparty/AdaBins/.idea/AdaBins.iml" filepath="$PROJECT_DIR$/thirdparty/AdaBins/.idea/AdaBins.iml" />
       <module fileurl="file://$PROJECT_DIR$/../webxr3dvideo/.idea/video-3d-viewer.iml" filepath="$PROJECT_DIR$/../webxr3dvideo/.idea/video-3d-viewer.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/video2mesh.iml" filepath="$PROJECT_DIR$/.idea/video2mesh.iml" />
     </modules>

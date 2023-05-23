@@ -25,9 +25,9 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 
-from thirdparty.dpt import dpt
-from thirdparty.lama.bin.predict import predict as lama_predict
-from thirdparty.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
+from third_party.dpt import dpt
+from third_party.lama.bin.predict import predict as lama_predict
+from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \

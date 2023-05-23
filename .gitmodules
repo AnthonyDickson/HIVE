@@ -1,27 +1,27 @@
-[submodule "thirdparty/AdaBins"]
-	path = thirdparty/AdaBins
+[submodule "third_party/AdaBins"]
+	path = third_party/AdaBins
 	url = https://github.com/AnthonyDickson/AdaBins.git
-[submodule "thirdparty/colmap"]
-	path = thirdparty/colmap
+[submodule "third_party/colmap"]
+	path = third_party/colmap
 	url = https://github.com/colmap/colmap.git
-[submodule "thirdparty/webxr3dvideo"]
-	path = thirdparty/webxr3dvideo
+[submodule "third_party/webxr3dvideo"]
+	path = third_party/webxr3dvideo
 	url = https://github.com/AnthonyDickson/webxr3dvideo.git
-[submodule "thirdparty/tsdf_fusion_python"]
-	path = thirdparty/tsdf_fusion_python
+[submodule "third_party/tsdf_fusion_python"]
+	path = third_party/tsdf_fusion_python
 	url = https://github.com/AnthonyDickson/tsdf-fusion-python.git
-[submodule "thirdparty/adelai_depth"]
-	path = thirdparty/adelai_depth
+[submodule "third_party/adelai_depth"]
+	path = third_party/adelai_depth
 	url = https://github.com/AnthonyDickson/AdelaiDepth.git
-[submodule "thirdparty/consistent_depth"]
-	path = thirdparty/consistent_depth
+[submodule "third_party/consistent_depth"]
+	path = third_party/consistent_depth
 	url = https://github.com/AnthonyDickson/consistent_video_depth.git
-[submodule "thirdparty/dpt"]
-	path = thirdparty/dpt
+[submodule "third_party/dpt"]
+	path = third_party/dpt
 	url = https://github.com/AnthonyDickson/DPT.git
-[submodule "thirdparty/unreal_dataset"]
-	path = thirdparty/unreal_dataset
+[submodule "third_party/unreal_dataset"]
+	path = third_party/unreal_dataset
 	url = https://github.com/AnthonyDickson/UnrealDataset.git
-[submodule "thirdparty/lama"]
-	path = thirdparty/lama
+[submodule "third_party/lama"]
+	path = third_party/lama
 	url = https://github.com/AnthonyDickson/lama.git
