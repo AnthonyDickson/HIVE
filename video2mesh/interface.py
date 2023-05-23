@@ -1,4 +1,5 @@
 import logging
+from argparse import ArgumentParser
 
 import gradio as gr
 
@@ -48,12 +49,61 @@ class Interface:
             pipeline.run()
 
         with gr.Blocks(theme=gr.themes.Default()) as demo:
+            with gr.Accordion("Quickstart", open=True):
+                with gr.Row():
+                    gr.Markdown(
+"""For a more detailed explanation, refer to the [README](https://github.com/AnthonyDickson/video2mesh/blob/master/README.md).
+
+# Quickstart
+1. Fill in the CLI options below.
+2. Click the button at the bottom of the page that says 'Start Pipeline'.
+3. In a separate terminal tab/window, run the following command to start the web viewer:
+   ```shell
+   docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16
+   ```
+4. When the pipeline is finished running, it will give you a link (check the first terminal you opened). 
+   Click on this link to view the 3D video.
+
+# Common CLI Options
+- `--dataset_path <path/to/dataset>` Specify the path to either: a video file, TUM dataset or an iPhone dataset (StrayScanner).
+- `--output_path <path/to/folder>` Specify where the results should be written to.
+- `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
+- `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
+- `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
+- `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
+- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
+- `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
+- `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
+- `--inpainting_mode` Use Lama to inpaint the background.
+    - `0` - no inpainting.
+    - `1` - Depth: cv2, Background: cv2
+    - `2` - Depth: cv2, Background: LaMa
+    - `3` - Depth: LaMa, Background: cv2
+    - `4` - Depth: LaMa, Background: LaMa
+- `--use_billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
+
+# Web Viewer Controls
+The renderer using orbit controls where:
+- Left click + dragging the mouse will orbit.
+- Right click + dragging the mouse will pan.
+- Scrolling will zoom in and out.
+- `<space>`: Pause/play the video.
+- `C`: Reset the camera's position and rotation.
+- `G`: Go to a particular frame.
+- `L`: Toggle whether to use camera pose from metadata for XR headset.
+- `P`: Save the camera's pose and metadata to disk.
+- `R`: Restart the video playback.
+- `S`: Show/hide the framerate statistics.
+"""
+                    )
+
+
             with gr.Accordion("Storage Options", open=True):
                 with gr.Row():
                     with gr.Column():
-                        dataset_path = gr.Text(value="", label="dataset_path", interactive=True)
+                        dataset_path = gr.Text(value="/app/data/your_dataset_here", label="dataset_path", interactive=True)
                     with gr.Column():
-                        output_path = gr.Text(value="", label="output_path", interactive=True)
+                        output_path = gr.Text(value="/app/outputs/output_folder_name_here", label="output_path", interactive=True)
                     with gr.Column():
                         overwrite_ok = gr.Checkbox(value=False, label="overwrite_ok", interactive=True)
                         no_cache = gr.Checkbox(value=False, label="no_cache", interactive=True)
@@ -72,8 +122,8 @@ class Interface:
                         log_file = gr.Text(value="logs.log", label="log_file", interactive=True)
 
                     with gr.Column():
-                        estimate_pose = gr.Checkbox(value=False, label="estimate_pose", interactive=True)
-                        estimate_depth = gr.Checkbox(value=False, label="estimate_depth", interactive=True)
+                        estimate_pose = gr.Checkbox(value=True, label="estimate_pose", interactive=True)
+                        estimate_depth = gr.Checkbox(value=True, label="estimate_depth", interactive=True)
                         background_only = gr.Checkbox(value=False, label="background_only", interactive=True)
                         align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
                         use_billboard = gr.Checkbox(value=False, label="use_billboard", interactive=True)
@@ -81,7 +131,7 @@ class Interface:
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
                     with gr.Column():
-                        webxr_path = gr.Text(value='thirdparty/webxr3dvideo/docs', label="webxr_path", interactive=True)
+                        webxr_path = gr.Text(value='third_party/webxr3dvideo/docs/video/', label="webxr_path", interactive=True)
                     with gr.Column():
                         webxr_url = gr.Text(value='http://localhost:8080', label="webxr_url", interactive=True)
                     with gr.Column():
@@ -157,8 +207,17 @@ class Interface:
                       webxr_path, webxr_url, webxr_add_ground_plane, webxr_add_sky_box}
             btn.click(fn=start_pipeline, inputs=inputs, outputs=None)
 
+        demo.title = "HIVE (video2mesh)"
+
         return demo
 
 if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--port', type=int, help='The port number to run the interface web server on.', default=8081)
+    args = parser.parse_args()
+
+    port_number = args.port
+    print(f"Navigate to http://localhost:{port_number} in your browser to start.")
+
     interface = Interface.get_interface()
-    interface.launch(server_name="0.0.0.0", server_port=8081)
+    interface.launch(server_name="0.0.0.0", server_port=port_number)

@@ -11,7 +11,7 @@ import numpy as np
 import trimesh
 from tqdm import tqdm
 
-from thirdparty.tsdf_fusion_python import fusion
+from third_party.tsdf_fusion_python import fusion
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset
 from video2mesh.options import BackgroundMeshOptions, MaskDilationOptions, MeshReconstructionMethod

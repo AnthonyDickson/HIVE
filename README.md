@@ -3,16 +3,46 @@ This project looks at creating a 3D video from an RGB-D (red, green, blue and de
 ![demo of 3D video](images/video_3d_demo.gif)
 
 # Getting Started
+## System Requirements
+- Windows or Ubuntu
+- WSL for Windows users
+- CUDA 11.6+
+- Docker
+- NVIDIA GPU with 6GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
+- 16GB of RAM
+
 ## Cloning the Project
 Clone the repo:
 ```shell
 git clone --recurse-submodules https://github.com/AnthonyDickson/video2mesh.git 
 ```
-If you forget to or cannot clone with `--recurse-submodules` then clone the git dependencies with the following:
+If you forget to or cannot clone with `--recurse-submodules`, then clone the git dependencies with the following:
 ```shell
 git submodule update --init --recursive
 ```
 This command can also be used to pull/update any changes in the submodules. 
+
+## Quickstart
+Here are the steps to quickly run a video.
+1. Create a folder in the repository root that contains your videos or RGB-D datasets (TUM, Unreal or StrayScanner).
+2. Create a folder in the repository root to store the outputs.
+3. Run the following command in a terminal from the repository root:
+    ```shell
+    PORT_NUMBER=8081; docker run --name HIVE --rm --gpus all -p ${PORT_NUMBER}:${PORT_NUMBER} -v $(pwd):/app -it dican732/video2mesh:latest python3 -m video2mesh.interface --port ${PORT_NUMBER}
+    ```
+4. Navigate to http://localhost:8081 and fill in `dataset_path` and `output_path` with the dataset path and output folder you created in steps 1 and 2, and click the button at the bottom of the page that says 'Start Pipeline'. 
+   You can leave the other settings at their default values.
+   For long videos, you can set `num_frames` to something like 150 to make it run faster.
+   For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
+5. In another terminal, start the web viewer:
+   ```shell
+   docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16  
+   ```
+6. After the pipeline has finished running, check the first terminal you opened for a link. Navigate to that link in your web browser to view the 3D video.
+
+**Note:** Oculus headset users can use desktop mode in Oculus Link to view the 3D video in VR.
+Run the steps above as normal, and at the end click the button at the bottom of the screen saying 'Enter VR' from your headset. 
+
 
 ## Setting Up Your Development Environment
 Choose one of three options for setting up the dev environment (in the recommended order):
@@ -20,16 +50,8 @@ Choose one of three options for setting up the dev environment (in the recommend
 2. [Building the Docker image locally](#building-the-docker-image-locally)
 3. [Local installation](#local-installation)
 
-### Prerequisites
-- Windows or Ubuntu
-- NVIDIA GPU with 6GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
-- CUDA 11.6+
-- WSL for Windows users
-- Docker
-- (optional) PyCharm
-
 ### Pre-Built Docker Image
-1. Pull (download) the pre-built image (~13 GB): 
+1. Pull (download) the pre-built image (~16 GB): 
       ```shell
       docker pull dican732/video2mesh
       ```
@@ -162,7 +184,7 @@ Thank you to Felix for implementing this web interface and the image inpainting.
 ### Viewing the 3D Video
 - Start the Docker container:
    ```shell
-   docker run --rm -p 8080:8080 -v $(pwd)/thirdparty/webxr3dvideo/src:/app/src:ro -v $(pwd)/thirdparty/webxr3dvideo/docs:/app/docs --name WebXR-3D-Video-Server --rm dican732/webxr3dvideo:node-16 
+   docker run --rm  --name WebXR-3D-Video-Server -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16 
    ```
   or if you are using PyCharm there is a run configuration included.
 - When you run the pipeline it will print the link to view the video.
@@ -170,21 +192,41 @@ Thank you to Felix for implementing this web interface and the image inpainting.
   - Left click + dragging the mouse will orbit.
   - Right click + dragging the mouse will pan.
   - Scrolling will zoom in and out.
-  - `R` will reset the camera pose.
-  - `P` will add the camera pose to the metadata and download a copy. You will have to move this file to the video folder, overwrite (or backup) the old metadata, and reload the webpage for it to take effect.
+  - `<space>`: Pause/play the video.
+  - `C`: Reset the camera's position and rotation.
+  - `G`: Go to a particular frame.
+  - `L`: Toggle whether to use camera pose from metadata for XR headset.
+  - `P`: Save the camera's pose and metadata to disk.
+  - `R`: Restart the video playback.
+  - `S`: Show/hide the framerate statistics.
 
 Refer to the [WebXR repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
 
+# Data Format
 ## Input Data Format
 This program accepts datasets in three formats:
 - TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
 - RGB-D datasets created on an iOS device using [StrayScanner](https://apps.apple.com/nz/app/stray-scanner/id1557051662)
 - RGB Video
-- The VTM format (see below.)
+- The VTM format (see [VTM Dataset Format](#vtm-dataset-format))
 
 The above datasets are automatically converted to the VTM format.
 
-Overall, the expected folder structure is as follows:
+## Output Format
+Each 3D video is saved to a folder with the glTF formatted mesh files and JSON metadata:
+```text
+<converted dataset>
+│   ...
+└── mesh
+    │   fg.glb
+    │   bg.glb
+    └── metadata.json
+```
+This folder is saved under the dataset folder.
+
+
+## VTM Dataset Format
+Overall, the expected folder structure for the VTM format is as follows:
 
 ```
 <dataset>
@@ -264,15 +306,6 @@ Within each dataset folder, there should be the following 5 items:
    ```
    The depth maps are expected to be stored in a 16-bit grayscale image. The depth values should be in millimeters and increasing from the camera (i.e. depth = 0 at the camera, depth of 1000 is 1000 millimeters).
 
-## Output Format
-Each 3D video is saved to a folder with the glTF formatted mesh files and JSON metadata:
-```text
-mesh
-│   fg.glb
-│   bg.glb
-└── metadata.json
-```
-This folder is saved under the dataset folder.
 
 # Algorithm Overview
 ## Pipeline

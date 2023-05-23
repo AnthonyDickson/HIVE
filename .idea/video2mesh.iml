@@ -3,9 +3,10 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/data" />
-      <excludeFolder url="file://$MODULE_DIR$/results" />
       <excludeFolder url="file://$MODULE_DIR$/ismar_experiment_results" />
       <excludeFolder url="file://$MODULE_DIR$/experiment_results" />
+      <excludeFolder url="file://$MODULE_DIR$/outputs" />
+      <excludeFolder url="file://$MODULE_DIR$/third_party/lama/outputs" />
     </content>
     <orderEntry type="jdk" jdkName="Remote Python 3.8.10 Docker (dican732/video2mesh:runtime-cu116)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

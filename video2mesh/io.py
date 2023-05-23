@@ -23,8 +23,8 @@ from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
 
-from thirdparty.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
-from thirdparty.colmap.scripts.python.read_write_model import read_model
+from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
+from third_party.colmap.scripts.python.read_write_model import read_model
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions

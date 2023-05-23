@@ -5,25 +5,17 @@
         <option name="imageTag" value="dican732/webxr3dvideo:node-16" />
         <option name="command" value="build" />
         <option name="containerName" value="WebXR-3D-Video-Server" />
-        <option name="portBindings">
-          <list>
-            <DockerPortBindingImpl>
-              <option name="containerPort" value="8080" />
-              <option name="hostPort" value="8080" />
-            </DockerPortBindingImpl>
-          </list>
-        </option>
         <option name="commandLineOptions" value="--rm" />
         <option name="showCommandPreview" value="true" />
         <option name="volumeBindings">
           <list>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/src" />
-              <option name="hostPath" value="$PROJECT_DIR$/thirdparty/webxr3dvideo/src" />
+              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/src" />
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="$PROJECT_DIR$/thirdparty/webxr3dvideo/docs" />
+              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/docs" />
             </DockerVolumeBindingImpl>
           </list>
         </option>
