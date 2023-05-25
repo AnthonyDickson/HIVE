@@ -4,19 +4,22 @@ This module contains the code for running the pipeline end-to-end (minus the ren
 
 import argparse
 import datetime
-import itertools
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
+import traceback
+from contextlib import contextmanager
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any, Union
 
 import numpy as np
 import openmesh as om
+import resource
 import torch
 import trimesh
 from PIL import Image
@@ -27,14 +30,15 @@ from trimesh.exchange.export import export_mesh
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components, image2world
+from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
     ForegroundTrajectorySmoothingOptions, WebXROptions
 from video2mesh.pose_optimisation import ForegroundPoseOptimiser
-from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger, format_bytes
+from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger, format_bytes, \
+    set_key_path, timed_block, get_key_path
 
 
 class Pipeline:
@@ -71,7 +75,9 @@ class Pipeline:
         self.background_mesh_options = static_mesh_options
         self.webxr_options = webxr_options
         self.fts_options = fts_options
-        
+
+        self.profiling = dict()
+
         # TODO: Dump logs to output folder.
         setup_logger(self.options.log_file)
 
@@ -114,7 +120,7 @@ class Pipeline:
             static_mesh_options=static_mesh_options,
             webxr_options=webxr_options
         )
-    
+
         logging.debug(args)
 
         return pipeline
@@ -132,9 +138,21 @@ class Pipeline:
         return self.options.estimate_depth
 
     @property
-    def mesh_export_path(self) -> str:
+    def mesh_path(self) -> str:
         """Where to save the foreground and background meshes to as a string path."""
         return pjoin(self.storage_options.output_path, self.mesh_folder)
+
+    @contextmanager
+    def timed_block(self, log_msg: Optional[str], key_path: list):
+        """
+        Log a message, run a block of code, and write the runtime of the block to `self.profiling`.
+
+        :param log_msg: The optional message to log.
+        :param key_path: The dictionary path(s) to write the runtime to, e.g. ['my_app', 'total_runtime'].
+            Any nested dictionaries or keys that do not exist will be created automatically.
+        """
+        with timed_block(log_msg=log_msg, profiling=self.profiling, key_path=key_path) as timer:
+            yield timer
 
     def run(self, dataset: Optional[VTMDataset] = None):
         """
@@ -145,39 +163,48 @@ class Pipeline:
         start_time = time.time()
         self._reset_cuda_stats()
 
-        logging.info("Loading dataset...")
-        if dataset is None:
-            dataset = get_dataset(self.storage_options, self.colmap_options, self.options)
+        with self.timed_block("Loading dataset...", ['timing', 'load_dataset', 'total']):
+            if dataset is None:
+                dataset = get_dataset(self.storage_options, self.colmap_options, self.options, profiling=self.profiling)
 
-        if self.num_frames == -1:
-            self.options.num_frames = dataset.num_frames
-        else:
-            # This handles the case where the specified number of frames is more than the total number of frames in
-            # the non-truncated dataset.
-            self.options.num_frames = min(self.num_frames, dataset.num_frames)
+            if self.num_frames == -1:
+                self.options.num_frames = dataset.num_frames
+            else:
+                # This handles the case where the specified number of frames is more than the total number of frames in
+                # the non-truncated dataset.
+                self.options.num_frames = min(self.num_frames, dataset.num_frames)
 
-        logging.info("Creating background mesh(es)...")
-        background_scene = self._create_background_scene(dataset)
+        with self.timed_block("Creating background mesh(es)...",
+                              key_path=['timing', 'background_reconstruction', 'total']):
+            background_scene = self._create_background_scene(dataset)
 
-        logging.info("Creating foreground mesh(es)...")
-        foreground_scene = self._create_foreground_scene(dataset)
+        with self.timed_block("Creating foreground mesh(es)...",
+                              key_path=['timing', 'foreground_reconstruction', 'total']):
+            foreground_scene = self._create_foreground_scene(dataset)
 
-        logging.info("Centering foreground and background scenes...")
-        foreground_scene, background_scene = self._center_scenes(dataset, foreground_scene, background_scene)
+        with self.timed_block("Centering foreground and background scenes...", key_path=['timing', 'scene_centering']):
+            foreground_scene, background_scene = self._center_scenes(dataset, foreground_scene, background_scene)
 
-        logging.info(f"Writing mesh data to disk...")
-        foreground_scene_path, background_scene_path = self._export_mesh_data(
-            mesh_export_path=self.mesh_export_path,
-            foreground_scene=foreground_scene,
-            background_scene=background_scene,
-            overwrite_ok=self.storage_options.overwrite_ok
-        )
+        with self.timed_block("Writing mesh data to disk...", key_path=['timing', 'mesh_export']):
+            foreground_scene_path, background_scene_path = self._write_meshes_to_disk(
+                mesh_path=self.mesh_path,
+                foreground_scene=foreground_scene,
+                background_scene=background_scene,
+                overwrite_ok=self.storage_options.overwrite_ok
+            )
 
-        logging.info(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...")
-        export_path = self._export_video_webxr(self.mesh_export_path, fg_scene_name="fg", bg_scene_name="bg",
-                                               metadata=self._get_webxr_metadata(fps=dataset.fps),
-                                               export_name=(self._get_dataset_name(dataset)))
-        logging.info(f"Exported mesh data to: {export_path}")
+        with self.timed_block("Compressing mesh data...", key_path=['timing', 'mesh_compression', 'total']):
+            with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'foreground']):
+                self._compress_with_draco(foreground_scene_path)
+
+            with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'foreground']):
+                self._compress_with_draco(background_scene_path)
+
+        with self.timed_block(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...",
+                              key_path=['timing', 'webxr_export']):
+            self._export_video_webxr(self.mesh_path, fg_scene_name="fg", bg_scene_name="bg",
+                                     metadata=self._get_webxr_metadata(fps=dataset.fps),
+                                     export_name=(self._get_dataset_name(dataset)))
 
         elapsed_time_seconds = time.time() - start_time
 
@@ -185,14 +212,16 @@ class Pipeline:
                             foreground_scene_path, background_scene_path,
                             elapsed_time_seconds)
 
-        logging.info(
-            f"Start the WebXR server and go to this URL: {self.webxr_options.webxr_url}?video={self._get_dataset_name(dataset)}")
+        self._write_profiling_data(path=pjoin(dataset.base_path, 'profiling.json'))
+
+        logging.info(f"Start the WebXR server and go to this URL: "
+                     f"{self.webxr_options.webxr_url}?video={self._get_dataset_name(dataset)}")
 
     @staticmethod
     def _reset_cuda_stats():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
-    
+
     def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
         """
         Create the background mesh(es) from an RGB-D dataset.
@@ -304,78 +333,113 @@ class Pipeline:
             rotation, translation = get_pose_components(pose)
 
             mask_start_i = 0 if include_background else 1
+            # noinspection PyArgumentList
             mask_end_i = 1 if background_only else mask_encoded.max() + 1
 
             for object_id in range(mask_start_i, mask_end_i):
-                mask = mask_encoded == object_id
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'binary_mask_creation', index,
+                                                object_id]):
+                    mask = mask_encoded == object_id
 
-                is_object = object_id > 0
+                    is_object = object_id > 0
 
-                coverage_ratio = mask.mean()
+                    coverage_ratio = mask.mean()
 
-                if coverage_ratio < 0.01:
-                    # TODO: Make minimum coverage ratio configurable?
-                    logging.debug(f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
-                    continue
+                    if coverage_ratio < 0.01:
+                        # TODO: Make minimum coverage ratio configurable?
+                        logging.debug(
+                            f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
+                        continue
 
-                if is_object:
-                    mask = dilate_mask(mask, self.dilation_options)
+                    if is_object:
+                        mask = dilate_mask(mask, self.dilation_options)
 
-                if is_object and self.options.use_billboard:
-                    depth[mask] = np.median(depth[mask])
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'per_object_mesh', 'total',
+                                                index, object_id]):
+                    if is_object and self.options.use_billboard:
+                        depth[mask] = np.median(depth[mask])
 
-                vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
+                    vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
 
-                if len(vertices) < 9:
-                    logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
-                                  f"due to insufficient number of vertices ({len(vertices)}).")
-                    continue
+                    if len(vertices) < 9:
+                        logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
+                                      f"due to insufficient number of vertices ({len(vertices)}).")
+                        continue
 
-                valid_pixels = mask & (depth > 0.0)
-                v, u = valid_pixels.nonzero()
-                # Need to take transpose since stacking UV coordinates gives (2, N) shaped array to get the
-                # expected (N, 2) shape.
-                points2d = np.vstack((u, v)).T
-                masked_depth = depth[valid_pixels]
+                    valid_pixels = mask & (depth > 0.0)
+                    v, u = valid_pixels.nonzero()
+                    # Need to take transpose since stacking UV coordinates gives (2, N) shaped array to get the
+                    # expected (N, 2) shape.
+                    points2d = np.vstack((u, v)).T
+                    masked_depth = depth[valid_pixels]
 
-                # TODO: Filter long stretched out bits of floor attached to peoples' feet.
-                faces = self._triangulate_faces(points2d)
-                vertices, faces = self._triangulate_faces2(depth, mask, camera_matrix, pose)
-                faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
-                vertices, faces = self._decimate_mesh(vertices, faces, is_object, self.decimation_options)
+                    with self.timed_block(log_msg=None,
+                                          key_path=['timing', 'foreground_reconstruction', 'per_object_mesh',
+                                                    'face_triangulation', index, object_id]):
+                        # TODO: Filter long stretched out bits of floor attached to peoples' feet.
+                        faces = self._triangulate_faces(points2d)
 
-                vertices, faces = self._cleanup_with_connected_components(
-                    vertices, faces, is_object,
-                    min_components=self.filtering_options.min_num_components
-                )
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'face_filtering', index,
+                                                object_id]):
+                    faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
 
-                texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, rotation, translation)
-                texture_atlas.append(texture)
-                uv_atlas.append(uv)
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'mesh_decimation', index,
+                                                object_id]):
+                    set_key_path(self.profiling, ['mesh_decimation', 'vertex_count', 'before', index, object_id],
+                                 len(vertices))
+                    set_key_path(self.profiling, ['mesh_decimation', 'face_count', 'before', index, object_id],
+                                 len(faces))
 
-                frame_vertices = np.vstack((frame_vertices, vertices))
-                frame_faces = np.vstack((frame_faces, faces + vertex_count))
-                # Vertex count must be updated afterwards.
-                vertex_count += len(vertices)
+                    vertices, faces = self._decimate_mesh(vertices, faces, is_object, self.decimation_options)
 
-            if len(texture_atlas) == 0:
-                # noinspection PyShadowingNames
-                mesh = trimesh.Trimesh()
-                logging.debug(f"Mesh for frame #{index + 1} is empty!")
-            else:
-                packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
+                    set_key_path(self.profiling, ['mesh_decimation', 'vertex_count', 'after', index, object_id],
+                                 len(vertices))
+                    set_key_path(self.profiling, ['mesh_decimation', 'face_count', 'after', index, object_id],
+                                 len(faces))
 
-                # noinspection PyUnresolvedReferences,PyShadowingNames
-                mesh = trimesh.Trimesh(
-                    frame_vertices,
-                    frame_faces,
-                    visual=trimesh.visual.TextureVisuals(
-                        uv=packed_uv,
-                        material=trimesh.visual.material.PBRMaterial(
-                            baseColorTexture=Image.fromarray(packed_textures.astype(np.uint8)),
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'floater_removal', index,
+                                                object_id]):
+                    vertices, faces = self._cleanup_with_connected_components(
+                        vertices, faces, is_object,
+                        min_components=self.filtering_options.min_num_components
+                    )
+
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'texturing', index, object_id]):
+                    texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, rotation, translation)
+                    texture_atlas.append(texture)
+                    uv_atlas.append(uv)
+
+                    frame_vertices = np.vstack((frame_vertices, vertices))
+                    frame_faces = np.vstack((frame_faces, faces + vertex_count))
+                    # Vertex count must be updated afterwards.
+                    vertex_count += len(vertices)
+
+            with self.timed_block(log_msg=None,
+                                  key_path=['timing', 'foreground_reconstruction', 'texture_atlas_packing', index]):
+                if len(texture_atlas) == 0:
+                    # noinspection PyShadowingNames
+                    mesh = trimesh.Trimesh()
+                    logging.debug(f"Mesh for frame #{index + 1} is empty!")
+                else:
+                    packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
+
+                    # noinspection PyUnresolvedReferences,PyShadowingNames
+                    mesh = trimesh.Trimesh(
+                        frame_vertices,
+                        frame_faces,
+                        visual=trimesh.visual.TextureVisuals(
+                            uv=packed_uv,
+                            material=trimesh.visual.material.PBRMaterial(
+                                baseColorTexture=Image.fromarray(packed_textures.astype(np.uint8)),
+                            )
                         )
                     )
-                )
 
             return mesh
 
@@ -437,62 +501,6 @@ class Pipeline:
                 focal=(dataset.fx, dataset.fy)
             )
         )
-
-    @staticmethod
-    def _triangulate_faces2(depth, mask, camera_matrix, pose):
-        height, width = depth.shape
-
-        points2d = np.array(list(itertools.product(range(480), range(640))))
-
-        vertices = image2world(points2d, depth.flatten(), camera_matrix, *get_pose_components(pose))
-
-        num_rows, num_cols = depth.shape
-
-        col_i, row_i = np.meshgrid(range(width), range(height))
-
-        # Generates the triangle indices a -> b
-        #                                   /
-        #                                  /
-        #                                 /
-        #                                c -> d
-        # where the indices (a, b, c) and (c, b, d) each form a single triangle when using a clockwise winding order.
-        a = row_i[:-1, :-1] * num_cols + col_i[:-1, :-1]
-        b = (row_i[:-1, :-1] + 1) * num_cols + col_i[:-1, :-1]
-        c = a + 1
-        d = b + 1
-
-        def flatten_arrays(arrays):
-            """
-            Flatten multiple multidimensional arrays.
-
-            :param arrays: The arrays to flatten.
-            :return: A tuple of the flattened arrays.
-            """
-            return tuple(map(np.ravel, arrays))
-
-        def interweave_arrays(arrays):
-            """
-            Interweaves multiple arrays.
-
-            >>> interweave_arrays([[1, 3, 5], [2, 4, 6]])
-            [1, 2, 3, 4, 5, 6]
-            """
-            total_num_elements = sum(map(lambda array: array.size, arrays))
-            dtype = arrays[0].dtype
-
-            combined_array = np.empty(total_num_elements, dtype=dtype)
-
-            for i, array in enumerate(arrays):
-                combined_array[i::len(arrays)] = array
-
-            return combined_array
-
-        indices = interweave_arrays(flatten_arrays([a, b, c, c, b, d]))
-
-        vertices = np.array(vertices, dtype=np.float32)
-        indices = np.array(indices, dtype=np.uint32)
-
-        return vertices, indices
 
     @staticmethod
     def _triangulate_faces(points: np.ndarray) -> np.ndarray:
@@ -743,26 +751,26 @@ class Pipeline:
         return mesh
 
     @classmethod
-    def _export_mesh_data(cls, mesh_export_path: str, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
-                          overwrite_ok=False) -> Tuple[str, str]:
+    def _write_meshes_to_disk(cls, mesh_path: str, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
+                              overwrite_ok=False) -> Tuple[str, str]:
         """
         Save the mesh files to disk.
 
-        :param mesh_export_path: The folder to save the meshes to.
+        :param mesh_path: The folder to save the meshes to.
         :param foreground_scene: The scene that contains the mesh data for the dynamic objects.
         :param background_scene: The scene that contains the mesh data for the static background.
         :param overwrite_ok: Whether it is okay to replace files in `mesh_export_path`.
 
         :return: A 2-tuple containing the full path to the foreground and background mesh.
         """
-        os.makedirs(mesh_export_path, exist_ok=overwrite_ok)
-        foreground_scene_path = cls._write_results(mesh_export_path, scene_name="fg", scene=foreground_scene)
-        background_scene_path = cls._write_results(mesh_export_path, scene_name="bg", scene=background_scene)
+        os.makedirs(mesh_path, exist_ok=overwrite_ok)
+        foreground_scene_path = cls._write_mesh_to_disk(mesh_path, scene_name="fg", scene=foreground_scene)
+        background_scene_path = cls._write_mesh_to_disk(mesh_path, scene_name="bg", scene=background_scene)
 
         return foreground_scene_path, background_scene_path
 
     @classmethod
-    def _write_results(cls, base_folder, scene_name, scene) -> str:
+    def _write_mesh_to_disk(cls, base_folder: str, scene_name: str, scene: trimesh.Scene) -> str:
         """
         Write a scene to disk.
 
@@ -776,12 +784,9 @@ class Pipeline:
         trimesh.exchange.export.export_scene(scene, output_path)
         logging.info(f"Wrote mesh data to {output_path}")
 
-        cls._compress_with_draco(output_path)
-
         return output_path
 
-    @classmethod
-    def _compress_with_draco(cls, path_to_glb: str):
+    def _compress_with_draco(self, path_to_glb: str):
         """
         Compress a glTF mesh (.glb, binary format) with draco compression to reduce the file size.
 
@@ -806,9 +811,17 @@ class Pipeline:
         compression_ratio = size_before / size_after
 
         shutil.move(tmp_path, src_path)
+
         logging.info(f"Compressed {src_path} with draco successfully "
                      f"({format_bytes(size_before)} before compression, {format_bytes(size_after)} after compression, "
                      f"{data_saving * 100:.2f}% data saving, {compression_ratio:.2f}:1 compression ratio).")
+
+        set_key_path(self.profiling, ['mesh_compression', src_path.stem], {
+            'uncompressed_file_size': size_before,
+            'compressed_file_size': size_after,
+            'data_saving': data_saving,
+            'compression_ratio': compression_ratio
+        })
 
     def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
             Tuple[trimesh.Scene, trimesh.Scene]:
@@ -986,6 +999,8 @@ class Pipeline:
         export_file(f"{fg_scene_name}.glb")
         export_file(f"{bg_scene_name}.glb")
 
+        logging.info(f"Exported mesh data to: {webxr_output_path}")
+
         return webxr_output_path
 
     def _print_summary(self, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene,
@@ -1020,18 +1035,73 @@ class Pipeline:
 
         fg_num_tris, num_fg_frames = count_tris(foreground_scene)
         bg_num_tris, num_bg_frames = count_tris(background_scene)
+        total_num_tris = fg_num_tris + bg_num_tris
         fg_num_tris_per_frame = fg_num_tris / num_fg_frames if num_fg_frames > 0 else 0
         bg_num_tris_per_frame = bg_num_tris / num_bg_frames
         num_tris_per_frame = fg_num_tris_per_frame + bg_num_tris_per_frame
 
         fg_file_size = os.path.getsize(foreground_scene_path)
         bg_file_size = os.path.getsize(background_scene_path)
-        fg_file_size_per_frame = fg_file_size / num_fg_frames if num_fg_frames > 0 else 0
-        bg_file_size_per_frame = bg_file_size / num_bg_frames
+        total_file_size = fg_file_size + bg_file_size
+
+        fg_file_size_per_frame = fg_file_size // num_fg_frames if num_fg_frames > 0 else 0
+        bg_file_size_per_frame = bg_file_size // num_bg_frames
         file_size_per_frame = fg_file_size_per_frame + bg_file_size_per_frame
 
         elapsed_time = datetime.timedelta(seconds=elapsed_time_seconds)
         elapsed_time_per_frame = datetime.timedelta(seconds=elapsed_time_seconds / self.num_frames)
+
+        self.profiling['frame_count'] = {
+            'total': self.num_frames,
+            'foreground': num_fg_frames,
+            'background': num_bg_frames
+        }
+
+        self.profiling['elapsed_time'] = {
+            'total': elapsed_time.total_seconds(),
+            'per_frame': elapsed_time_per_frame.total_seconds()
+        }
+
+        self.profiling['file_size'] = {
+            'total': total_file_size,
+            'per_frame': file_size_per_frame,
+            'foreground': {
+                'total': fg_file_size,
+                'per_frame': fg_file_size_per_frame
+            },
+            'background': {
+                'total': bg_file_size,
+                'per_frame': bg_file_size_per_frame
+            }
+        }
+
+        self.profiling['peak_vram_usage'] = {
+            'allocated': torch.cuda.max_memory_allocated(),
+            'reserved': torch.cuda.max_memory_reserved()
+        }
+
+        try:
+            # resource.getrusage(...).ru_maxrss is only available on Linux
+            # This value is in kilobytes, but the rest of the stats are in bytes, so we multiply by 1000 to get bytes.
+            self.profiling['peak_ram_usage'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1000
+        except OSError:
+            logging.error(''.join(traceback.format_exception(sys.exc_info())))
+            logging.error(
+                '`resource.getrusage(resource.RUSAGE_SELF).ru_maxrss` cannot be run on the current operation system.')
+            self.profiling['peak_ram_usage'] = 0
+
+        self.profiling['mesh_tri_count'] = {
+            'total': total_num_tris,
+            'per_frame': num_tris_per_frame,
+            'foreground': {
+                'total': fg_num_tris,
+                'per_frame': fg_num_tris_per_frame
+            },
+            'background': {
+                'total': bg_num_tris,
+                'per_frame': bg_num_tris_per_frame
+            }
+        }
 
         logging.info('#' + '=' * 78 + '#')
         logging.info('#' + ' ' * 36 + 'Summary' + ' ' * 35 + '#')
@@ -1039,11 +1109,11 @@ class Pipeline:
         logging.info(
             f"Processed {self.num_frames} frames ({num_fg_frames} fg, {num_bg_frames} bg) in {elapsed_time} ({elapsed_time_per_frame} per frame).")
         logging.info(
-            f"    Total mesh triangles: {fg_num_tris + bg_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
+            f"    Total mesh triangles: {total_num_tris:>9,d} ({num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Foreground mesh: {fg_num_tris:>9,d} ({fg_num_tris_per_frame:,.1f} per frame)")
         logging.info(f"        Background mesh: {bg_num_tris:>9,d} ({bg_num_tris_per_frame:,.1f} per frame)")
         logging.info(
-            f"    Total mesh size on disk: {format_bytes(fg_file_size + bg_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
+            f"    Total mesh size on disk: {format_bytes(total_file_size)} ({format_bytes(file_size_per_frame)} per frame)")
         logging.info(
             f"        Foreground Mesh: {format_bytes(fg_file_size)} ({format_bytes(fg_file_size_per_frame)} per frame)")
         logging.info(
@@ -1053,6 +1123,60 @@ class Pipeline:
             f"Peak GPU Memory Usage (Allocated): {format_bytes(torch.cuda.max_memory_allocated())} ({torch.cuda.max_memory_allocated():,d} Bytes)")
         logging.info(
             f"Peak GPU Memory Usage (Reserved): {format_bytes(torch.cuda.max_memory_reserved())} ({torch.cuda.max_memory_reserved():,d} Bytes)")
+
+    def _write_profiling_data(self, path: str):
+        profiling = self._calculate_profiling_statistics(self.profiling)
+
+        with open(path, 'w') as f:
+            json.dump(profiling, f)
+
+    def _calculate_profiling_statistics(self, profiling: dict):
+        key_paths = [
+            ['timing', 'foreground_reconstruction', 'binary_mask_creation'],
+            ['timing', 'foreground_reconstruction', 'per_object_mesh', 'total'],
+            ['timing', 'foreground_reconstruction', 'per_object_mesh', 'face_triangulation'],
+            ['timing', 'foreground_reconstruction', 'face_filtering'],
+            ['timing', 'foreground_reconstruction', 'mesh_decimation'],
+            ['timing', 'foreground_reconstruction', 'floater_removal'],
+            ['timing', 'foreground_reconstruction', 'texturing'],
+            ['timing', 'foreground_reconstruction', 'texture_atlas_packing'],
+            ['mesh_decimation', 'vertex_count', 'before'],
+            ['mesh_decimation', 'vertex_count', 'after'],
+            ['mesh_decimation', 'face_count', 'before'],
+            ['mesh_decimation', 'face_count', 'after']
+        ]
+
+        result = profiling.copy()
+
+        for key_path in key_paths:
+            try:
+                dict_entry = get_key_path(result, key_path)
+                count, total = self._traverse_dictionary(dict_entry)
+
+                set_key_path(result, key_path, {
+                    'count': count,
+                    'total': total,
+                    'mean': total / count if count > 0 else 0.0
+                })
+
+            except KeyError:
+                logging.warning(''.join(traceback.format_exception(sys.exc_info())))
+
+        return result
+
+    def _traverse_dictionary(self, dictionary: Union[dict, Any], count: int = 0, total: int = 0):
+        if isinstance(dictionary, (float, int)):
+            return 1, dictionary
+
+        if not isinstance(dictionary, dict):
+            return count, total
+
+        for key in dictionary:
+            sub_count, sub_total = self._traverse_dictionary(dictionary[key])
+            count += sub_count
+            total += sub_total
+
+        return count, total
 
 
 def main():

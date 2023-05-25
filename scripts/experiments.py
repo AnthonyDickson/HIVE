@@ -327,7 +327,7 @@ def main(output_path: str, data_path: str, overwrite_ok=False):
         # pipeline.run(dataset)
         #
         # export_path = pjoin(mesh_video_output_path, dataset_name, label, 'rgbd_mesh')
-        # shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+        # shutil.copytree(mesh_path, export_path, dirs_exist_ok=True)
 
         return dataset
 
