@@ -1,6 +1,7 @@
 """This module contains various utility functions that can't be stuffed into other modules."""
 
 import contextlib
+import datetime
 import enum
 import logging
 import sys
@@ -232,3 +233,129 @@ def format_bytes(bytes_count: int) -> str:
         bytes_count /= 1024.0
 
     return f"{bytes_count:3.1f} PiB"
+
+
+class Timer:
+    """Utility for timing operations. Can be used as a context manager."""
+
+    def __init__(self):
+        self._start_time = datetime.datetime.fromtimestamp(0)
+        self._stop_time = None
+
+    @property
+    def start_time(self) -> datetime.datetime:
+        """
+        :return: The `datetime` object when the timer was started. See `start()`.
+        """
+        return self._start_time
+
+    @property
+    def stop_time(self) -> datetime.datetime:
+        """
+        :return: The `datetime` object when the timer was stopped. See `stop()`.
+        """
+        return self._stop_time
+
+    @property
+    def elapsed(self) -> datetime.timedelta:
+        """
+        :return: The `timedelta` object indicating how much time elapsed. If the timer has been stopped, will return
+          the elapsed time between `start_time` and `end_time`, otherwise will return the elapsed time between
+          `start_time` and now.
+        """
+        if self._stop_time is not None:
+            return self._stop_time - self._start_time
+        else:
+            return datetime.datetime.now() - self._start_time
+
+    def start(self):
+        """Start the timer."""
+        self._start_time = datetime.datetime.now()
+        self._stop_time = None
+
+    def stop(self):
+        """Stop the timer."""
+        self._stop_time = datetime.datetime.now()
+
+    def __enter__(self):
+        self.start()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+
+def set_key_path(dictionary: dict, path: list, value: Any):
+    """
+    Set a value in a nested dictionary.
+
+    **Note:** This method modifies the input dictionary in-place.
+
+    >>> d = dict()
+    >>> path = ('foo', 'bar', 'baz')
+    >>> value = 42
+    >>> set_key_path(d, path, value)
+    >>> print(d)
+    {'foo': {'bar': {'baz': 42}}}
+
+    :param dictionary: A dictionary.
+    :param path: A list of dictionary keys.
+    :param value: The value to set the nested dictionary entry to.
+    """
+    dict_entry = dictionary
+
+    for key in path:
+        if key not in dict_entry:
+            dict_entry[key] = dict()
+
+        if key == path[-1]:
+            dict_entry[key] = value
+        else:
+            dict_entry = dict_entry[key]
+
+
+def get_key_path(dictionary: dict, path: list) -> Any:
+    """
+    Get a value from a nested dictionary.
+
+    **Note:** This method modifies the input dictionary in-place.
+
+    >>> d =  {'foo': {'bar': {'baz': 42}}}
+    >>> get_key_path(['foo', 'bar', 'baz'])
+    42
+
+    :param dictionary: A dictionary.
+    :param path: A list of dictionary keys.
+    :return: The value at the given path.
+    """
+    dict_entry = dictionary
+
+    for key in path:
+        if key == path[-1]:
+            return dict_entry[key]
+
+        dict_entry = dict_entry[key]
+
+
+@contextlib.contextmanager
+def timed_block(log_msg: Optional[str], profiling: Optional[dict], key_path: list):
+    """
+    Log a message, run a block of code, and write the runtime of the block to `self.profiling`.
+
+    :param profiling: A dictionary for recording runtime statistics.
+    :param log_msg: The optional message to log.
+    :param key_path: The dictionary path(s) to write the runtime to, e.g. ['my_app', 'total_runtime'].
+        Any nested dictionaries or keys that do not exist will be created automatically.
+    """
+    if log_msg:
+        logging.info(log_msg)
+
+    timer = Timer()
+    timer.start()
+
+    try:
+        yield timer
+    finally:
+        if profiling is None:
+            return
+
+        set_key_path(profiling, key_path, timer.elapsed.total_seconds())

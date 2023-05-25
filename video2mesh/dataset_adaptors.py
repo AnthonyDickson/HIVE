@@ -34,7 +34,7 @@ from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor,
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
 from video2mesh.types import Size, File
-from video2mesh.utils import tqdm_imap
+from video2mesh.utils import tqdm_imap, timed_block
 
 
 # TODO: Make depth estimation customisable via cli (e.g. max depth)
@@ -158,7 +158,8 @@ class DatasetAdaptor(Dataset, ABC):
 
         tqdm_imap(copy_image, range(self.num_frames))
 
-    def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, no_cache=False) -> VTMDataset:
+    def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, no_cache=False,
+                profiling: Optional[dict]=None) -> VTMDataset:
         """
         Convert a dataset into the standard format.
 
@@ -167,6 +168,8 @@ class DatasetAdaptor(Dataset, ABC):
         :param inpainting_mode: Which type of image+depth inpainting to use.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param no_cache: Whether cached datasets/results should be ignored.
+        :param profiling: A dictionary for recording runtime statistics.
+
         :return: The converted dataset.
         """
         if no_cache and os.path.exists(self.output_path):
@@ -184,42 +187,50 @@ class DatasetAdaptor(Dataset, ABC):
 
         output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders()
 
-        logging.info(f"Creating metadata for dataset.")
-        metadata = self.get_metadata(estimate_pose, estimate_depth)
-        metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
-        metadata.save(metadata_path)
+        with timed_block(log_msg="Creating metadata for dataset.", profiling=profiling,
+                         key_path=['timing', 'load_dataset', 'create_metadata']):
+            metadata = self.get_metadata(estimate_pose, estimate_depth)
+            metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
+            metadata.save(metadata_path)
 
-        logging.info(f"Copying RGB frames.")
-        self.copy_frames(output_image_folder)
+        with timed_block(log_msg="Copying RGB frames.", profiling=profiling,
+                         key_path=['timing', 'load_dataset', 'copy_frames']):
+            self.copy_frames(output_image_folder)
 
-        create_masks(DataLoader(ImageFolderDataset(output_image_folder), batch_size=8), mask_folder=output_mask_folder)
+        with timed_block(log_msg=None, profiling=profiling,
+                         key_path=['timing', 'load_dataset', 'create_instance_segmentation_masks']):
+            create_masks(DataLoader(ImageFolderDataset(output_image_folder), batch_size=8), mask_folder=output_mask_folder)
 
-        if estimate_depth:
-            logging.info(f"Creating depth maps.")
-            estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
-        else:
-            logging.info(f"Copying depth maps.")
-            self.copy_depth_maps(output_depth_folder)
+        with timed_block(log_msg=None, profiling=profiling, key_path=['timing', 'load_dataset', 'get_depth_maps']):
+            if estimate_depth:
+                logging.info(f"Creating depth maps.")
+                estimate_depth_dpt(ImageFolderDataset(output_image_folder), output_depth_folder)
+            else:
+                logging.info(f"Copying depth maps.")
+                self.copy_depth_maps(output_depth_folder)
 
-        if estimate_pose:
-            debug_folder = pjoin(self.output_path, 'debug')
-            camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
-                                                                                metadata)
-        else:
-            camera_matrix = self.get_camera_matrix()
-            camera_trajectory = self.get_camera_trajectory()
+        with timed_block(log_msg=None, profiling=profiling,
+                         key_path=['timing', 'load_dataset', 'get_camera_parameters']):
+            if estimate_pose:
+                debug_folder = pjoin(self.output_path, 'debug')
+                camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
+                                                                                    metadata)
+            else:
+                camera_matrix = self.get_camera_matrix()
+                camera_trajectory = self.get_camera_trajectory()
 
-        self._inpaint_frame_data(mode=inpainting_mode)
+            logging.info(f"Creating camera matrix file.")
+            camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
+            # noinspection PyTypeChecker
+            np.savetxt(camera_matrix_path, camera_matrix)
 
-        logging.info(f"Creating camera matrix file.")
-        camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
-        # noinspection PyTypeChecker
-        np.savetxt(camera_matrix_path, camera_matrix)
+            logging.info(f"Creating camera trajectory file.")
+            camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
+            # noinspection PyTypeChecker
+            camera_trajectory.save(camera_trajectory_path)
 
-        logging.info(f"Creating camera trajectory file.")
-        camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
-        # noinspection PyTypeChecker
-        camera_trajectory.save(camera_trajectory_path)
+        with timed_block(log_msg=None, profiling=profiling, key_path=['timing', 'load_dataset', 'inpainting']):
+            self._inpaint_frame_data(mode=inpainting_mode)
 
         logging.info(f"Created new dataset at {self.output_path}.")
 
@@ -1416,8 +1427,8 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
 
 def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
-                resize_to: Union[int, Size] = 640,
-                depth_confidence_filter_level=0) -> VTMDataset:
+                resize_to: Union[int, Size] = 640, depth_confidence_filter_level=0,
+                profiling: Optional[dict]=None) -> VTMDataset:
     """
     Get a VTM formatted dataset or create one from another dataset format.
 
@@ -1430,6 +1441,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
     :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth value
      to be kept. E.g. if set to 1, all pixels in the depth map where the corresponding pixel in the confidence map is
      less than 1 will be ignored.
+    :param profiling: A dictionary for recording runtime statistics.
+
     :return: the VTM formatted dataset.
     """
     dataset_path = storage_options.dataset_path
@@ -1470,6 +1483,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
         dataset = dataset_converter.convert(estimate_pose=pipeline_options.estimate_pose,
                                             estimate_depth=pipeline_options.estimate_depth,
                                             inpainting_mode=pipeline_options.inpainting_mode,
-                                            no_cache=storage_options.no_cache)
+                                            no_cache=storage_options.no_cache,
+                                            profiling=profiling)
 
     return dataset
