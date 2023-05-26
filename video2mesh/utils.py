@@ -303,14 +303,13 @@ def set_key_path(dictionary: dict, path: list, value: Any):
     """
     dict_entry = dictionary
 
-    for key in path:
+    for key in path[:-1]:
         if key not in dict_entry:
             dict_entry[key] = dict()
 
-        if key == path[-1]:
-            dict_entry[key] = value
-        else:
-            dict_entry = dict_entry[key]
+        dict_entry = dict_entry[key]
+
+    dict_entry[path[-1]] = value
 
 
 def get_key_path(dictionary: dict, path: list) -> Any:
@@ -329,11 +328,13 @@ def get_key_path(dictionary: dict, path: list) -> Any:
     """
     dict_entry = dictionary
 
-    for key in path:
-        if key == path[-1]:
-            return dict_entry[key]
+    for key in path[:-1]:
+        if key not in dict_entry:
+            dict_entry[key] = dict()
 
         dict_entry = dict_entry[key]
+
+    return dict_entry[path[-1]]
 
 
 @contextlib.contextmanager
