@@ -126,19 +126,20 @@ class DatasetAdaptor(Dataset, ABC):
         """
         raise NotImplementedError
 
-    def copy_frames(self, output_path: str, num_frames=-1):
+    def copy_frames(self, output_path: str, num_frames=-1, file_extension='png'):
         """
         Copy frames to the specified folder.
         This may be faster than calling `.get_frame(i)` followed by writing the frame to the destination folder.
 
         :param output_path: The folder to save the frames to.
         :param num_frames: How many frames to copy. If set to -1, copy all frames.
+        :param file_extension: (optional) The type to save the extracted frames as, e.g., 'png' or 'jpg'.
         """
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
         def copy_image(index: int):
             image = self.get_frame(index)
-            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index))
+            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index, file_extension=file_extension))
             imageio.v3.imwrite(output_image_path, image)
 
         tqdm_imap(copy_image, range(num_frames))
@@ -153,7 +154,7 @@ class DatasetAdaptor(Dataset, ABC):
 
         def copy_image(index: int):
             image = self.get_depth_map(index)
-            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index))
+            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index, file_extension='png'))
             imageio.v3.imwrite(output_image_path, image)
 
         tqdm_imap(copy_image, range(self.num_frames))
@@ -180,8 +181,6 @@ class DatasetAdaptor(Dataset, ABC):
 
             return cached_dataset
 
-        # TODO: Save RGB and mask frames as jpg to save disk space.
-
         logging.info(f"Converting input dataset at {self.base_path} and "
                      f"writing converted dataset to {self.output_path}.")
 
@@ -195,7 +194,7 @@ class DatasetAdaptor(Dataset, ABC):
 
         with timed_block(log_msg="Copying RGB frames.", profiling=profiling,
                          key_path=['timing', 'load_dataset', 'copy_frames']):
-            self.copy_frames(output_image_folder)
+            self.copy_frames(output_image_folder, file_extension='jpg')
 
         with timed_block(log_msg=None, profiling=profiling,
                          key_path=['timing', 'load_dataset', 'create_instance_segmentation_masks']):
@@ -214,7 +213,7 @@ class DatasetAdaptor(Dataset, ABC):
             if estimate_pose:
                 debug_folder = pjoin(self.output_path, 'debug')
                 camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
-                                                                                    metadata)
+                                                                                    metadata, file_extension='jpg')
             else:
                 camera_matrix = self.get_camera_matrix()
                 camera_trajectory = self.get_camera_trajectory()
@@ -306,7 +305,8 @@ class DatasetAdaptor(Dataset, ABC):
 
         return frames, frames_subset
 
-    def _estimate_camera_parameters(self, output_folder: str, output_depth_folder: str, metadata: DatasetMetadata) -> \
+    def _estimate_camera_parameters(self, output_folder: str, output_depth_folder: str, metadata: DatasetMetadata,
+                                    file_extension='png') -> \
             Tuple[np.ndarray, Trajectory]:
         """
         Estimate the camera parameters (intrinsics and extrinsics) with COLMAP.
@@ -315,6 +315,7 @@ class DatasetAdaptor(Dataset, ABC):
         :param output_depth_folder: Where the estimated depth maps have been saved to.
         :param metadata: The metadata for the dataset.
         :return: The 3x3 camera matrix and the Nx7 camera poses.
+        :param file_extension: (optional) The type to save the extracted frames as, e.g., '.png' or '.jpg'.
         """
         colmap_log_file = pjoin(output_folder, 'colmap_logs.txt')
 
@@ -329,15 +330,15 @@ class DatasetAdaptor(Dataset, ABC):
 
         logging.info("Copying RGB frames for COLMAP...")
 
-        self.copy_frames(colmap_rgb_path, self.get_full_num_frames())
+        self.copy_frames(colmap_rgb_path, self.get_full_num_frames(), file_extension=file_extension)
 
         if self.frame_step > 1:
             for index in set(frames).difference(frames_subset):
-                os.remove(pjoin(colmap_rgb_path, VTMDataset.index_to_filename(index)))
+                os.remove(pjoin(colmap_rgb_path, VTMDataset.index_to_filename(index, file_extension=file_extension)))
 
             for dst_index, src_index in enumerate(frames_subset):
-                src_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(src_index))
-                dst_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(dst_index))
+                src_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(src_index, file_extension=file_extension))
+                dst_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(dst_index, file_extension=file_extension))
 
                 shutil.move(src_path, dst_path)
 
@@ -757,16 +758,6 @@ class TUMAdaptor(DatasetAdaptor):
 
         return depth_map
 
-    def copy_frames(self, output_path: str, num_frames=-1):
-        num_frames = self.num_frames if num_frames == -1 else num_frames
-
-        def copy_image(index: int):
-            image_path = self.get_frame_path(index)
-            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index))
-            shutil.copy(image_path, output_image_path)
-
-        tqdm_imap(copy_image, range(num_frames))
-
 
 class UnrealAdaptor(DatasetAdaptor):
     """
@@ -970,16 +961,17 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         else:
             raise RuntimeError(f"Could not read frame {index} (zero-based index) from the video {self.video_path}.")
 
-    def copy_frames(self, output_path: str, num_frames=-1):
+    def copy_frames(self, output_path: str, num_frames=-1, file_extension='png'):
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
         self.extract_video(self.video_path, output_path, num_frames,
-                           target_resolution=(self.target_height, self.target_width))
+                           target_resolution=(self.target_height, self.target_width),
+                           file_extension=file_extension)
 
     @staticmethod
     def extract_video(path_to_video: str, output_path: str, num_frames: int = -1,
                       target_resolution: Optional[Tuple[int, int]] = None,
-                      rotation: Optional[int] = None):
+                      rotation: Optional[int] = None, file_extension='png'):
         """
         Extract the frames from a video file.
 
@@ -988,6 +980,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         :param num_frames: The maximum number of frames to extract. If set to -1, all frames are extracted.
         :param target_resolution: (optional) The resolution (height, width) to resize frames to.
         :param rotation: (optional) The rotation to apply to the video frames (see `cv2.ROTATE_*`).
+        :param file_extension: (optional) The type to save the extracted frames as, e.g., '.png' or '.jpg'.
         """
         ffmpeg_command = ['ffmpeg', '-i', path_to_video]
 
@@ -1011,7 +1004,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
                              f"[cv2.ROTATE_90_COUNTERCLOCKWISE ({cv2.ROTATE_90_COUNTERCLOCKWISE})], "
                              f"but got {rotation} instead.")
 
-        ffmpeg_command += ['-start_number', str(0), pjoin(output_path, '%06d.png')]
+        ffmpeg_command += ['-start_number', str(0), pjoin(output_path, f'%06d.{file_extension}')]
 
         process = subprocess.Popen(ffmpeg_command)
 
@@ -1290,12 +1283,13 @@ class StrayScannerAdaptor(VideoAdaptorBase):
     def get_pose(self, index: int) -> np.ndarray:
         return self.camera_trajectory[index]
 
-    def copy_frames(self, output_path: str, num_frames=-1):
+    def copy_frames(self, output_path: str, num_frames=-1, file_extension='png'):
         num_frames = self.num_frames if num_frames == -1 else num_frames
 
         self.extract_video(self.video_path, output_path, num_frames,
                            target_resolution=(self.target_height, self.target_width),
-                           rotation=DeviceOrientation.to_opencv_rotation(self.device_orientation))
+                           rotation=DeviceOrientation.to_opencv_rotation(self.device_orientation),
+                           file_extension=file_extension)
 
     def get_depth_map(self, index: int) -> np.ndarray:
         filename = VTMDataset.index_to_filename(index, file_extension='png')
