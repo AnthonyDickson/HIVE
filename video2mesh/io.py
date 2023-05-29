@@ -26,7 +26,7 @@ from tqdm import tqdm
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
 from third_party.colmap.scripts.python.read_write_model import read_model
-from video2mesh.geometric import Trajectory
+from video2mesh.geometric import Trajectory, get_pose_components, world2image
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
 from video2mesh.types import File
@@ -410,41 +410,37 @@ class COLMAPProcessor:
         :return: The NxHxW tensor containing the HxW depth maps.
         """
         cameras, images, points3d = self._load_model()
-
-        K = np.eye(4)
-        K[:3, :3] = camera_matrix.copy()
+        K = camera_matrix.copy()
+        camera_poses_homogeneous = camera_poses.to_homogenous_transforms()
 
         first_image_id = next(iter(images))
         first_image = images[first_image_id]
-
         source_image_shape = cv2.imread(pjoin(self.image_path, first_image.name)).shape[:2]
+
         depth_maps = np.zeros((len(camera_poses), *source_image_shape), dtype=np.float32)
 
-        sorted_images = sorted(images.values(), key=lambda image: image.name)
-
-        camera_poses_homogeneous = camera_poses.to_homogenous_transforms()
-
-        for image_data in tqdm(sorted_images):
-            num_points = len(image_data.xys)
-            points = np.zeros((num_points, 4))
-            has_3d_points = np.zeros(num_points, dtype=bool)
-
-            for i, point3d_id in enumerate(image_data.point3D_ids):
-                if point3d_id == -1:
-                    continue
-
-                points[i] = [*points3d[point3d_id].xyz, 1.0]
-                has_3d_points[i] = True
+        for image_data in tqdm(images.values()):
+            points = [points3d[point3d_id].xyz for point3d_id in image_data.point3D_ids if point3d_id != -1]
+            points = np.asarray(points)
 
             index = self._get_index_from_image(image_data)
             pose = camera_poses_homogeneous[index]
+            R, t = get_pose_components(pose)
+            projected_points, depth = world2image(points, K, R, t)
 
-            projected_points = (K @ pose @ points.T).T
-            projected_points = projected_points[has_3d_points, :3]
-            depth = projected_points[:, 2]
-            u, v = np.round(image_data.xys[has_3d_points]).astype(int).T
+            valid_points = (projected_points[:, 0] > 0) & (projected_points[:, 0] < source_image_shape[1]) &\
+                (projected_points[:, 1] > 0) & (projected_points[:, 1] < source_image_shape[0])
 
-            depth_maps[index, v, u] = depth
+            if valid_points.sum() < 1:
+                logging.debug(f"COLMAP image data for frame {image_data.name} has no valid points, skipping...")
+                continue
+
+            valid_projected_points = projected_points[valid_points]
+            valid_depth = depth[valid_points]
+
+            u, v = valid_projected_points.T
+
+            depth_maps[index, v, u] = valid_depth
 
         return depth_maps
 
