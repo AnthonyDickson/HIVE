@@ -197,7 +197,7 @@ class Pipeline:
             with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'foreground']):
                 self._compress_with_draco(foreground_scene_path)
 
-            with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'foreground']):
+            with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'background']):
                 self._compress_with_draco(background_scene_path)
 
         with self.timed_block(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...",
