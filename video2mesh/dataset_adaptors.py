@@ -452,11 +452,13 @@ class DatasetAdaptor(Dataset, ABC):
         depth_path = pjoin(self.output_path, VTMDataset.depth_folder)
         mask_path = pjoin(self.output_path, VTMDataset.mask_folder)
 
+        rgb_filenames = sorted(os.listdir(rgb_path))
+        depth_filenames = sorted(os.listdir(depth_path))
+        mask_filenames = sorted(os.listdir(mask_path))
+
         inpainted_rgb_path = create_folder(self.output_path, VTMDataset.inpainted_rgb_folder)
         inpainted_depth_path = create_folder(self.output_path, VTMDataset.inpainted_depth_folder)
         inpainted_mask_path = create_folder(self.output_path, VTMDataset.inpainted_mask_folder)
-
-        filenames = os.listdir(rgb_path)
 
         lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
 
@@ -502,30 +504,34 @@ class DatasetAdaptor(Dataset, ABC):
             cv2.imwrite(pjoin(inpainted_mask_path, filename), black_mask)
 
         logging.info(f'Create mask for inpainting and depth map')
-        tqdm_imap(create_mask, filenames)
+        tqdm_imap(create_mask, mask_filenames)
 
         if InpaintingMode.CV2_Image in mode:
             logging.info(f'Create inpainted RGB frames using cv2.inpaint')
-            tqdm_imap(inpaint_rgb_with_cv2, filenames)
+            tqdm_imap(inpaint_rgb_with_cv2, rgb_filenames)
         elif InpaintingMode.Lama_Image in mode:
             logging.info(f'Create inpainted RGB frames using LaMa')
             lama_predict(imageDir=rgb_path, maskDir=inpainted_mask_path, outdir=inpainted_rgb_path,
                          model_path=lama_weights_path)
+        else:
+            raise RuntimeError(f"The inpainting mode must either be {InpaintingMode.Off} or specify an image inpainting method.")
 
         if InpaintingMode.CV2_Depth in mode:
             logging.info(f'Create inpainted depth using cv2.inpaint')
-            tqdm_imap(inpaint_depth_with_cv2, filenames)
+            tqdm_imap(inpaint_depth_with_cv2, depth_filenames)
         elif InpaintingMode.Lama_Depth in mode:
             logging.info(f'Prepare data for depth inpainting with LaMa')
-            tqdm_imap(prepare_depth_for_lama, filenames)
+            tqdm_imap(prepare_depth_for_lama, depth_filenames)
             logging.info(f'Create inpainted depth using LaMa')
             lama_predict(imageDir=inpainted_depth_path, maskDir=inpainted_mask_path, outdir=inpainted_depth_path,
                          model_path=lama_weights_path, depth=True)
             logging.info(f'Refactor depth data after LaMa inpainting')
-            tqdm_imap(refactor_depth_after_lama, filenames)
+            tqdm_imap(refactor_depth_after_lama, depth_filenames)
+        else:
+            raise RuntimeError(f"The inpainting mode must either be {InpaintingMode.Off} or specify an depth inpainting method.")
 
         logging.info(f'Create black mask for background generation')
-        tqdm_imap(create_black_mask, filenames)
+        tqdm_imap(create_black_mask, mask_filenames)
 
 
 class TUMAdaptor(DatasetAdaptor):
