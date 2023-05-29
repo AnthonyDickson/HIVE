@@ -8,7 +8,7 @@ import struct
 import subprocess
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Union, Tuple, Optional, Callable, IO
+from typing import Union, Tuple, Optional, Callable, IO, List
 
 import cv2
 import imageio
@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchData
 from tqdm import tqdm
 
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
+from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
 from third_party.colmap.scripts.python.read_write_model import read_model
 from video2mesh.geometric import Trajectory
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
@@ -311,7 +312,7 @@ class COLMAPProcessor:
             raise RuntimeError(
                 f"COLMAP reconstructed {num_models} models when 1 was expected meaning that the camera trajectory could not be estimated for the entire video."
                 f"This may be due to COLMAP using a bad random initial guess of the camera parameters and sometimes can be fixed by running the program again. "
-                f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal."
+                f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal. "
                 f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
 
         logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
@@ -338,7 +339,7 @@ class COLMAPProcessor:
         intrinsic[1, 2] = cy
         logging.info("Read intrinsic parameters.")
 
-        extrinsic = []
+        extrinsic = dict()
 
         if raw_pose:
             for image in images.values():
@@ -349,7 +350,7 @@ class COLMAPProcessor:
                 r = Rotation.from_matrix(image.qvec2rotmat()).as_quat()
                 t = image.tvec
 
-                extrinsic.append(np.hstack((r, t)))
+                extrinsic[self._get_index_from_image(image)] = np.hstack((r, t))
         else:
             # Code adapted from https://github.com/facebookresearch/consistent_depth
             # According to some comments in the above code, "Note that colmap uses a different coordinate system
@@ -368,14 +369,37 @@ class COLMAPProcessor:
 
                 r = Rotation.from_matrix(R).as_quat()
 
-                extrinsic.append(np.hstack((r, t)))
+                extrinsic[self._get_index_from_image(image)] = np.hstack((r, t))
 
-        extrinsic = np.asarray(extrinsic).squeeze()
-        extrinsic = Trajectory(extrinsic)
+        frame_count = self._get_frame_count()
+        pose_count = len(extrinsic)
+
+        if pose_count < frame_count:
+            logging.info(f"COLMAP only estimated pose data for {pose_count} frames out of {frame_count}, "
+                         f"interpolating missing pose data...")
+            extrinsic = Trajectory.create_by_interpolating(extrinsic, frame_count=frame_count)
+        else:
+            extrinsic = np.asarray([extrinsic[index] for index in sorted(extrinsic.keys())])
+            extrinsic = Trajectory(extrinsic)
 
         logging.info(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
+
+    def _get_frame_count(self) -> int:
+        files = sorted(os.listdir(self.image_path))
+
+        indices = [self._get_index_from_filename(filename) for filename in files]
+
+        return max(indices) + 1
+
+    def _get_index_from_filename(self, filename: str) -> int:
+        filename_without_extension = filename.split('.')[0]
+
+        return int(filename_without_extension)
+
+    def _get_index_from_image(self, image: COLMAPImage) -> int:
+        return self._get_index_from_filename(filename=image.name)
 
     def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: Trajectory) -> np.ndarray:
         """
@@ -394,38 +418,14 @@ class COLMAPProcessor:
         first_image = images[first_image_id]
 
         source_image_shape = cv2.imread(pjoin(self.image_path, first_image.name)).shape[:2]
-        depth_maps = np.zeros((len(images), *source_image_shape), dtype=np.float32)
+        depth_maps = np.zeros((len(camera_poses), *source_image_shape), dtype=np.float32)
 
-        indices = sorted(images)
-
-        if len(indices) < len(camera_poses):
-            logging.warning(f"COLMAP `images` has fewer indices ({len(indices)} than "
-                            f"there are frames in the camera trajectory ({len(camera_poses)}).")
-
-        if min(indices) > 1:
-            logging.warning(f"COLMAP indices in `images` does not start at 1 (starts at {min(indices)}).")
-
-        if max(indices) < len(camera_poses):
-            logging.warning(f"COLMAP indices in `images` do not include final frame.")
-
-        if max(indices) > len(camera_poses):
-            logging.warning(f"COLMAP indices in `images` include frame index greater than the number of camera poses.")
+        sorted_images = sorted(images.values(), key=lambda image: image.name)
 
         camera_poses_homogeneous = camera_poses.to_homogenous_transforms()
 
-        for index in tqdm(indices):
-            image_data = images[index]
-            # `image_data.name` contains the filename, which in this case is in the format '%06d.png' (e.g. 000001.png).
-            # We can extract the zero-based index of the current frame from the filename.
-            # Note that `index` is not necessarily frame index + 1, so we cannot just take `index - 1`.
-            filename, _ = image_data.name.split('.')
-            index_zero_based = int(filename)
-
-            if index_zero_based > len(camera_poses):
-                continue
-
+        for image_data in tqdm(sorted_images):
             num_points = len(image_data.xys)
-
             points = np.zeros((num_points, 4))
             has_3d_points = np.zeros(num_points, dtype=bool)
 
@@ -436,14 +436,15 @@ class COLMAPProcessor:
                 points[i] = [*points3d[point3d_id].xyz, 1.0]
                 has_3d_points[i] = True
 
-            pose = camera_poses_homogeneous[index_zero_based]
+            index = self._get_index_from_image(image_data)
+            pose = camera_poses_homogeneous[index]
 
             projected_points = (K @ pose @ points.T).T
             projected_points = projected_points[has_3d_points, :3]
             depth = projected_points[:, 2]
             u, v = np.round(image_data.xys[has_3d_points]).astype(int).T
 
-            depth_maps[index_zero_based, v, u] = depth
+            depth_maps[index, v, u] = depth
 
         return depth_maps
 

@@ -326,11 +326,11 @@ class DatasetAdaptor(Dataset, ABC):
         colmap_rgb_path = create_folder(colmap_folder, 'rgb')
         colmap_workspace_path = create_folder(colmap_folder, 'workspace')
 
-        frames, frames_subset = self._get_frame_subset(self.get_full_num_frames(), self.frame_step)
+        frames, frames_subset = self._get_frame_subset(self.num_frames, self.frame_step)
 
         logging.info("Copying RGB frames for COLMAP...")
 
-        self.copy_frames(colmap_rgb_path, self.get_full_num_frames(), file_extension=file_extension)
+        self.copy_frames(colmap_rgb_path, self.num_frames, file_extension=file_extension)
 
         if self.frame_step > 1:
             for index in set(frames).difference(frames_subset):
@@ -356,7 +356,8 @@ class DatasetAdaptor(Dataset, ABC):
                                                                                    metadata, frames_subset)
 
         if self.frame_step > 1:
-            camera_poses_scaled = self._interpolate_poses(camera_poses_scaled, keyframes=frames_subset)
+            pose_mapping = {original_frame_index: pose for original_frame_index, pose in zip(frames_subset, camera_poses_scaled)}
+            camera_poses_scaled = Trajectory.create_by_interpolating(pose_mapping, frame_count=self.num_frames)
 
         camera_poses_scaled = Trajectory(camera_poses_scaled[:self.num_frames])
 
@@ -383,6 +384,7 @@ class DatasetAdaptor(Dataset, ABC):
         camera_matrix, camera_poses = colmap_processor.load_camera_params(raw_pose=True)
 
         if colmap_processor.colmap_options.dense:
+            # TODO: Make sure that COLMAP dense depth always returns the correct number of depth maps (same as camera_poses).
             colmap_depth = colmap_processor.get_dense_depth_maps(resize_to=(metadata.height, metadata.width))
         else:
             colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
@@ -398,10 +400,6 @@ class DatasetAdaptor(Dataset, ABC):
         depth_frame_subset = list(filter(lambda index: index < len(depth_dataset), frames_subset))
         est_depth = np.asarray(tqdm_imap(depth_dataset.__getitem__, depth_frame_subset))
 
-        num_frames = min(len(colmap_depth), len(est_depth))
-
-        colmap_depth = colmap_depth[:num_frames]
-        est_depth = est_depth[:num_frames]
         nonzero_mask = (colmap_depth > 0.) & (est_depth > 0.)
 
         # Find scale which when applied to the colmap poses, minimises the loss function below.
@@ -438,40 +436,6 @@ class DatasetAdaptor(Dataset, ABC):
             tqdm_imap(save_depth, list(zip(frames_subset, colmap_depth_scaled)))
 
         return camera_matrix, camera_poses_scaled
-
-    @staticmethod
-    def _interpolate_poses(poses: Trajectory, keyframes: List[int]) -> Trajectory:
-        """
-        Interpolate the pose for frames with missing data (when `frame_step` > 1).
-
-        :param poses: The poses estimated by COLMAP over a subset of frames.
-        :param keyframes: The indices of the frames COLMAP was run over.
-        :return: The interpolated Nx7 camera poses.
-        """
-        src_num_frames = len(poses)
-        dst_num_frames = max(keyframes) + 1
-
-        interpolated_poses = np.zeros((dst_num_frames, poses.shape[1]))
-
-        src_indices = zip(range(src_num_frames - 1), range(1, src_num_frames))
-        dst_indices = zip(keyframes[:-1], keyframes[1:])
-
-        for (src_start, src_end), (dst_start, dst_end) in zip(src_indices, dst_indices):
-            start_rotation = poses[src_start, :4]
-            end_rotation = poses[src_end, :4]
-            start_position = poses[src_start, 4:]
-            end_position = poses[src_end, 4:]
-
-            key_frame_times = [0, 1]
-            times_to_interpolate = np.linspace(0, 1, num=(dst_end + 1) - dst_start)
-
-            slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
-            lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
-
-            interpolated_poses[dst_start:dst_end + 1, 4:] = lerp(times_to_interpolate)
-            interpolated_poses[dst_start:dst_end + 1, :4] = slerp(times_to_interpolate).as_quat()
-
-        return Trajectory(interpolated_poses)
 
     def _inpaint_frame_data(self, mode: InpaintingMode):
         """

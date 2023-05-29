@@ -2,12 +2,13 @@
 This module contains functions and classes used for manipulating camera trajectories, projecting points between
 2D image and 3D world coordinates, and creating point clouds.
 """
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
-from scipy.spatial.transform import Rotation
+from scipy.interpolate import interp1d
+from scipy.spatial.transform import Rotation, Slerp
 
 from video2mesh.types import File
 from video2mesh.utils import validate_shape, validate_camera_parameter_shapes
@@ -570,3 +571,44 @@ class Trajectory:
         values = np.hstack((r, t))
 
         return Trajectory(values)
+
+    @staticmethod
+    def create_by_interpolating(poses: Dict[int, np.ndarray], frame_count: int) -> 'Trajectory':
+        """
+        Create a new `Trajectory` object by interpolating some pose data.
+
+        Interpolate the pose for frames with missing data (when `frame_step` > 1).
+
+        :param poses: A mapping between the input frame index and a pose vector.
+        :param frame_count: The total frames in the sequence.
+        :return: The interpolated Nx7 camera poses.
+        """
+        if 0 not in poses:
+            raise RuntimeError("Cannot interpolate trajectory where the pose for the first frame is missing.")
+
+        if frame_count - 1 not in poses:
+            raise RuntimeError("Cannot interpolate trajectory where the pose for the last frame is missing.")
+
+        frames_with_pose = sorted(poses.keys())
+        start_and_end_indices = zip(frames_with_pose[:-1], frames_with_pose[1:])
+
+        interpolated_poses = np.zeros((frame_count, 7))
+
+        for (start_index, end_index) in start_and_end_indices:
+            start_rotation = poses[start_index][:4]
+            end_rotation = poses[end_index][:4]
+
+            start_position = poses[start_index][4:]
+            end_position = poses[end_index][4:]
+
+            key_frame_times = [0, 1]
+            num_frames_to_interpolate = (end_index + 1) - start_index
+            times_to_interpolate = np.linspace(0, 1, num=num_frames_to_interpolate)
+
+            slerp = Slerp(times=key_frame_times, rotations=Rotation.from_quat([start_rotation, end_rotation]))
+            lerp = interp1d(key_frame_times, [start_position, end_position], axis=0)
+
+            interpolated_poses[start_index:end_index + 1, 4:] = lerp(times_to_interpolate)
+            interpolated_poses[start_index:end_index + 1, :4] = slerp(times_to_interpolate).as_quat()
+
+        return Trajectory(interpolated_poses)
