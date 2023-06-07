@@ -1,6 +1,6 @@
 import argparse
 import enum
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import cv2
 
@@ -276,13 +276,32 @@ class MeshReconstructionMethod(enum.Enum):
     @classmethod
     def get_choices(cls):
         return {
-            'tsdf_fusion': cls.TSDFFusion,
-            'tsdf_fusion_chunks': cls.TSDFFusionChunks,
-            'bundle_fusion': cls.BundleFusion,
-            'static_rgbd': cls.StaticRGBD,
-            'rgbd': cls.RGBD,
-            'keyframe_rgbd': cls.KeyframeRGBD
+            cls.TSDFFusion.get_cli_name(): cls.TSDFFusion,
+            cls.TSDFFusionChunks.get_cli_name(): cls.TSDFFusionChunks,
+            cls.BundleFusion.get_cli_name(): cls.BundleFusion,
+            cls.StaticRGBD.get_cli_name(): cls.StaticRGBD,
+            cls.RGBD.get_cli_name(): cls.RGBD,
+            cls.KeyframeRGBD.get_cli_name(): cls.KeyframeRGBD
         }
+
+    @classmethod
+    def get_cli_names(cls) -> Dict['MeshReconstructionMethod', str]:
+        return {
+            cls.TSDFFusion: 'tsdf_fusion',
+            cls.TSDFFusionChunks: 'tsdf_fusion_chunks',
+            cls.BundleFusion: 'bundle_fusion',
+            cls.StaticRGBD: 'static_rgbd',
+            cls.RGBD: 'rgbd',
+            cls.KeyframeRGBD: 'keyframe_rgbd',
+        }
+
+    def get_cli_name(self) -> str:
+        cli_names = self.get_cli_names()
+
+        if self not in cli_names:
+            raise NotImplementedError(f"The mesh reconstruction method '{self.name}' does not have a CLI name.")
+
+        return cli_names[self]
 
     @classmethod
     def from_string(cls, name):
@@ -334,7 +353,7 @@ class BackgroundMeshOptions(Options):
         group = parser.add_argument_group('Static Mesh Options')
         group.add_argument('--mesh_reconstruction_method', type=str,
                            help="The method to use for reconstructing the static mesh.",
-                           choices=[method.name.lower() for method in
+                           choices=[method.get_cli_name() for method in
                                     BackgroundMeshOptions.supported_reconstruction_methods],
                            default='tsdf_fusion')
         group.add_argument('--depth_mask_dilation_iterations', type=int,
