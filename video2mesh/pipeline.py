@@ -1160,7 +1160,7 @@ class Pipeline:
                 })
 
             except KeyError:
-                logging.warning(''.join(traceback.format_exception(sys.exc_info())))
+                logging.warning(traceback.format_exc())
 
         return result
 
