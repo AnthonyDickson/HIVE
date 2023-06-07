@@ -63,7 +63,7 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
     voxel_count = np.ceil(np.product((vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_voxel_size))
 
     if options.sdf_max_voxels and voxel_count > options.sdf_max_voxels:
-            voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_max_voxels) ** (1 / 3)
+        voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_max_voxels) ** (1 / 3)
     else:
         voxel_size = options.sdf_voxel_size
 
@@ -228,6 +228,18 @@ class BundleFusionConfig:
             fp.write(line)
 
 
+def get_bundle_fusion_path() -> str:
+    try:
+        bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
+
+        return bundle_fusion_path
+    except KeyError:
+        logging.error(f"Could not find the environment variable 'BUNDLE_FUSION_PATH'. "
+                      f"Make sure that you set this environment variable or use the development Docker image "
+                      f"(dican732/video2mesh:dev-cu116).")
+        raise
+
+
 def bundle_fusion(output_folder: str, dataset: VTMDataset,
                   options=BackgroundMeshOptions(MeshReconstructionMethod.BundleFusion), num_frames: int = -1) \
         -> trimesh.Trimesh:
@@ -249,14 +261,15 @@ def bundle_fusion(output_folder: str, dataset: VTMDataset,
         logging.warning("The dataset has inpainted frame data available, "
                         "but Bundle Fusion is only set up to use the original frame data.")
 
+    bundle_fusion_path = get_bundle_fusion_path()
+
     logging.info("Creating masked depth maps for BundleFusion...")
     dataset.create_masked_depth(MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations))
     dataset_path = os.path.abspath(dataset.base_path)
     bundle_fusion_output_path = pjoin(dataset_path, output_folder)
-    os.makedirs(bundle_fusion_output_path)
+    os.makedirs(bundle_fusion_output_path, exist_ok=True)
 
     logging.info("Configuring BundleFusion...")
-    bundle_fusion_path = os.environ['BUNDLE_FUSION_PATH']
     default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
     config = BundleFusionConfig.load(default_config_path)
     config['s_SDFMaxIntegrationDistance'] = options.sdf_volume_size
