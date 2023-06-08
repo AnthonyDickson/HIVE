@@ -361,13 +361,16 @@ class Pipeline:
                     if is_object and self.options.use_billboard:
                         depth[mask] = np.median(depth[mask])
 
-                    vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
+                    vertices, faces = self._triangulate_faces2(depth, mask, camera_matrix, pose)
 
                     if len(vertices) < 9:
                         logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
                                       f"due to insufficient number of vertices ({len(vertices)}).")
                         continue
 
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'face_filtering', index,
+                                                object_id]):
                     valid_pixels = mask & (depth > 0.0)
                     v, u = valid_pixels.nonzero()
                     # Need to take transpose since stacking UV coordinates gives (2, N) shaped array to get the
@@ -375,15 +378,6 @@ class Pipeline:
                     points2d = np.vstack((u, v)).T
                     masked_depth = depth[valid_pixels]
 
-                    with self.timed_block(log_msg=None,
-                                          key_path=['timing', 'foreground_reconstruction', 'per_object_mesh',
-                                                    'face_triangulation', index, object_id]):
-                        # TODO: Filter long stretched out bits of floor attached to peoples' feet.
-                        faces = self._triangulate_faces(points2d)
-
-                with self.timed_block(log_msg=None,
-                                      key_path=['timing', 'foreground_reconstruction', 'face_filtering', index,
-                                                object_id]):
                     faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
 
                 with self.timed_block(log_msg=None,
@@ -501,6 +495,60 @@ class Pipeline:
                 focal=(dataset.fx, dataset.fy)
             )
         )
+
+    @staticmethod
+    def _triangulate_faces2(depth, mask, camera_matrix, pose, clockwise_winding=False):
+        vertices = point_cloud_from_depth(depth, mask, camera_matrix, *get_pose_components(pose))
+        vertices = np.array(vertices, dtype=np.float32)
+
+        faces = []
+        valid_points = mask & (depth > 0.0)
+        valid_points_row_cols = np.asarray(valid_points.nonzero()).T
+
+        # Create a mapping from mask indices to masked vertex indices.
+        mask_index_to_vertex_index = dict()
+
+        for i, (row, col) in enumerate(valid_points_row_cols):
+            mask_index_to_vertex_index[row, col] = i
+
+        for row, col in valid_points_row_cols:
+            # Create the triangle faces (2) a -> b (3)    a    b (2)
+            #                               |   /             /|
+            #                               |  /             / |
+            #                               | /             /  |
+            #                               |/             /   |/
+            #                           (1) c   d     (1) c <- d (3)
+            a_mask_index = row, col
+            b_mask_index = row, col + 1
+            c_mask_index = row + 1, col
+            d_mask_index = row + 1, col + 1
+
+            if not valid_points[b_mask_index] or not valid_points[c_mask_index]:
+                continue
+
+            if valid_points[a_mask_index]:
+                a_vertex_index = mask_index_to_vertex_index[a_mask_index]
+                b_vertex_index = mask_index_to_vertex_index[b_mask_index]
+                c_vertex_index = mask_index_to_vertex_index[c_mask_index]
+
+                if clockwise_winding:
+                    faces.append([a_vertex_index, b_vertex_index, c_vertex_index])
+                else:
+                    faces.append([a_vertex_index, c_vertex_index, b_vertex_index])
+
+            if valid_points[d_mask_index]:
+                b_vertex_index = mask_index_to_vertex_index[b_mask_index]
+                c_vertex_index = mask_index_to_vertex_index[c_mask_index]
+                d_vertex_index = mask_index_to_vertex_index[d_mask_index]
+
+                if clockwise_winding:
+                    faces.append([c_vertex_index, b_vertex_index, d_vertex_index])
+                else:
+                    faces.append([c_vertex_index, d_vertex_index, b_vertex_index])
+
+        faces = np.asarray(faces, np.uint32)
+
+        return vertices, faces
 
     @staticmethod
     def _triangulate_faces(points: np.ndarray) -> np.ndarray:
