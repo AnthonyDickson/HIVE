@@ -470,7 +470,8 @@ class DatasetAdaptor(Dataset, ABC):
             cv2.imwrite(pjoin(inpainted_mask_path, mask_filename), mask)
 
         def inpaint_with_cv2(input_path, output_path, image_filename):
-            mask = cv2.imread(pjoin(inpainted_mask_path, image_filename), cv2.IMREAD_GRAYSCALE)
+            mask_filename = f"{Path(image_filename).stem}.png"
+            mask = cv2.imread(pjoin(inpainted_mask_path, mask_filename), cv2.IMREAD_GRAYSCALE)
             image = cv2.imread(pjoin(input_path, image_filename), cv2.IMREAD_UNCHANGED)
             inpainted_image = cv2.inpaint(image, mask, 30, cv2.INPAINT_TELEA)
             cv2.imwrite(pjoin(output_path, image_filename), inpainted_image)
