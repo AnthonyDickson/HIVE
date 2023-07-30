@@ -1,4 +1,4 @@
-FROM dican732/video2mesh:runtime-cu116
+FROM dican732/video2mesh:runtime-cu118
 
 ENV BUNDLE_FUSION_PATH=/bundle_fusion
 ENV BUNDLE_FUSION_BIN=${BUNDLE_FUSION_PATH}/build/bundle_fusion_example
