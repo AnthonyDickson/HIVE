@@ -51,11 +51,11 @@ Choose one of three options for setting up the dev environment (in the recommend
 3. [Local installation](#local-installation)
 
 ### Pre-Built Docker Image
-1. Pull (download) the pre-built image (~16 GB): 
+1. Pull (download) the pre-built image (~18 GB): 
       ```shell
-      docker pull dican732/video2mesh
+      docker pull dican732/video2mesh:runtime-cu118
       ```
-   **Note:** By default, this uses the image `dican732/video2mesh:latest` which in turn is the runtime image `dican732/video2mesh:runtime-cu116`. This is fine if you just want to run the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `dican732/video2mesh:dev-cu116`.
+   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `dican732/video2mesh:dev-cu118`.
 
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
@@ -174,7 +174,7 @@ docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -c "im
 You can run the pipeline from a web based interface instead of the CLI.
 Assuming you are using Docker, you can run this by running the following command:
 ```shell
-docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it dican732/video2mesh:runtime-cu116 python3 -m video2mesh.interface
+docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it dican732/video2mesh:runtime-cu118 python3 -m video2mesh.interface
 ```
 and navigating to `localhost:8081`.
 Note that if you are using Docker, the dataset path and output paths should be relative to the project root folder.
