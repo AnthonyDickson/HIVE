@@ -501,17 +501,24 @@ class InpaintingMode(enum.Flag):
 class PipelineOptions(Options):
 
     def __init__(self, num_frames=-1, frame_step=15, estimate_pose=False, estimate_depth=False, background_only=False,
-                 align_scene=False, inpainting_mode=InpaintingMode.Off, use_billboard=False, log_file='logs.log'):
+                 static_camera=False, align_scene=False, inpainting_mode=InpaintingMode.Off, use_billboard=False,
+                 log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
-            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+            If set to 1, samples all frames (i.e. no effect). Otherwise, if set to n > 1, samples every n frames.
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth data.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :param background_only: Whether to only reconstruct the static background.
-        :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
+        :param static_camera: Whether the input video was captured with a static camera, or if the video should be
+            treated as such. This will use the camera matrix from the Kinect sensor (the dataset that the depth
+            estimation model we use was captured with a Kinect sensor) and the identity pose for the camera trajectory.
+            This overrides any settings that specify whether camera parameters should be estimated.
+        :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was
+            held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
         :param inpainting_mode: Include inpainting in the pipeline process.
-        :param use_billboard: Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes or missing body parts.
+        :param use_billboard: Creates flat billboards for foreground objects. This is intended as a workaround for
+            cases where the estimated depth results in stretched out meshes or missing body parts.
         :param log_file: The path to save the logs to.
         """
         self.num_frames = num_frames
@@ -519,6 +526,7 @@ class PipelineOptions(Options):
         self.estimate_pose = estimate_pose
         self.estimate_depth = estimate_depth
         self.background_only = background_only
+        self.static_camera = static_camera
         self.align_scene = align_scene
         self.inpainting_mode = inpainting_mode
         self.use_billboard = use_billboard
@@ -540,11 +548,19 @@ class PipelineOptions(Options):
                            help='Whether to estimate depth maps or use provided ground truth depth maps.')
         group.add_argument('--background_only', action='store_true',
                            help='Whether to only reconstruct the static background.')
+        group.add_argument('--static_camera', action='store_true',
+                           help='Whether the camera was moved during capture, or should be treated as such.')
         group.add_argument('--align_scene', action='store_true',
-                           help='Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.')
-        group.add_argument('--inpainting_mode', type=int, default=0, choices=InpaintingMode.get_modes_as_integer(),
+                           help='Whether to align the scene with the ground plane. Enable this if the recording device '
+                                'was held at an angle (facing upwards or downwards, not level) and the scene is not '
+                                'level in the renderer.')
+        group.add_argument('--inpainting_mode', type=int, default=0,
+                           choices=InpaintingMode.get_modes_as_integer(),
                            help=f'Whether to use lama inpainting in the pipeline process. {", ".join([f"{mode.to_integer()}={mode.name}" for mode in InpaintingMode.get_modes()])}')
-        group.add_argument('--use_billboard', action='store_true', help='Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.')
+        group.add_argument('--use_billboard', action='store_true',
+                           help='Creates flat billboards for foreground objects. This is intended as a workaround for '
+                                'cases where the estimated depth results in stretched out meshes with missing body '
+                                'parts.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
 
@@ -552,7 +568,7 @@ class PipelineOptions(Options):
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
         return PipelineOptions(num_frames=args.num_frames, frame_step=args.frame_step, estimate_pose=args.estimate_pose,
                                estimate_depth=args.estimate_depth, background_only=args.background_only,
+                               static_camera=args.static_camera,
                                align_scene=args.align_scene,
                                inpainting_mode=InpaintingMode.from_integer(args.inpainting_mode),
-                               use_billboard=args.use_billboard,
-                               log_file=args.log_file)
+                               use_billboard=args.use_billboard, log_file=args.log_file)

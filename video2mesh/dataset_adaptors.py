@@ -19,8 +19,7 @@ import cv2
 import imageio
 import numpy as np
 import torch
-from scipy.interpolate import interp1d
-from scipy.spatial.transform import Slerp, Rotation
+from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
@@ -33,13 +32,12 @@ from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
+from video2mesh.sensor import KinectSensor
 from video2mesh.types import Size, File
 from video2mesh.utils import tqdm_imap, timed_block
 
 
 # TODO: Make depth estimation customisable via cli (e.g. max depth)
-
-
 class DatasetAdaptor(Dataset, ABC):
     """Creates a copy of a dataset in the VTMDataset format."""
 
@@ -159,15 +157,19 @@ class DatasetAdaptor(Dataset, ABC):
 
         tqdm_imap(copy_image, range(self.num_frames))
 
-    def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, no_cache=False,
-                profiling: Optional[dict]=None) -> VTMDataset:
+    def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, static_camera=False,
+                no_cache=False, profiling: Optional[dict] = None) -> VTMDataset:
         """
         Convert a dataset into the standard format.
 
         :param estimate_pose: Whether to estimate camera parameters with COLMAP or use provided ground truth
             camera parameters.
-        :param inpainting_mode: Which type of image+depth inpainting to use.
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
+        :param inpainting_mode: Which type of image+depth inpainting to use.
+        :param static_camera: Whether the input video was captured with a static camera, or if the video should be
+            treated as such. This will use the camera matrix from the Kinect sensor (the dataset that the depth
+            estimation model we use was captured with a Kinect sensor) and the identity pose for the camera trajectory.
+            This overrides any settings that specify whether camera parameters should be estimated.
         :param no_cache: Whether cached datasets/results should be ignored.
         :param profiling: A dictionary for recording runtime statistics.
 
@@ -210,7 +212,10 @@ class DatasetAdaptor(Dataset, ABC):
 
         with timed_block(log_msg=None, profiling=profiling,
                          key_path=['timing', 'load_dataset', 'get_camera_parameters']):
-            if estimate_pose:
+            if static_camera:
+                camera_matrix = KinectSensor.get_camera_matrix()
+                camera_trajectory = Trajectory(np.repeat([[0., 0., 0., 1., 0., 0., 0.]], repeats=metadata.num_frames, axis=0))
+            elif estimate_pose:
                 debug_folder = pjoin(self.output_path, 'debug')
                 camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
                                                                                     metadata, file_extension='jpg')
@@ -1053,9 +1058,6 @@ class VideoAdaptor(VideoAdaptorBase):
     def get_depth_map(self, index: int) -> np.ndarray:
         raise NotImplementedError(self._no_ground_truth_error_message)
 
-    def convert_from_ground_truth(self) -> VTMDataset:
-        raise NotImplementedError(self._no_ground_truth_error_message)
-
 
 # noinspection PyArgumentList
 class DeviceOrientation(enum.Enum):
@@ -1448,7 +1450,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
         dataset = dataset_converter.convert(estimate_pose=pipeline_options.estimate_pose,
                                             estimate_depth=pipeline_options.estimate_depth,
                                             inpainting_mode=pipeline_options.inpainting_mode,
-                                            no_cache=storage_options.no_cache,
-                                            profiling=profiling)
+                                            static_camera=pipeline_options.static_camera,
+                                            no_cache=storage_options.no_cache, profiling=profiling)
 
     return dataset

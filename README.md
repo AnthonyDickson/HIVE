@@ -159,6 +159,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
     - `3` - Depth: LaMa, Background: cv2
     - `4` - Depth: LaMa, Background: LaMa
 - `--use_billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
+- `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
 
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
