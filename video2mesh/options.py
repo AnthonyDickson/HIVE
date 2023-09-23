@@ -501,7 +501,7 @@ class InpaintingMode(enum.Flag):
 class PipelineOptions(Options):
 
     def __init__(self, num_frames=-1, frame_step=15, estimate_pose=False, estimate_depth=False, background_only=False,
-                 static_camera=False, align_scene=False, inpainting_mode=InpaintingMode.Off, use_billboard=False,
+                 static_camera=False, align_scene=False, inpainting_mode=InpaintingMode.Off, billboard=False,
                  log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
@@ -517,7 +517,7 @@ class PipelineOptions(Options):
         :param align_scene: Whether to align the scene with the ground plane. Enable this if the recording device was
             held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer.
         :param inpainting_mode: Include inpainting in the pipeline process.
-        :param use_billboard: Creates flat billboards for foreground objects. This is intended as a workaround for
+        :param billboard: Creates flat billboards for foreground objects. This is intended as a workaround for
             cases where the estimated depth results in stretched out meshes or missing body parts.
         :param log_file: The path to save the logs to.
         """
@@ -529,7 +529,7 @@ class PipelineOptions(Options):
         self.static_camera = static_camera
         self.align_scene = align_scene
         self.inpainting_mode = inpainting_mode
-        self.use_billboard = use_billboard
+        self.billboard = billboard
         self.log_file = log_file
 
     @staticmethod
@@ -557,7 +557,7 @@ class PipelineOptions(Options):
         group.add_argument('--inpainting_mode', type=int, default=0,
                            choices=InpaintingMode.get_modes_as_integer(),
                            help=f'Whether to use lama inpainting in the pipeline process. {", ".join([f"{mode.to_integer()}={mode.name}" for mode in InpaintingMode.get_modes()])}')
-        group.add_argument('--use_billboard', action='store_true',
+        group.add_argument('--billboard', action='store_true',
                            help='Creates flat billboards for foreground objects. This is intended as a workaround for '
                                 'cases where the estimated depth results in stretched out meshes with missing body '
                                 'parts.')
@@ -571,4 +571,4 @@ class PipelineOptions(Options):
                                static_camera=args.static_camera,
                                align_scene=args.align_scene,
                                inpainting_mode=InpaintingMode.from_integer(args.inpainting_mode),
-                               use_billboard=args.use_billboard, log_file=args.log_file)
+                               billboard=args.billboard, log_file=args.log_file)

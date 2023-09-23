@@ -30,7 +30,7 @@ Here are the steps to quickly run a video.
     ```shell
     PORT_NUMBER=8081; docker run --name HIVE --rm --gpus all -p ${PORT_NUMBER}:${PORT_NUMBER} -v $(pwd):/app -it dican732/video2mesh:latest python3 -m video2mesh.interface --port ${PORT_NUMBER}
     ```
-4. Navigate to http://localhost:8081 and fill in `dataset_path` and `output_path` with the dataset path and output folder you created in steps 1 and 2, and click the button at the bottom of the page that says 'Start Pipeline'. 
+4. Navigate to [localhost:8081](http://localhost:8081) and fill in `dataset_path` and `output_path` with the dataset path and output folder you created in steps 1 and 2, and click the button at the bottom of the page that says 'Start Pipeline'. 
    You can leave the other settings at their default values.
    For long videos, you can set `num_frames` to something like 150 to make it run faster.
    For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
@@ -88,13 +88,27 @@ Choose one of three options for setting up the dev environment (in the recommend
     ```shell
     pip install -r requirements.txt
     ```
-3. Ensure that you have installed the following:
+3. Install the dependencies:
    - CUDA Toolkit 11.6+
    - OpenCV 3.4.16 
      - Make sure to enable the CMake flag `-DWITH_CUDA=true`.
    - COLMAP
+   - The `gltf_2.0_draco_extension` branch of [Draco](https://github.com/google/draco.git).
+   - Download the model weights:
+     ```shell
+     WEIGHTS_PATH=/root/.cache/pretrained
+     COLMAP_VOCAB_PATH=/root/.cache/colmap
+     
+     mkdir ${WEIGHTS_PATH}
+     mkdir ${COLMAP_VOCAB_PATH}
+     
+     python scripts/download_weights.py
+     wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt
+     curl -L $(yadisk-direct https://disk.yandex.ru/d/ouP6l8VJ0HpMZg) -o big-lama.zip && unzip big-lama.zip -d ${WEIGHTS_PATH} && rm big-lama-zip
+     wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
+     ```
   
-   Refer to [Dockerfile](Dockerfile) for detailed setup instructions on Ubuntu 20.04.
+   Refer to the [Dockerfile](Dockerfile.runtime) for detailed setup instructions on Ubuntu 20.04.
 
 4. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
@@ -131,7 +145,7 @@ Below is an example of how to run the program with estimated data and a static b
 There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
 
 ### CLI Options
-If you want help with the CLI and the options, you can either refer to the source code or view the help via:
+If you want help with the CLI and the options, you can either refer to [options.py](video2mesh/options.py) or view the help via:
 1. Local Python:
     ```shell
     python -m video2mesh --help
@@ -147,9 +161,9 @@ If you want help with the CLI and the options, you can either refer to the sourc
 - `--output_path <path/to/folder>` Specify where the results should be written to.
 - `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
 - `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
-- `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
-- `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
-- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
+- `--estimate_depth` By default the pipeline will try to use any depth maps that are provided with the input sequence. Use this flag to estimate depth maps instead.
+- `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to estimate the camera parameters via COLMAP instead.
+- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame of the input sequence, irrespective of `--frame_step`. 
 - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
 - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
 - `--inpainting_mode` Use Lama to inpaint the background.
@@ -158,7 +172,7 @@ If you want help with the CLI and the options, you can either refer to the sourc
     - `2` - Depth: cv2, Background: LaMa
     - `3` - Depth: LaMa, Background: cv2
     - `4` - Depth: LaMa, Background: LaMa
-- `--use_billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
+- `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
 - `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
 
 ### Docker
@@ -177,7 +191,7 @@ Assuming you are using Docker, you can run this by running the following command
 ```shell
 docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it dican732/video2mesh:runtime-cu118 python3 -m video2mesh.interface
 ```
-and navigating to `localhost:8081`.
+and navigating to [localhost:8081](http://localhost:8081).
 Note that if you are using Docker, the dataset path and output paths should be relative to the project root folder.
 
 Thank you to Felix for implementing this web interface and the image inpainting.

@@ -358,7 +358,7 @@ class Pipeline:
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'per_object_mesh', 'total',
                                                 index, object_id]):
-                    if is_object and self.options.use_billboard:
+                    if is_object and self.options.billboard:
                         depth[mask] = np.median(depth[mask])
 
                     vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)

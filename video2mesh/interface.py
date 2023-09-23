@@ -18,7 +18,7 @@ class Interface:
                                       estimate_pose=o[estimate_pose], estimate_depth=o[estimate_depth],
                                       background_only=o[background_only], align_scene=o[align_scene],
                                       inpainting_mode=InpaintingMode.from_integer(int(o[use_inpainting])),
-                                      use_billboard=o[use_billboard], log_file=o[log_file])
+                                      billboard=o[use_billboard], log_file=o[log_file])
             storage_options = StorageOptions(dataset_path=o[dataset_path], output_path=o[output_path],
                                              overwrite_ok=o[overwrite_ok], no_cache=o[no_cache])
             decimation_options = MeshDecimationOptions(num_faces_background=int(o[num_faces_background]),
@@ -79,7 +79,7 @@ class Interface:
     - `2` - Depth: cv2, Background: LaMa
     - `3` - Depth: LaMa, Background: cv2
     - `4` - Depth: LaMa, Background: LaMa
-- `--use_billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
+- `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
 - `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
 
 # Web Viewer Controls
@@ -126,7 +126,7 @@ The renderer using orbit controls where:
                         estimate_depth = gr.Checkbox(value=True, label="estimate_depth", interactive=True)
                         background_only = gr.Checkbox(value=False, label="background_only", interactive=True)
                         align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
-                        use_billboard = gr.Checkbox(value=False, label="use_billboard", interactive=True)
+                        use_billboard = gr.Checkbox(value=False, label="billboard", interactive=True)
                         static_camera = gr.Checkbox(value=False, label="static_camera", interactive=True)
 
             with gr.Accordion("WebXROptions", open=False):
