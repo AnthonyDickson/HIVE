@@ -1398,7 +1398,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
 
 def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
-                resize_to: Union[int, Size] = 640, depth_confidence_filter_level=0,
+                resize_to: Optional[Union[int, Size]] = 640, depth_confidence_filter_level=0,
                 profiling: Optional[dict]=None) -> VTMDataset:
     """
     Get a VTM formatted dataset or create one from another dataset format.
@@ -1409,6 +1409,7 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
         and the frame step for COLMAP/TSDFFusion.
     :param resize_to: The resolution (height, width) to resize the images to. If an int is given, the longest side will
         be scaled to this value and the shorter side will have its new length automatically calculated.
+        Using `None` will disable
     :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth value
      to be kept. E.g. if set to 1, all pixels in the depth map where the corresponding pixel in the confidence map is
      less than 1 will be ignored.
