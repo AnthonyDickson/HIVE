@@ -27,7 +27,7 @@ from tqdm import tqdm
 from third_party.dpt import dpt
 from third_party.lama.bin.predict import predict as lama_predict
 from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
-from video2mesh.geometric import Trajectory
+from video2mesh.geometric import Trajectory, CameraMatrix
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
@@ -213,7 +213,8 @@ class DatasetAdaptor(Dataset, ABC):
         with timed_block(log_msg=None, profiling=profiling,
                          key_path=['timing', 'load_dataset', 'get_camera_parameters']):
             if static_camera:
-                camera_matrix = KinectSensor.get_camera_matrix()
+                # TODO: Refactor datasets to use CameraMatrix object instead of NumPy array
+                camera_matrix = KinectSensor.get_camera_matrix().scale(target_size=(metadata.height, metadata.width)).matrix
                 camera_trajectory = Trajectory(np.repeat([[0., 0., 0., 1., 0., 0., 0.]], repeats=metadata.num_frames, axis=0))
             elif estimate_pose:
                 debug_folder = pjoin(self.output_path, 'debug')
@@ -1240,18 +1241,21 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         return trajectory
 
     def get_camera_matrix(self) -> np.ndarray:
-        scale_x = self.target_width / self.source_width
-        scale_y = self.target_height / self.source_height
-
         intrinsics_path = pjoin(self.base_path, self.camera_matrix_filename)
         camera_matrix = np.loadtxt(intrinsics_path, delimiter=',')
 
-        camera_matrix[0, 0] *= scale_x
-        camera_matrix[0, 2] *= scale_x
-        camera_matrix[1, 1] *= scale_y
-        camera_matrix[1, 2] *= scale_y
+        camera_matrix = CameraMatrix(
+            fx=camera_matrix[0, 0],
+            fy=camera_matrix[1, 1],
+            cx=camera_matrix[0, 2],
+            cy=camera_matrix[1, 2],
+            width=self.source_width,
+            height=self.source_height
+        )
 
-        return camera_matrix
+        camera_matrix = camera_matrix.scale(target_size=(self.target_height, self.target_width))
+
+        return camera_matrix.matrix
 
     def get_pose(self, index: int) -> np.ndarray:
         return self.camera_trajectory[index]

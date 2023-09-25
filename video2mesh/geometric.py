@@ -2,6 +2,7 @@
 This module contains functions and classes used for manipulating camera trajectories, projecting points between
 2D image and 3D world coordinates, and creating point clouds.
 """
+import dataclasses
 from typing import Optional, Tuple, List, Dict
 
 import numpy as np
@@ -10,7 +11,7 @@ from matplotlib import pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
 
-from video2mesh.types import File
+from video2mesh.types import File, Size
 from video2mesh.utils import validate_shape, validate_camera_parameter_shapes
 
 
@@ -612,3 +613,50 @@ class Trajectory:
             interpolated_poses[start_index:end_index + 1, :4] = slerp(times_to_interpolate).as_quat()
 
         return Trajectory(interpolated_poses)
+
+
+@dataclasses.dataclass(frozen=True)
+class CameraMatrix:
+    """A 3x3 camera matrix that models a simple pinhole camera"""
+
+    """Focal length x"""
+    fx: float
+    """Focal length y"""
+    fy: float
+    """Optical center x"""
+    cx: float
+    """Optical center y"""
+    cy: float
+    """Sensor width (pixels)"""
+    width: int
+    """Sensor height (pixels)"""
+    height: int
+
+    @property
+    def matrix(self) -> np.ndarray:
+        """Get the 3x3 camera matrix as a NumPy array."""
+        return np.array([
+            [self.fx, 0., self.cx],
+            [0., self.fy, self.cy],
+            [0., 0., 1.]
+        ])
+
+    def scale(self, target_size: Size) -> 'CameraMatrix':
+        """
+        Get the camera matrix for the Kinect Sensor.
+
+        :param target_size: The (height, width) to rescale the camera parameters to.
+        :return: The scaled camera matrix.
+        """
+        target_height, target_width = target_size
+        scale_x = target_width / self.width
+        scale_y = target_height / self.height
+
+        return CameraMatrix(
+            fx=self.fx * scale_x,
+            fy=self.fy * scale_y,
+            cx=self.cx * scale_x,
+            cy=self.cy*scale_y,
+            width=target_width,
+            height=target_height
+        )
