@@ -16,9 +16,11 @@ class Interface:
         def start_pipeline(o):
             options = PipelineOptions(num_frames=int(o[num_frames]), frame_step=int(o[frame_step]),
                                       estimate_pose=o[estimate_pose], estimate_depth=o[estimate_depth],
-                                      background_only=o[background_only], align_scene=o[align_scene],
+                                      background_only=o[background_only], static_camera=o[static_camera],
+                                      align_scene=o[align_scene],
                                       inpainting_mode=InpaintingMode.from_integer(int(o[use_inpainting])),
-                                      static_camera=o[static_camera], billboard=o[billboard],
+                                      billboard=o[billboard], disable_scaling=o[disable_scaling],
+                                      disable_coverage_constraint=o[disable_coverage_constraint],
                                       log_file=o[log_file])
             storage_options = StorageOptions(dataset_path=o[dataset_path], output_path=o[output_path],
                                              overwrite_ok=o[overwrite_ok], no_cache=o[no_cache])
@@ -129,6 +131,8 @@ The renderer using orbit controls where:
                         align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
                         billboard = gr.Checkbox(value=False, label="billboard", interactive=True)
                         static_camera = gr.Checkbox(value=False, label="static_camera", interactive=True)
+                        disable_scaling = gr.Checkbox(value=False, label="disable_scaling", interactive=True)
+                        disable_coverage_constraint = gr.Checkbox(value=False, label="disable_coverage_constraint", interactive=True)
 
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
@@ -198,7 +202,7 @@ The renderer using orbit controls where:
 
             btn = gr.Button(value="Start Pipeline")
             inputs = {num_frames, frame_step, estimate_pose, estimate_depth, background_only, align_scene, log_file,
-                      use_inpainting, billboard, static_camera,
+                      use_inpainting, billboard, static_camera, disable_coverage_constraint, disable_scaling,
                       dataset_path, output_path, overwrite_ok, no_cache,
                       num_faces_background, num_faces_object, decimation_max_error,
                       dilate_mask_iter,

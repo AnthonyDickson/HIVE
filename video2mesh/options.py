@@ -502,6 +502,7 @@ class PipelineOptions(Options):
 
     def __init__(self, num_frames=-1, frame_step=15, estimate_pose=False, estimate_depth=False, background_only=False,
                  static_camera=False, align_scene=False, inpainting_mode=InpaintingMode.Off, billboard=False,
+                 disable_scaling=False, disable_coverage_constraint=False,
                  log_file='logs.log'):
         """
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
@@ -519,8 +520,14 @@ class PipelineOptions(Options):
         :param inpainting_mode: Include inpainting in the pipeline process.
         :param billboard: Creates flat billboards for foreground objects. This is intended as a workaround for
             cases where the estimated depth results in stretched out meshes or missing body parts.
+        :param disable_scaling: If `True`, do not rescale the input sequence to VGA (640x480),
+            otherwise leave the input sequence at its original resolution.
+        :param disable_coverage_constraint: Foreground objects are excluded if they do not cover at least 1% of the
+            frame, set this flag to always include foreground objects in the reconstruction.
         :param log_file: The path to save the logs to.
         """
+        self.disable_scaling = disable_scaling
+        self.disable_coverage_constraint = disable_coverage_constraint
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.estimate_pose = estimate_pose
@@ -561,6 +568,12 @@ class PipelineOptions(Options):
                            help='Creates flat billboards for foreground objects. This is intended as a workaround for '
                                 'cases where the estimated depth results in stretched out meshes with missing body '
                                 'parts.')
+        group.add_argument('--disable_scaling', action='store_true',
+                           help='If set, do not rescale the input sequence to VGA (640x480), '
+                                'otherwise leave the input sequence at its original resolution.')
+        group.add_argument('--disable_coverage_constraint', action='store_true',
+                           help='Foreground objects are excluded if they do not cover at least 1% of the frame, '
+                                'set this flag to always include foreground objects in the reconstruction.')
         group.add_argument('--log_file', type=str, help='The path to save the logs to.',
                            default='logs.log')
 
@@ -568,7 +581,9 @@ class PipelineOptions(Options):
     def from_args(args: argparse.Namespace) -> 'PipelineOptions':
         return PipelineOptions(num_frames=args.num_frames, frame_step=args.frame_step, estimate_pose=args.estimate_pose,
                                estimate_depth=args.estimate_depth, background_only=args.background_only,
-                               static_camera=args.static_camera,
-                               align_scene=args.align_scene,
+                               static_camera=args.static_camera, align_scene=args.align_scene,
                                inpainting_mode=InpaintingMode.from_integer(args.inpainting_mode),
-                               billboard=args.billboard, log_file=args.log_file)
+                               billboard=args.billboard,
+                               disable_scaling=args.disable_scaling,
+                               disable_coverage_constraint=args.disable_coverage_constraint,
+                               log_file=args.log_file)

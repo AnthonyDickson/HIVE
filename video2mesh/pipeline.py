@@ -165,7 +165,9 @@ class Pipeline:
 
         with self.timed_block("Loading dataset...", ['timing', 'load_dataset', 'total']):
             if dataset is None:
-                dataset = get_dataset(self.storage_options, self.colmap_options, self.options, profiling=self.profiling)
+                resize_to = None if self.options.disable_scaling else 640
+                dataset = get_dataset(self.storage_options, self.colmap_options, self.options, resize_to=resize_to,
+                                      profiling=self.profiling)
 
             if self.num_frames == -1:
                 self.options.num_frames = dataset.num_frames
@@ -346,7 +348,7 @@ class Pipeline:
 
                     coverage_ratio = mask.mean()
 
-                    if coverage_ratio < 0.01:
+                    if coverage_ratio < 0.01 and not self.options.disable_coverage_constraint:
                         # TODO: Make minimum coverage ratio configurable?
                         logging.debug(
                             f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
@@ -385,6 +387,11 @@ class Pipeline:
                                       key_path=['timing', 'foreground_reconstruction', 'face_filtering', index,
                                                 object_id]):
                     faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
+
+                    if len(faces) < 1:
+                        logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
+                                      f"due to insufficient number of faces ({len(faces)}).")
+                        continue
 
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'mesh_decimation', index,
