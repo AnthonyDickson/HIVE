@@ -18,7 +18,8 @@ class Interface:
                                       estimate_pose=o[estimate_pose], estimate_depth=o[estimate_depth],
                                       background_only=o[background_only], align_scene=o[align_scene],
                                       inpainting_mode=InpaintingMode.from_integer(int(o[use_inpainting])),
-                                      billboard=o[use_billboard], log_file=o[log_file])
+                                      static_camera=o[static_camera], billboard=o[billboard],
+                                      log_file=o[log_file])
             storage_options = StorageOptions(dataset_path=o[dataset_path], output_path=o[output_path],
                                              overwrite_ok=o[overwrite_ok], no_cache=o[no_cache])
             decimation_options = MeshDecimationOptions(num_faces_background=int(o[num_faces_background]),
@@ -39,7 +40,7 @@ class Interface:
                                          webxr_add_ground_plane=o[webxr_add_ground_plane],
                                          webxr_add_sky_box=o[webxr_add_sky_box])
 
-            logging.debug("Running the pipeline with the following configuration: ", options, storage_options, decimation_options, dilation_options, filtering_options, colmap_options, static_mesh_options, webxr_options)
+            print("Running the pipeline with the following configuration: ", options, storage_options, decimation_options, dilation_options, filtering_options, colmap_options, static_mesh_options, webxr_options)
 
             pipeline = Pipeline(options=options, storage_options=storage_options, decimation_options=decimation_options,
                                 dilation_options=dilation_options, filtering_options=filtering_options,
@@ -126,7 +127,7 @@ The renderer using orbit controls where:
                         estimate_depth = gr.Checkbox(value=True, label="estimate_depth", interactive=True)
                         background_only = gr.Checkbox(value=False, label="background_only", interactive=True)
                         align_scene = gr.Checkbox(value=False, label="align_scene", interactive=True)
-                        use_billboard = gr.Checkbox(value=False, label="billboard", interactive=True)
+                        billboard = gr.Checkbox(value=False, label="billboard", interactive=True)
                         static_camera = gr.Checkbox(value=False, label="static_camera", interactive=True)
 
             with gr.Accordion("WebXROptions", open=False):
@@ -197,7 +198,7 @@ The renderer using orbit controls where:
 
             btn = gr.Button(value="Start Pipeline")
             inputs = {num_frames, frame_step, estimate_pose, estimate_depth, background_only, align_scene, log_file,
-                      use_inpainting, use_billboard,
+                      use_inpainting, billboard, static_camera,
                       dataset_path, output_path, overwrite_ok, no_cache,
                       num_faces_background, num_faces_object, decimation_max_error,
                       dilate_mask_iter,
