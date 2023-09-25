@@ -144,7 +144,7 @@ The renderer using orbit controls where:
             with gr.Accordion("Static Mesh Options", open=False):
                 with gr.Row():
                     with gr.Column():
-                        mesh_reconstruction_method = gr.Dropdown(choices=[method.name.lower() for method in
+                        mesh_reconstruction_method = gr.Dropdown(choices=[method.get_cli_name() for method in
                                                                           BackgroundMeshOptions.supported_reconstruction_methods],
                                                                  value='tsdf_fusion',
                                                                  label="mesh_reconstruction_method", interactive=True)
