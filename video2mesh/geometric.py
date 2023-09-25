@@ -3,7 +3,7 @@ This module contains functions and classes used for manipulating camera trajecto
 2D image and 3D world coordinates, and creating point clouds.
 """
 import dataclasses
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, Dict
 
 import numpy as np
 import torch
@@ -656,7 +656,7 @@ class CameraMatrix:
             fx=self.fx * scale_x,
             fy=self.fy * scale_y,
             cx=self.cx * scale_x,
-            cy=self.cy*scale_y,
+            cy=self.cy * scale_y,
             width=target_width,
             height=target_height
         )

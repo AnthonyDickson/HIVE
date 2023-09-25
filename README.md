@@ -163,7 +163,7 @@ If you want help with the CLI and the options, you can either refer to [options.
 - `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
 - `--estimate_depth` By default the pipeline will try to use any depth maps that are provided with the input sequence. Use this flag to estimate depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to estimate the camera parameters via COLMAP instead.
-- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame of the input sequence, irrespective of `--frame_step`. 
+- `--num_frames <int>` If specified, any frames after this index are truncated.
 - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
 - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
 - `--inpainting_mode` Use Lama to inpaint the background.

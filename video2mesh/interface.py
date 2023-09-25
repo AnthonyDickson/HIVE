@@ -1,4 +1,3 @@
-import logging
 from argparse import ArgumentParser
 
 import gradio as gr
@@ -42,7 +41,9 @@ class Interface:
                                          webxr_add_ground_plane=o[webxr_add_ground_plane],
                                          webxr_add_sky_box=o[webxr_add_sky_box])
 
-            print("Running the pipeline with the following configuration: ", options, storage_options, decimation_options, dilation_options, filtering_options, colmap_options, static_mesh_options, webxr_options)
+            print("Running the pipeline with the following configuration: ", options, storage_options,
+                  decimation_options, dilation_options, filtering_options, colmap_options, static_mesh_options,
+                  webxr_options)
 
             pipeline = Pipeline(options=options, storage_options=storage_options, decimation_options=decimation_options,
                                 dilation_options=dilation_options, filtering_options=filtering_options,
@@ -54,59 +55,60 @@ class Interface:
             with gr.Accordion("Quickstart", open=True):
                 with gr.Row():
                     gr.Markdown(
-"""For a more detailed explanation, refer to the [README](https://github.com/AnthonyDickson/video2mesh/blob/master/README.md).
-
-# Quickstart
-1. Fill in the CLI options below.
-2. Click the button at the bottom of the page that says 'Start Pipeline'.
-3. In a separate terminal tab/window, run the following command to start the web viewer:
-   ```shell
-   docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16
-   ```
-4. When the pipeline is finished running, it will give you a link (check the first terminal you opened). 
-   Click on this link to view the 3D video.
-
-# Common CLI Options
-- `--dataset_path <path/to/dataset>` Specify the path to either: a video file, TUM dataset or an iPhone dataset (StrayScanner).
-- `--output_path <path/to/folder>` Specify where the results should be written to.
-- `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
-- `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
-- `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
-- `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
-- `--num_frames <int>` If specified, any frames after this index are truncated. **Note:** COLMAP will still be given every frame (before applying `--frame_step`). 
-- `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
-- `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
-- `--inpainting_mode` Use Lama to inpaint the background.
-    - `0` - no inpainting.
-    - `1` - Depth: cv2, Background: cv2
-    - `2` - Depth: cv2, Background: LaMa
-    - `3` - Depth: LaMa, Background: cv2
-    - `4` - Depth: LaMa, Background: LaMa
-- `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
-- `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
-
-# Web Viewer Controls
-The renderer using orbit controls where:
-- Left click + dragging the mouse will orbit.
-- Right click + dragging the mouse will pan.
-- Scrolling will zoom in and out.
-- `<space>`: Pause/play the video.
-- `C`: Reset the camera's position and rotation.
-- `G`: Go to a particular frame.
-- `L`: Toggle whether to use camera pose from metadata for XR headset.
-- `P`: Save the camera's pose and metadata to disk.
-- `R`: Restart the video playback.
-- `S`: Show/hide the framerate statistics.
-"""
+                        """For a more detailed explanation, refer to the [README](https://github.com/AnthonyDickson/video2mesh/blob/master/README.md).
+                        
+                        # Quickstart
+                        1. Fill in the CLI options below.
+                        2. Click the button at the bottom of the page that says 'Start Pipeline'.
+                        3. In a separate terminal tab/window, run the following command to start the web viewer:
+                           ```shell
+                           docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16
+                           ```
+                        4. When the pipeline is finished running, it will give you a link (check the first terminal you opened). 
+                           Click on this link to view the 3D video.
+                        
+                        # Common CLI Options
+                        - `--dataset_path <path/to/dataset>` Specify the path to either: a video file, TUM dataset or an iPhone dataset (StrayScanner).
+                        - `--output_path <path/to/folder>` Specify where the results should be written to.
+                        - `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
+                        - `--no_cache` By default the pipeline will use any cached converted datasets in `output_path`. Use this flag to automatically delete any cached datasets.
+                        - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
+                        - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
+                        - `--num_frames <int>` If specified, any frames after this index are truncated.
+                        - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
+                        - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
+                        - `--inpainting_mode` Use Lama to inpaint the background.
+                            - `0` - no inpainting.
+                            - `1` - Depth: cv2, Background: cv2
+                            - `2` - Depth: cv2, Background: LaMa
+                            - `3` - Depth: LaMa, Background: cv2
+                            - `4` - Depth: LaMa, Background: LaMa
+                        - `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
+                        - `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
+                        
+                        # Web Viewer Controls
+                        The renderer using orbit controls where:
+                        - Left click + dragging the mouse will orbit.
+                        - Right click + dragging the mouse will pan.
+                        - Scrolling will zoom in and out.
+                        - `<space>`: Pause/play the video.
+                        - `C`: Reset the camera's position and rotation.
+                        - `G`: Go to a particular frame.
+                        - `L`: Toggle whether to use camera pose from metadata for XR headset.
+                        - `P`: Save the camera's pose and metadata to disk.
+                        - `R`: Restart the video playback.
+                        - `S`: Show/hide the framerate statistics.
+                        """
                     )
-
 
             with gr.Accordion("Storage Options", open=True):
                 with gr.Row():
                     with gr.Column():
-                        dataset_path = gr.Text(value="/app/data/your_dataset_here", label="dataset_path", interactive=True)
+                        dataset_path = gr.Text(value="/app/data/your_dataset_here", label="dataset_path",
+                                               interactive=True)
                     with gr.Column():
-                        output_path = gr.Text(value="/app/outputs/output_folder_name_here", label="output_path", interactive=True)
+                        output_path = gr.Text(value="/app/outputs/output_folder_name_here", label="output_path",
+                                              interactive=True)
                     with gr.Column():
                         overwrite_ok = gr.Checkbox(value=False, label="overwrite_ok", interactive=True)
                         no_cache = gr.Checkbox(value=False, label="no_cache", interactive=True)
@@ -114,8 +116,8 @@ The renderer using orbit controls where:
             with gr.Accordion("Pipeline Options", open=True):
                 with gr.Row():
                     with gr.Column():
-                        num_frames = gr.Number(value=-1, label="num_frames", interactive=True)
-                        frame_step = gr.Number(value=15, label="frame_step", interactive=True)
+                        num_frames = gr.Number(value=-1, label="num_frames", interactive=True, minimum=-1, precision=0)
+                        frame_step = gr.Number(value=15, label="frame_step", interactive=True, minimum=1, precision=0)
                     with gr.Column():
                         use_inpainting = gr.Dropdown(
                             choices=[mode.name for mode in InpaintingMode.get_modes()],
@@ -132,12 +134,14 @@ The renderer using orbit controls where:
                         billboard = gr.Checkbox(value=False, label="billboard", interactive=True)
                         static_camera = gr.Checkbox(value=False, label="static_camera", interactive=True)
                         disable_scaling = gr.Checkbox(value=False, label="disable_scaling", interactive=True)
-                        disable_coverage_constraint = gr.Checkbox(value=False, label="disable_coverage_constraint", interactive=True)
+                        disable_coverage_constraint = gr.Checkbox(value=False, label="disable_coverage_constraint",
+                                                                  interactive=True)
 
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
                     with gr.Column():
-                        webxr_path = gr.Text(value='third_party/webxr3dvideo/docs/video/', label="webxr_path", interactive=True)
+                        webxr_path = gr.Text(value='third_party/webxr3dvideo/docs/video/', label="webxr_path",
+                                             interactive=True)
                     with gr.Column():
                         webxr_url = gr.Text(value='http://localhost:8080', label="webxr_url", interactive=True)
                     with gr.Column():
@@ -154,37 +158,42 @@ The renderer using orbit controls where:
                                                                  label="mesh_reconstruction_method", interactive=True)
                     with gr.Column():
                         depth_mask_dilation_iterations = gr.Number(value=32, label="depth_mask_dilation_iterations",
-                                                                   interactive=True)
+                                                                   interactive=True, minimum=0, precision=0)
                     with gr.Column():
-                        sdf_volume_size = gr.Number(value=5.0, label="sdf_volume_size", interactive=True)
+                        sdf_volume_size = gr.Number(value=5.0, label="sdf_volume_size", interactive=True, minimum=1e-8)
                     with gr.Column():
-                        sdf_voxel_size = gr.Number(value=0.02, label="sdf_voxel_size", interactive=True)
+                        sdf_voxel_size = gr.Number(value=0.02, label="sdf_voxel_size", interactive=True, minimum=1e-8)
                     with gr.Column():
-                        sdf_max_voxels = gr.Number(value=80_000_000, label="sdf_max_voxels", interactive=True)
+                        sdf_max_voxels = gr.Number(value=80_000_000, label="sdf_max_voxels", interactive=True,
+                                                   minimum=1, precision=0)
 
             with gr.Accordion("Mesh Filtering Options", open=False):
                 with gr.Row():
                     with gr.Column():
-                        max_depth_dist = gr.Number(value=0.1, label="max_depth_dist", interactive=True)
+                        max_depth_dist = gr.Number(value=0.1, label="max_depth_dist", interactive=True, minimum=0.0)
                     with gr.Column():
-                        max_pixel_dist = gr.Number(value=2, label="max_pixel_dist", interactive=True)
+                        max_pixel_dist = gr.Number(value=2.0, label="max_pixel_dist", interactive=True, minimum=0.0)
                     with gr.Column():
-                        min_num_components = gr.Number(value=5.0, label="min_num_components", interactive=True)
+                        min_num_components = gr.Number(value=5, label="min_num_components", interactive=True,
+                                                       minimum=1, precision=0)
 
             with gr.Accordion("Mask Dilation Options", open=False):
                 with gr.Row():
                     with gr.Column():
-                        dilate_mask_iter = gr.Number(value=0, label="dilate_mask_iter", interactive=True)
+                        dilate_mask_iter = gr.Number(value=0, label="dilate_mask_iter", interactive=True,
+                                                     minimum=0, precision=0)
 
             with gr.Accordion("Mesh Decimation Options", open=False):
                 with gr.Row():
                     with gr.Column():
                         num_faces_background = gr.Number(value=2 ** 14, label="num_faces_background",
-                                                            interactive=True)
+                                                         interactive=True, minimum=1, precision=0)
                     with gr.Column():
-                        num_faces_object = gr.Number(value=2 ** 10, label="num_faces_object", interactive=True)
+                        num_faces_object = gr.Number(value=2 ** 10, label="num_faces_object", interactive=True,
+                                                     minimum=1, precision=0)
                     with gr.Column():
-                        decimation_max_error = gr.Number(value=0.001, label="decimation_max_error", interactive=True)
+                        decimation_max_error = gr.Number(value=0.001, label="decimation_max_error", interactive=True,
+                                                         minimum=0.)
 
             with gr.Accordion("COLMAP Options", open=False):
                 with gr.Row():
@@ -216,6 +225,7 @@ The renderer using orbit controls where:
         demo.title = "HIVE (video2mesh)"
 
         return demo
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
