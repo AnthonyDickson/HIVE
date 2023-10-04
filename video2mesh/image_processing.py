@@ -106,7 +106,7 @@ def calculate_target_resolution(source_hw, target_hw):
     if isinstance(target_hw, int):
         # Cast results to int to avoid warning highlights in IDE.
         longest_side = int(np.argmax(source_hw))
-        shortest_side = int(np.argmin(source_hw))
+        shortest_side = int(abs(longest_side - 1))
 
         new_size = [0, 0]
         new_size[longest_side] = target_hw
