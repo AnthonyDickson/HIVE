@@ -54,6 +54,7 @@ class Options(ReprMixin):
 class StorageOptions(Options):
     """Options regarding storage of inputs and outputs."""
 
+    # TODO: Move overwrite_ok to webxroptions
     def __init__(self, dataset_path: File, output_path: File, overwrite_ok=False, no_cache=False):
         """
         :param dataset_path: Path to the folder containing the RGB and depth image folders.

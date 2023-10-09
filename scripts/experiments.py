@@ -1,26 +1,25 @@
 import argparse
+import datetime
 import json
 import logging
 import os.path
 import shutil
-import time
+import statistics
 from collections import defaultdict
 from os.path import join as pjoin
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import numpy as np
 import pandas as pd
-import torch.cuda
 import trimesh
 
-from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
 from video2mesh.geometric import Trajectory
 from video2mesh.io import VTMDataset, temporary_trajectory, DatasetMetadata
-from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, ForegroundTrajectorySmoothingOptions, \
-    PipelineOptions, StorageOptions, MeshDecimationOptions, MeshReconstructionMethod
+from video2mesh.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
+    WebXROptions
 from video2mesh.pipeline import Pipeline
-from video2mesh.utils import setup_logger, tqdm_imap
+from video2mesh.utils import setup_logger, tqdm_imap, set_key_path
 
 
 def setup(output_path: str, overwrite_ok: bool):
@@ -49,10 +48,9 @@ def add_key(key, dataset_name, pred_label, results_dict):
         results_dict[key][dataset_name][pred_label] = dict()
 
 
-def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajectory: Trajectory,
-                               dataset_name: str, pred_label: str, gt_label: str,
-                               results_dict: dict, output_folder: str,
-                               background_mesh_options: BackgroundMeshOptions):
+def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajectory: Trajectory, dataset_name: str,
+                               pred_label: str, gt_label: str, results_dict: dict, output_folder: str,
+                               background_mesh_options: BackgroundMeshOptions, frame_step=1):
     experiment_path = pjoin(output_folder, dataset_name, pred_label)
     os.makedirs(experiment_path, exist_ok=True)
 
@@ -69,27 +67,29 @@ def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajecto
     # noinspection PyTypeChecker
     np.savetxt(pjoin(experiment_path, 'ate.txt'), ate)
     # noinspection PyTypeChecker
-    np.savetxt(pjoin(experiment_path, f"rpe_r.txt"), error_r)
+    np.savetxt(pjoin(experiment_path, 'rpe_r.txt'), error_r)
     # noinspection PyTypeChecker
-    np.savetxt(pjoin(experiment_path, f"rpe_t.txt"), error_t)
+    np.savetxt(pjoin(experiment_path, 'rpe_t.txt'), error_t)
 
     def rmse(x: np.ndarray) -> float:
         return np.sqrt(np.mean(np.square(x)))
 
     logging.info(f"{dataset_name} - {pred_label.upper()} vs. {gt_label.upper()}:")
-    logging.info(f"\tATE: {rmse(ate):.2f}m")
+    logging.info(f"\tATE: {rmse(ate):.2f} m")
     logging.info(f"\tRPE (rot): {rmse(np.rad2deg(error_r)):.2f}\N{DEGREE SIGN}")
-    logging.info(f"\tRPE (tra): {rmse(error_t):.2f}m")
+    logging.info(f"\tRPE (tra): {rmse(error_t):.2f} m")
 
-    add_key('rpe', dataset_name, pred_label, results_dict)
-    add_key('ate', dataset_name, pred_label, results_dict)
-
-    results_dict['ate'][dataset_name][pred_label] = rmse(ate)
-    results_dict['rpe'][dataset_name][pred_label]['rotation'] = rmse(np.rad2deg(error_r))
-    results_dict['rpe'][dataset_name][pred_label]['translation'] = rmse(error_t)
+    set_key_path(results_dict, [dataset_name, pred_label, 'ate'], rmse(ate))
+    set_key_path(results_dict, [dataset_name, pred_label, 'rpe', 'rotation'], rmse(np.rad2deg(error_r)))
+    set_key_path(results_dict, [dataset_name, pred_label, 'rpe', 'translation'], rmse(error_t))
 
     with temporary_trajectory(dataset, pred_trajectory):
-        mesh = tsdf_fusion(dataset, background_mesh_options)
+        frame_set = list(range(0, dataset.num_frames, frame_step))
+
+        if frame_set[-1] != dataset.num_frames - 1:
+            frame_set.append(dataset.num_frames - 1)
+
+        mesh = tsdf_fusion(dataset, background_mesh_options, frame_set=frame_set)
         mesh.export(pjoin(experiment_path, f"mesh.ply"))
 
 
@@ -186,220 +186,651 @@ def export_results(output_path):
         pipeline_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='PIPELINE_BY_METHOD')
 
 
-class Profiler:
-    def __init__(self):
-        self.start = time.time()
-        self.end = time.time()
+class Latex:
 
-        if torch.cuda.is_available():
-            self.peak_gpu_memory_usage = torch.cuda.max_memory_allocated()
-        else:
-            self.peak_gpu_memory_usage = None
+    @staticmethod
+    def to_mean_stddev(numbers: List[Union[int, float]],
+                       formatter: Callable[[Union[float, int]], str] = '{:.2f}'.format):
+        mean = statistics.mean(numbers)
+        stddev = statistics.stdev(numbers)
 
-    def __enter__(self):
-        self.start = time.time()
+        return f"{formatter(mean)} $\pm$ {formatter(stddev)}"
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+    @staticmethod
+    def to_mean(numbers: List[Union[int, float]],
+                       formatter: Callable[[Union[float, int]], str] = '{:.2f}'.format):
+        mean = statistics.mean(numbers)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.end = time.time()
+        return formatter(mean)
 
-        if torch.cuda.is_available():
-            self.peak_gpu_memory_usage = torch.cuda.max_memory_allocated()
+    @staticmethod
+    def format_key_for_latex(key: str) -> str:
+        key_parts = key.split('_')
+        key_parts = map(lambda string: string.capitalize(), key_parts)
+        formatted_key = ' '.join(list(key_parts))
 
-    @property
-    def elapsed(self) -> float:
-        """Get the runtime in seconds."""
-        if self.end > self.start:  # this means the time has probably been run properly.
-            return self.end - self.start
-        else:
-            return time.time() - self.start
+        return formatted_key
 
+    @staticmethod
+    def format_dataset_name(dataset_name: str) -> str:
+        return dataset_name.replace('_', ' ')
 
-def main(output_path: str, data_path: str, overwrite_ok=False):
-    logging.info("Starting experiments...")
-    logging.debug(str(dict(output_path=output_path, data_path=data_path, overwrite_ok=overwrite_ok)))
+    @staticmethod
+    def format_timedelta(seconds) -> str:
+        minutes, seconds = divmod(seconds, 60)
 
-    logging.info("Setting up folders...")
-    setup(output_path=output_path, overwrite_ok=overwrite_ok)
+        return f"{minutes:02.0f}:{seconds:02.0f}"
 
-    log_file = 'experiments.log'
-    setup_logger(log_file)
+    @staticmethod
+    def format_int(number) -> str:
+        return f"{number:,.0f}"
 
-    logging.info("Creating datasets...")
-    # TODO: Download any missing TUM datasets.
-    colmap_options = COLMAPOptions(quality='medium', dense=True)
+    @staticmethod
+    def format_one_dp(number) -> str:
+        return f"{number:,.1f}"
 
-    num_frames = 300
-    frame_step = 10
+    @staticmethod
+    def percent_formatter(number) -> str:
+        return f"{100 * number:.2f}\\%"
 
-    gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=False,
-                                 estimate_depth=False)
-    cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=True, estimate_depth=False)
-    est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step, estimate_pose=True, estimate_depth=True)
+    @staticmethod
+    def sec_to_ms(number) -> str:
+        return f"{number * 1e3:,.1f}"
 
-    tsdf_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.TSDFFusion,
-                                              sdf_max_voxels=80000000, sdf_volume_size=10.0)
-    rgbd_mesh_options = BackgroundMeshOptions(reconstruction_method=MeshReconstructionMethod.RGBD)
-    mesh_decimation_options = MeshDecimationOptions(num_faces_object=-1, num_faces_background=-1)
+    @staticmethod
+    def bytes_to_megabytes(number) -> str:
+        return f"{number * 1e-6:,.1f}"
 
-    # TODO: Make the dataset list configurable.
-    dataset_names = ['rgbd_dataset_freiburg1_desk',
-                     'rgbd_dataset_freiburg3_walking_xyz',
-                     'rgbd_dataset_freiburg3_sitting_xyz',
-                     'rgbd_dataset_freiburg2_desk_with_person',
-                     'rgbd_dataset_freiburg1_teddy',
-                     'edwardsBay']
+    @staticmethod
+    def bytes_to_gigabytes(number) -> str:
+        return f"{number * 1e-9:,.1f}"
 
-    datasets: Dict[Tuple[str, str], VTMDataset] = dict()
-    gt_label = 'gt'
+# TODO: Pull out each experiment type into own class.
+class Experiments:
+    def __init__(self, data_path: str, output_path: str, overwrite_ok: bool, dataset_names: List[str],
+                 num_frames: int, frame_step: int, log_file: str):
+        self.data_path = data_path
+        self.output_path = output_path
+        self.overwrite_ok = overwrite_ok
 
-    # Run the pipeline on the datasets, record some basic performance stats and test foreground trajectory smoothing.
-    logging.info("Running pipeline comparisons...")
-    mesh_video_output_path = pjoin(output_path, 'pipeline')
+        self.dataset_names = dataset_names
 
-    pipeline_stats = dict()
-
-    fg_smoothing_settings = (
-        ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=10),
-        ForegroundTrajectorySmoothingOptions(learning_rate=1e-5, num_epochs=25),
-    )
-
-    # TODO: Extract function.
-    def run_pipeline_experiment(dataset_name: str, label: str, options: PipelineOptions,
-                                dataset_path: Optional[str] = None):
-        logging.info(f"Creating dataset for '{dataset_name}' and config '{label}'...")
-
-        if dataset_path is None:
+        for dataset_name in dataset_names:
             dataset_path = pjoin(data_path, dataset_name)
 
-        profiler = Profiler()
+            if not os.path.isdir(dataset_path):
+                raise FileNotFoundError(f"Could not find dataset at {dataset_path}")
 
-        with profiler:
-            storage_options = StorageOptions(dataset_path=dataset_path,
-                                             output_path=pjoin(output_path, f"{dataset_name}_{label}"),
-                                             overwrite_ok=overwrite_ok)
-            dataset = get_dataset(storage_options, colmap_options, options)
+        self.num_frames = num_frames
+        self.frame_step = frame_step
 
-            logging.info(f"Running pipeline for dataset '{dataset_name}' and config '{label}'.")
-            base_options = dict(
-                options=PipelineOptions(num_frames, frame_step, log_file=log_file),
-                storage_options=storage_options,
-                decimation_options=mesh_decimation_options,
-                static_mesh_options=tsdf_mesh_options,
-                colmap_options=colmap_options
+        self.gt_label = 'gt'
+        self.cm_label = 'cm'
+        self.dpt_label = 'dpt'
+        self.est_label = 'est'
+
+        self.labels = (self.gt_label, self.cm_label, self.est_label)
+
+        gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     estimate_pose=False, estimate_depth=False,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
+        cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     estimate_pose=True, estimate_depth=False,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
+        dpt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     estimate_pose=False, estimate_depth=True,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
+        est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                      estimate_pose=True, estimate_depth=True,
+                                      inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
+
+        self.pipeline_configurations = [
+            (self.gt_label, gt_options),
+            (self.cm_label, cm_options),
+            (self.dpt_label, dpt_options),
+            (self.est_label, est_options),
+        ]
+
+        self.dataset_paths = self.generate_dataset_paths(output_path, dataset_names, self.pipeline_configurations)
+
+
+        self.summaries_path = pjoin(self.output_path, 'summaries')
+        self.latex_path = pjoin(self.output_path, 'latex')
+        self.trajectory_outputs_path = pjoin(self.output_path, 'trajectory')
+
+        self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
+        self.trajectory_results_path = pjoin(self.summaries_path, 'trajectory.json')
+
+        self.tmp_path = pjoin(self.output_path, 'tmp')
+
+        for path in (self.summaries_path, self.latex_path, self.tmp_path, self.trajectory_outputs_path):
+            os.makedirs(path, exist_ok=True)
+
+    @staticmethod
+    def generate_dataset_paths(output_path:str,
+                               dataset_names: List[str],
+                               pipeline_configurations: List[Tuple[str, PipelineOptions]]) -> Dict[str, Dict[str, str]]:
+        output_paths = dict()
+
+        for dataset_name in dataset_names:
+            output_paths[dataset_name] = dict()
+
+            for label, config in pipeline_configurations:
+                output_paths[dataset_name][label] = pjoin(output_path, f"{dataset_name}_{label}")
+
+        return output_paths
+
+    def run_pipeline_experiments(self):
+        pipeline_results = dict()
+
+        for dataset_name in self.dataset_names:
+            pipeline_results[dataset_name] = dict()
+
+            for label, config in self.pipeline_configurations:
+                logging.info(f"Running pipeline for config (dataset, config): ({dataset_name}, {label})")
+                storage_options = StorageOptions(dataset_path=pjoin(self.data_path, dataset_name),
+                                                 output_path=self.dataset_paths[dataset_name][label],
+                                                 no_cache=True, overwrite_ok=True)
+
+                colmap_options = COLMAPOptions(quality='medium')
+                webxr_options = WebXROptions(webxr_path=self.tmp_path)
+
+                profiling_json_path = pjoin(self.dataset_paths[dataset_name][label], 'profiling.json')
+                has_profiling_json = os.path.isfile(profiling_json_path)
+
+                is_valid_dataset = VTMDataset.is_valid_folder_structure(self.dataset_paths[dataset_name][label])
+
+                if not is_valid_dataset or not has_profiling_json or self.overwrite_ok:
+                    pipeline = Pipeline(options=config,
+                                        storage_options=storage_options,
+                                        colmap_options=colmap_options,
+                                        webxr_options=webxr_options)
+                    pipeline.run()
+
+                with open(profiling_json_path, 'r') as f:
+                    profile = json.load(f)
+                    pipeline_results[dataset_name][label] = profile
+
+        with open(self.pipeline_results_path, 'w') as f:
+            json.dump(pipeline_results, f)
+
+        logging.info(f"Saved pipeline results to {self.pipeline_results_path}.")
+
+    def export_pipeline_results(self):
+        logging.info("Exporting pipeline results as LaTeX tables...")
+
+        with open(self.pipeline_results_path, 'r') as f:
+            pipeline_results = json.load(f)
+
+        runtime_breakdown = dict()
+        total_runtimes = []
+        total_frame_times = []
+
+        performance_statistics = {
+            dataset_name: {
+                label: {
+                    'total_time': 0.0,
+                    'ram_usage': 0.0,
+                    'vram_usage': 0.0,
+                }
+                for label in self.labels
+            }
+            for dataset_name in dataset_names
+        }
+
+        file_statistics_by_layer = {
+            layer: {
+                'mesh_count': [],
+                'time': [],
+                'uncompressed_file_size': [],
+                'compressed_file_size': [],
+                'data_saving': [],
+                'compression_ratio': [],
+            }
+            for layer in ('foreground', 'background')
+        }
+
+        # For each dataset and config:
+        for dataset_name in self.dataset_names:
+            for label in self.labels:
+                stats = pipeline_results[dataset_name][label]
+                frame_count = stats['frame_count']['total']
+
+                # Runtime breakdown
+                timing = stats['timing']
+
+                total_runtimes.append(stats['elapsed_time']['total'])
+                total_frame_times.append(stats['elapsed_time']['per_frame'])
+
+                foreground_reconstruction = timing['foreground_reconstruction']
+                foreground_wall_time_total = foreground_reconstruction['total']
+
+                foreground_user_time_total = 0.0
+
+                for sub_step in foreground_reconstruction:
+                    if sub_step == 'total':
+                        continue
+                    elif sub_step == 'per_object_mesh':
+                        foreground_user_time_total += foreground_reconstruction[sub_step]['total']['mean']
+                    else:
+                        foreground_user_time_total += foreground_reconstruction[sub_step]['mean']
+
+                foreground_step_wall_times = dict()
+
+                for sub_step in foreground_reconstruction:
+                    if sub_step == 'total':
+                        continue
+                    elif sub_step == 'per_object_mesh':
+                        ratio = foreground_reconstruction[sub_step]['total']['mean'] / foreground_user_time_total
+                    else:
+                        ratio = foreground_reconstruction[sub_step]['mean'] / foreground_user_time_total
+
+                    foreground_step_wall_times[sub_step] = foreground_wall_time_total * ratio
+
+                foreground_step_per_frame_wall_times = dict()
+
+                for sub_step in foreground_reconstruction:
+                    if sub_step == 'total':
+                        continue
+                    elif sub_step == 'per_object_mesh':
+                        ratio = foreground_reconstruction[sub_step]['total']['mean'] / foreground_user_time_total
+                        divisor = foreground_reconstruction[sub_step]['total']['count']
+                    else:
+                        ratio = foreground_reconstruction[sub_step]['mean'] / foreground_user_time_total
+                        divisor = foreground_reconstruction[sub_step]['count']
+
+                    foreground_step_per_frame_wall_times[sub_step] = (foreground_wall_time_total * ratio) / divisor
+
+                if label == self.est_label:
+                    def add_breakdown_stats(step, sub_step):
+                        if step not in runtime_breakdown:
+                            runtime_breakdown[step] = dict()
+
+                        if sub_step not in runtime_breakdown[step]:
+                            runtime_breakdown[step][sub_step] = {
+                                'total_wall_time': [],
+                                'frame_time': []
+                            }
+
+                        if sub_step == '-':
+                            if isinstance(timing[step], dict):
+                                time = timing[step]['total']
+                            else:
+                                time = timing[step]
+
+                            runtime_breakdown[step][sub_step]['total_wall_time'].append(time)
+                            runtime_breakdown[step][sub_step]['frame_time'].append(time / frame_count)
+                        else:
+                            runtime_breakdown[step][sub_step]['total_wall_time'].append(timing[step][sub_step])
+                            runtime_breakdown[step][sub_step]['frame_time'].append(timing[step][sub_step] / frame_count)
+
+                    def add_foreground_breakdown_stats(sub_step):
+                        step = 'foreground_reconstruction'
+
+                        if step not in runtime_breakdown:
+                            runtime_breakdown[step] = dict()
+
+                        if sub_step not in runtime_breakdown[step]:
+                            runtime_breakdown[step][sub_step] = {
+                                'total_wall_time': [],
+                                'frame_time': []
+                            }
+
+                        runtime_breakdown[step][sub_step]['total_wall_time'].append(foreground_step_wall_times[sub_step])
+                        runtime_breakdown[step][sub_step]['frame_time'].append(foreground_step_per_frame_wall_times[sub_step])
+
+                    add_breakdown_stats('load_dataset', 'create_metadata')
+                    add_breakdown_stats('load_dataset', 'copy_frames')
+                    add_breakdown_stats('load_dataset', 'create_instance_segmentation_masks')
+                    add_breakdown_stats('load_dataset', 'get_depth_maps')
+                    add_breakdown_stats('load_dataset', 'get_camera_parameters')
+                    add_breakdown_stats('load_dataset', 'inpainting')
+                    add_breakdown_stats('background_reconstruction', '-')
+                    add_foreground_breakdown_stats('binary_mask_creation')
+                    add_foreground_breakdown_stats('per_object_mesh')
+                    add_foreground_breakdown_stats('face_filtering')
+                    add_foreground_breakdown_stats('mesh_decimation')
+                    add_foreground_breakdown_stats('floater_removal')
+                    add_foreground_breakdown_stats('texturing')
+                    add_foreground_breakdown_stats('texture_atlas_packing')
+                    add_breakdown_stats('scene_centering', '-')
+                    add_breakdown_stats('mesh_export', '-')
+                    add_breakdown_stats('mesh_compression', 'foreground')
+                    add_breakdown_stats('mesh_compression', 'background')
+                    add_breakdown_stats('webxr_export', '-')
+
+                # Performance stats by dataset
+                performance_statistics[dataset_name][label] = {
+                    'total_time': sum([
+                        timing['load_dataset']['total'],
+                        timing['background_reconstruction']['total'],
+                        timing['foreground_reconstruction']['total'],
+                        timing['foreground_reconstruction']['total'],
+                        timing['scene_centering'],
+                        timing['mesh_export'],
+                        timing['mesh_compression']['total'],
+                        timing['webxr_export'],
+                    ]),
+                    'ram_usage': stats['peak_ram_usage'],
+                    'vram_usage': stats['peak_vram_usage']['allocated'],
+                }
+
+                # Extract file size stats and mesh compression stats
+                for layer in ('foreground', 'background'):
+                    mesh_compression = stats['mesh_compression']
+
+                    file_statistics_by_layer[layer]['mesh_count'].append(stats['frame_count'][layer])
+                    file_statistics_by_layer[layer]['time'].append(stats['timing']['mesh_compression'][layer])
+                    file_statistics_by_layer[layer]['uncompressed_file_size'].append(mesh_compression[layer]['uncompressed_file_size'])
+                    file_statistics_by_layer[layer]['compressed_file_size'].append(mesh_compression[layer]['compressed_file_size'])
+                    file_statistics_by_layer[layer]['data_saving'].append(mesh_compression[layer]['data_saving'])
+                    file_statistics_by_layer[layer]['compression_ratio'].append(mesh_compression[layer]['compression_ratio'])
+
+        # Aggregate performance statistics
+
+        # Runtime breakdown
+        latex_lines = [
+            r"\begin{tabular}{llrr}",
+            r"\toprule",
+            r"Step & Sub-Step & Total Time (mm:ss) & Frame Time (ms) \\"
+        ]
+
+        all_times = {'frame_time': [], 'total_wall_time': []}
+
+        for step in runtime_breakdown:
+            sub_step_count = len(runtime_breakdown[step])
+            latex_lines.append(r"\midrule")
+            latex_lines.append(r"\multirow{" + str(sub_step_count) + "}{*}{" + Latex.format_key_for_latex(step) + "} ")
+
+            for sub_step in runtime_breakdown[step]:
+                for stat in runtime_breakdown[step][sub_step]:
+                    all_times[stat] += runtime_breakdown[step][sub_step][stat]
+
+                total_wall_times = runtime_breakdown[step][sub_step]['total_wall_time']
+                frame_times = runtime_breakdown[step][sub_step]['frame_time']
+
+                latex_lines.append(f" & {Latex.format_key_for_latex(sub_step)} & "
+                                   f"{Latex.to_mean_stddev(total_wall_times, formatter=Latex.format_timedelta)} & "
+                                   f"{Latex.to_mean_stddev(frame_times, formatter=Latex.sec_to_ms)} \\\\")
+
+        latex_lines.append(r"\midrule")
+        latex_lines.append(f"\\textbf{{Total}} & & {Latex.to_mean_stddev(total_runtimes, formatter=Latex.format_timedelta)} & "
+                           f"{Latex.to_mean_stddev(total_frame_times, formatter=Latex.sec_to_ms)} \\\\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        runtime_breakdown_path = pjoin(self.latex_path, 'runtime_breakdown.tex')
+
+        with open(runtime_breakdown_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Exported runtime breakdown to {runtime_breakdown_path}.")
+
+        # Per dataset performance stats
+        latex_lines = [
+            r"\begin{tabular}{llrrr}",
+            r"\toprule",
+            r"Dataset & Config & Wall Time (mm:ss) & RAM (GB) & VRAM (GB) \\",
+        ]
+
+        all_wall_times = []
+        all_ram_usage = []
+        all_vram_usage = []
+
+        for dataset_name in self.dataset_names:
+            latex_lines.append(r"\midrule")
+            latex_lines.append(r"\multirow{3}{*}{" + Latex.format_dataset_name(dataset_name) + "}")
+
+            for label in self.labels:
+                total_time = performance_statistics[dataset_name][label]['total_time']
+                ram_usage = performance_statistics[dataset_name][label]['ram_usage']
+                vram_usage = performance_statistics[dataset_name][label]['vram_usage']
+
+                latex_lines.append(
+                    f" & {label} & {Latex.format_timedelta(total_time)} & {Latex.bytes_to_gigabytes(ram_usage)} & "
+                    f"{Latex.bytes_to_gigabytes(vram_usage)} \\\\"
+                )
+
+                all_wall_times.append(total_time)
+                all_ram_usage.append(ram_usage)
+                all_vram_usage.append(vram_usage)
+
+        latex_lines.append(r"\midrule")
+        latex_lines.append(f"Average & & {Latex.to_mean_stddev(all_wall_times, formatter=Latex.format_timedelta)} & "
+                           f"{Latex.to_mean_stddev(all_ram_usage, formatter=Latex.bytes_to_gigabytes)} & "
+                           f"{Latex.to_mean_stddev(all_vram_usage, formatter=Latex.bytes_to_gigabytes)} \\\\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        performance_latex_path = pjoin(self.latex_path, 'per_dataset_performance.tex')
+
+        with open(performance_latex_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Exported per-dataset performance stats to {performance_latex_path}.")
+
+        # Compression Statistics
+        latex_lines = [
+            r"\begin{tabular}{lrrrrrr}",
+            r"\toprule",
+            r"Layer & Meshes & Time (ms) & Size Before (MB) & Size After (MB) & Data Savings & Compression Ratio \\",
+            r"\midrule"
+        ]
+
+        all_mesh_count = []
+        all_times = []
+        all_uncompressed_file_size = []
+        all_compressed_file_size = []
+        all_data_saving = []
+        all_compression_ratio = []
+
+        for layer in ('foreground', 'background'):
+            stats = file_statistics_by_layer[layer]
+            mesh_count = stats['mesh_count']
+            time = stats['time']
+            uncompressed_file_size = stats['uncompressed_file_size']
+            compressed_file_size = stats['compressed_file_size']
+            data_saving = stats['data_saving']
+            compression_ratio = stats['compression_ratio']
+
+            latex_lines.append(
+                f"{layer.capitalize()} & "
+                f"{Latex.to_mean_stddev(mesh_count, Latex.format_one_dp)} & "
+                f"{Latex.to_mean_stddev(time, Latex.format_one_dp)} & "
+                f"{Latex.to_mean_stddev(uncompressed_file_size, Latex.bytes_to_megabytes)} & "
+                f"{Latex.to_mean_stddev(compressed_file_size, Latex.bytes_to_megabytes)} & "
+                f"{Latex.to_mean_stddev(data_saving, Latex.percent_formatter)} & "
+                f"{Latex.to_mean_stddev(compression_ratio, '{:,.2f}:1'.format)} \\\\"
             )
 
-            pipeline = Pipeline(**base_options)
-            pipeline.run(dataset)
+            all_mesh_count += mesh_count
+            all_times += time
+            all_uncompressed_file_size += uncompressed_file_size
+            all_compressed_file_size += compressed_file_size
+            all_data_saving += data_saving
+            all_compression_ratio += compression_ratio
 
-        export_path = pjoin(mesh_video_output_path, dataset_name, label, 'no_smoothing')
-        mesh_export_path = pjoin(dataset.base_path, Pipeline.mesh_folder)
-        shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+        latex_lines.append(r"\midrule")
+        latex_lines.append(f"Average & {Latex.to_mean_stddev(all_mesh_count, formatter=Latex.format_one_dp)} & "
+                           f"{Latex.to_mean_stddev(all_times, formatter=Latex.format_one_dp)} & "
+                           f"{Latex.to_mean_stddev(all_compressed_file_size, formatter=Latex.bytes_to_megabytes)} & "
+                           f"{Latex.to_mean_stddev(all_uncompressed_file_size, formatter=Latex.bytes_to_megabytes)} & "
+                           f"{Latex.to_mean_stddev(all_data_saving, formatter=Latex.percent_formatter)} & "
+                           f"{Latex.to_mean_stddev(all_compression_ratio, formatter='{:,.2f}:1'.format)} \\\\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
 
-        add_key('runtime', dataset_name, label, pipeline_stats)
-        add_key('peak_gpu_memory_usage', dataset_name, label, pipeline_stats)
+        compression_latex_path = pjoin(self.latex_path, 'compression.tex')
 
-        pipeline_stats['runtime'][dataset_name][label] = profiler.elapsed
-        pipeline_stats['peak_gpu_memory_usage'][dataset_name][label] = profiler.peak_gpu_memory_usage
+        with open(compression_latex_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
 
-        for fg_smoothing_config in fg_smoothing_settings:
-            logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
-                         f"and foreground smoothing config {fg_smoothing_config}")
+        logging.info(f"Exported compression stats to {compression_latex_path}.")
 
-            pipeline = Pipeline(**base_options, fts_options=fg_smoothing_config)
-            pipeline.run(dataset)
+    def run_trajectory_experiments(self):
+        logging.info("Running trajectory comparisons...")
+        trajectory_results = dict()
 
-            export_path = pjoin(
-                mesh_video_output_path, dataset_name, label,
-                f"smoothing_lr={fg_smoothing_config.learning_rate}_epochs={fg_smoothing_config.num_epochs}"
-            )
-            shutil.copytree(mesh_export_path, export_path, dirs_exist_ok=True)
+        for dataset_name in self.dataset_names:
+            dataset_gt = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
 
-        # TODO: Fix crash (code 137) when it gets to desk sequence + cm config.
-        # # Pipeline using per-frame meshes.
-        # logging.info(f"Running pipeline for dataset '{dataset_name}', config '{label}' "
-        #              f"and rgbd_mesh config {rgbd_mesh_options}...")
-        #
-        # per_frame_mesh_options = {**base_options, "static_mesh_options": rgbd_mesh_options}
-        # pipeline = Pipeline(**per_frame_mesh_options)
-        # pipeline.run(dataset)
-        #
-        # export_path = pjoin(mesh_video_output_path, dataset_name, label, 'rgbd_mesh')
-        # shutil.copytree(mesh_path, export_path, dirs_exist_ok=True)
+            for label in (self.cm_label, self.est_label):
+                dataset = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
 
-        return dataset
+                logging.info(f"Running trajectory comparison for dataset '{dataset_name}' and config '{label}'.")
+                run_trajectory_comparisons(dataset, pred_trajectory=dataset.camera_trajectory,
+                                           gt_trajectory=dataset_gt.camera_trajectory, dataset_name=dataset_name,
+                                           pred_label=label, gt_label=self.gt_label,
+                                           results_dict=trajectory_results,
+                                           output_folder=self.trajectory_outputs_path,
+                                           background_mesh_options=BackgroundMeshOptions(),
+                                           frame_step=self.frame_step)
 
-    for dataset_name in dataset_names:
-        for label, options in ((gt_label, gt_options), ('cm', cm_options), ('est', est_options)):
-            datasets[label, dataset_name] = run_pipeline_experiment(dataset_name, label, options)
+            with open(self.trajectory_results_path, 'w') as f:
+                json.dump(trajectory_results, f)
 
-    # Ours vs NeRF based methods
-    run_pipeline_experiment('kid_running', label='est', options=est_options,
-                            dataset_path=pjoin(data_path, f"kid_running.mp4"))
+    def export_trajectory_results(self):
+        with open(self.trajectory_results_path, 'r') as f:
+            trajectory_results = json.load(f)
 
-    with open(pjoin(mesh_video_output_path, 'summary.json'), 'w') as f:
-        json.dump(pipeline_stats, f)
+        latex_lines = [
+            r"\begin{tabular}{lllll}",
+            r"\toprule",
+            r"Dataset & Config & \acrshort{rpe}$_r$ (\degree) & \acrshort{rpe}$_t$ (cm) & \acrshort{ate} (cm) \\"
+        ]
 
-    # Trajectory comparison
-    logging.info("Running trajectory comparisons...")
-    trajectory_results = dict()
+        all_data = {
+           label: {
+                'rpe': {
+                    'rotation': [],
+                    'translation': []
+                },
+                'ate': []
+            }
+            for label in (self.cm_label, self.est_label)
+        }
 
-    trajectory_results_path = pjoin(output_path, 'trajectory')
-    os.makedirs(trajectory_results_path, exist_ok=True)
+        def format_percent(number):
+            if number < -0.0001:
+                colour = 'Green'
+            elif number > 0.0001:
+                colour = 'BrickRed'
+            else:
+                colour = 'black'
+                # Ensure there's no sign
+                number = abs(number)
 
-    for (label, dataset_name), dataset in datasets.items():
-        logging.info(f"Running trajectory comparison for dataset '{dataset_name}' and config '{label}'.")
-        run_trajectory_comparisons(dataset,
-                                   pred_trajectory=dataset.camera_trajectory,
-                                   gt_trajectory=datasets[gt_label, dataset_name].camera_trajectory,
-                                   dataset_name=dataset_name,
-                                   pred_label=label,
-                                   gt_label=gt_label,
-                                   results_dict=trajectory_results,
-                                   output_folder=trajectory_results_path,
-                                   background_mesh_options=tsdf_mesh_options)
+            return f"(\\textcolor{{{colour}}}{{{number * 100:,.2f}\%}})"
 
-    with open(pjoin(trajectory_results_path, 'summary.json'), 'w') as f:
-        json.dump(trajectory_results, f)
+        for dataset_name in self.dataset_names:
+            latex_lines.append(r"\midrule")
+            latex_lines.append(f"\\multirow{{2}}{{*}}{{{Latex.format_dataset_name(dataset_name)}}}")
 
-    # Scaled COLMAP + TSDFFusion vs BundleFusion
-    logging.info("Running reconstruction comparisons...")
-    recon_folder = pjoin(output_path, 'reconstruction')
+            for label in (self.cm_label, self.est_label):
+                row = trajectory_results[dataset_name][label]
 
-    for (label, dataset_name), dataset in datasets.items():
-        logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
-        mesh_output_path = pjoin(recon_folder, dataset_name, label)
-        os.makedirs(mesh_output_path, exist_ok=True)
+                rpe_rotation = row['rpe']['rotation']
+                rpe_translation = row['rpe']['translation'] * 100  # convert from meters to centimeters
+                ate = row['ate'] * 100  # convert from meters to centimeters
 
-        frame_set = list(range(0, num_frames, frame_step))
+                if label == self.est_label:
+                    cm_stats = trajectory_results[dataset_name][self.cm_label]
+                    rpe_rotation_percent_change = rpe_rotation / cm_stats['rpe']['rotation'] - 1
+                    rpe_translation_percent_change = rpe_translation / (100 * cm_stats['rpe']['translation']) - 1
+                    ate_percent_change = ate / (100 * cm_stats['ate']) - 1
 
-        if frame_set[-1] != num_frames - 1:
-            frame_set.append(num_frames - 1)
+                    latex_lines.append(f" & {label}"
+                                       f" & {rpe_rotation:,.2f} {format_percent(rpe_rotation_percent_change)}"
+                                       f" & {rpe_translation:,.2f} {format_percent(rpe_translation_percent_change)}"
+                                       f" & {ate:,.2f} {format_percent(ate_percent_change)} \\\\")
+                else:
+                    latex_lines.append(f" & {label} & {rpe_rotation:<9,.2f} & {rpe_translation:<9,.2f} & {ate:<9,.2f} \\\\")
 
-        logging.info('Creating ground truth mesh...')
-        gt_mesh = tsdf_fusion(datasets[gt_label, dataset_name], tsdf_mesh_options, frame_set=frame_set)
-        gt_mesh.export(pjoin(mesh_output_path, 'gt.ply'))
+                all_data[label]['rpe']['rotation'].append(rpe_rotation)
+                all_data[label]['rpe']['translation'].append(rpe_translation)
+                all_data[label]['ate'].append(ate)
 
-        logging.info('Creating TSDFFusion mesh with estimated data...')
-        pred_mesh = tsdf_fusion(dataset, tsdf_mesh_options, frame_set=frame_set)
-        pred_mesh.export(pjoin(mesh_output_path, 'pred.ply'))
+        latex_lines.append(r"\midrule")
+        latex_lines.append(r"\multirow{3}{*}{\textbf{Mean}}")
 
-        # This is needed in case BundleFusion has already been run with the dataset.
-        logging.info('Creating BundleFusion mesh with estimated data...')
-        dataset.overwrite_ok = overwrite_ok
+        for label in (self.cm_label, self.est_label):
+            if label == self.est_label:
+                est_stats = all_data[self.est_label]
+                cm_stats = all_data[self.cm_label]
 
-        bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=tsdf_mesh_options)
-        bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
+                rpe_rotation = statistics.mean(est_stats['rpe']['rotation'])
+                rpe_translation = statistics.mean(est_stats['rpe']['translation'])
+                ate = statistics.mean(est_stats['ate'])
 
-        logging.info('Creating TSDFFusion mesh with COLMAP depth...')
+                rpe_rotation_cm = statistics.mean(cm_stats['rpe']['rotation'])
+                rpe_translation_cm = statistics.mean(cm_stats['rpe']['translation'])
+                ate_cm = statistics.mean(cm_stats['ate'])
 
-        if label != gt_label and (mesh := tsdf_fusion_with_colmap(dataset, frame_set, tsdf_mesh_options)):
-            mesh.export(pjoin(mesh_output_path, 'colmap_depth.ply'))
+                rpe_rotation_percent_change = rpe_rotation / rpe_rotation_cm - 1
+                rpe_translation_percent_change = rpe_translation / rpe_translation_cm - 1
+                ate_percent_change = ate / ate_cm - 1
 
-    export_results(output_path)
+                latex_lines.append(f" & {label}"
+                                   f" & {rpe_rotation:,.2f} {format_percent(rpe_rotation_percent_change)}"
+                                   f" & {rpe_translation:,.2f} {format_percent(rpe_translation_percent_change)}"
+                                   f" & {ate:,.2f} {format_percent(ate_percent_change)} \\\\")
+            else:
+                latex_lines.append(f" & {label} & {Latex.to_mean(all_data[label]['rpe']['rotation']):<9} & "
+                                   f"{Latex.to_mean(all_data[label]['rpe']['translation']):<9} & "
+                                   f"{Latex.to_mean(all_data[label]['ate']):<9} \\\\")
 
+        latex_lines.append(f" & all & {Latex.to_mean(all_data[self.cm_label]['rpe']['rotation'] + all_data[self.est_label]['rpe']['rotation']):<9} & "
+                           f"{Latex.to_mean(all_data[self.cm_label]['rpe']['translation'] + all_data[self.est_label]['rpe']['translation']):<9} & "
+                           f"{Latex.to_mean(all_data[self.cm_label]['ate'] + all_data[self.est_label]['ate']):<9} \\\\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        trajectory_latex_path = pjoin(self.latex_path, 'trajectory.tex')
+
+        with open(trajectory_latex_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Exported trajectory stats to {trajectory_latex_path}.")
+
+    def run_bundlefusion_experiments(self):
+        logging.info("Running reconstruction comparisons...")
+        recon_folder = pjoin(self.output_path, 'reconstruction')
+
+        for dataset_name in self.dataset_names:
+            dataset_gt = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
+            mesh_options = BackgroundMeshOptions()
+
+            for label in (self.gt_label, self.cm_label, self.est_label):
+                dataset = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
+
+                logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
+                mesh_output_path = pjoin(recon_folder, dataset_name, label)
+                os.makedirs(mesh_output_path, exist_ok=True)
+
+                frame_set = list(range(0, self.num_frames, self.frame_step))
+
+                if frame_set[-1] != self.num_frames - 1:
+                    frame_set.append(self.num_frames - 1)
+
+                logging.info('Creating ground truth mesh...')
+                gt_mesh = tsdf_fusion(dataset_gt, mesh_options, frame_set=frame_set)
+                gt_mesh.export(pjoin(mesh_output_path, f"{self.gt_label}.ply"))
+
+                logging.info('Creating TSDFFusion mesh with estimated data...')
+                pred_mesh = tsdf_fusion(dataset, mesh_options, frame_set=frame_set)
+                pred_mesh.export(pjoin(mesh_output_path, f"{self.est_label}.ply"))
+
+                # This is needed in case BundleFusion has already been run with the dataset.
+                logging.info('Creating BundleFusion mesh with estimated data...')
+                dataset.overwrite_ok = self.overwrite_ok
+
+                bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=mesh_options)
+                bf_mesh.export(pjoin(mesh_output_path, 'bf.ply'))
+
+                logging.info('Creating TSDFFusion mesh with COLMAP depth...')
+
+                if label != self.gt_label and (mesh := tsdf_fusion_with_colmap(dataset, frame_set, mesh_options)):
+                    mesh.export(pjoin(mesh_output_path, 'colmap_depth.ply'))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -407,10 +838,32 @@ if __name__ == '__main__':
                         required=True, type=str)
     parser.add_argument('--data_path', help='The path to the folder containing the datasets.',
                         required=True, type=str)
-    parser.add_argument('--random_seed', help='(optional) The seed to use for anything dealing with RNGs. '
-                                              'If None, the random seed is not modified in any way.',
-                        required=False, default=None, type=int)
+    parser.add_argument('--log_file', type=str, help='The path to save the logs to.', default='experiments.log')
     parser.add_argument('-y', dest='overwrite_ok', action='store_true', help='Whether to overwrite any old results.')
     args = parser.parse_args()
 
-    main(output_path=args.output_path, data_path=args.data_path, overwrite_ok=args.overwrite_ok)
+    log_file = args.log_file
+    setup_logger(log_file)
+
+    logging.info(f"Running experiments with arguments: {args}")
+
+    # TODO: Make these configurable via CLI.
+    dataset_names = ['rgbd_dataset_freiburg3_walking_xyz',
+                     'rgbd_dataset_freiburg3_sitting_xyz',
+                     'garden',
+                     'small_tree',
+                     'edwardsBay']
+
+
+    experiments = Experiments(output_path=args.output_path, data_path=args.data_path,
+                              overwrite_ok=args.overwrite_ok,
+                              dataset_names=dataset_names,
+                              num_frames=800,
+                              frame_step=15,
+                              log_file=log_file)
+
+    experiments.run_pipeline_experiments()
+    experiments.export_pipeline_results()
+    experiments.run_trajectory_experiments()
+    experiments.export_trajectory_results()
+    # experiments.run_bundlefusion_experiments()

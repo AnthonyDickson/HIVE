@@ -823,7 +823,14 @@ class Pipeline:
                      f"({format_bytes(size_before)} before compression, {format_bytes(size_after)} after compression, "
                      f"{data_saving * 100:.2f}% data saving, {compression_ratio:.2f}:1 compression ratio).")
 
-        set_key_path(self.profiling, ['mesh_compression', src_path.stem], {
+        if src_path.stem == 'fg':
+            name = 'foreground'
+        elif src_path.stem == 'bg':
+            name = 'background'
+        else:
+            name = src_path.stem
+
+        set_key_path(self.profiling, ['mesh_compression', name], {
             'uncompressed_file_size': size_before,
             'compressed_file_size': size_after,
             'data_saving': data_saving,
