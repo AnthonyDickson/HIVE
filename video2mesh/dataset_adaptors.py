@@ -959,7 +959,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         :param rotation: (optional) The rotation to apply to the video frames (see `cv2.ROTATE_*`).
         :param file_extension: (optional) The type to save the extracted frames as, e.g., '.png' or '.jpg'.
         """
-        ffmpeg_command = ['ffmpeg', '-i', path_to_video]
+        ffmpeg_command = ['ffmpeg', '-i', path_to_video, '-q:v', '2']
 
         if num_frames != -1:
             ffmpeg_command += ['-frames:v', str(num_frames)]
