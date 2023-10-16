@@ -690,7 +690,7 @@ class Pipeline:
                     max_h = h
                 total_w += w
 
-            row_image = np.zeros((max_h, total_w, 3), dtype=np.float32)
+            row_image = np.zeros((max_h, total_w, 3), dtype=np.uint8)
             moving_w = 0
 
             for j in range(total_col + 1):
@@ -705,7 +705,7 @@ class Pipeline:
             canvas_h += row_image.shape[0]
             row_images.append(row_image)
 
-        atlas = np.zeros((canvas_h, canvas_w, 3), dtype=np.float32)
+        atlas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
         moving_h = 0
 
         for i in range(n_rows):
