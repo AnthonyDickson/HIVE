@@ -253,6 +253,16 @@ class Pipeline:
 
             static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
                                                    options=self.background_mesh_options, frame_set=frame_set)
+
+            # Convert colour to sRGB since that is what the renderer expects.
+            # This is only needed for the TSDF Fusion meshes since they use vertex colours, for which THREE does not
+            # automatically adjust the colour space.
+            # The other meshing techniques, mainly the RGB-D approach in create_scene(...), use textures, and since we
+            # export the mesh in the glTF format, the glTF loader in the renderer will automatically convert the
+            # texture colour space to sRGB.
+            vertex_colors = static_mesh.visual.vertex_colors[:, :3]
+            static_mesh.visual.vertex_colors[:, :3] = (255 * np.power(vertex_colors / 255, 2.2)).astype(int)
+
             background_scene.add_geometry(static_mesh, node_name="000000")
 
         return background_scene
