@@ -66,6 +66,9 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     if options.sdf_max_voxels and voxel_count > options.sdf_max_voxels:
         voxel_size = (np.product(vol_bnds[:, 1] - vol_bnds[:, 0]) / options.sdf_max_voxels) ** (1 / 3)
+        logging.info(f"Increasing voxel size to {voxel_size:.3f}: Using a voxel size of {options.sdf_voxel_size} would "
+                     f"result in {voxel_count:,.0f} voxels, which is above the specified limit of "
+                     f"{options.sdf_max_voxels:,d}.")
     else:
         voxel_size = options.sdf_voxel_size
 

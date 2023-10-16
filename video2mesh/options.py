@@ -308,7 +308,7 @@ class BackgroundMeshOptions(Options):
                                         MeshReconstructionMethod.RGBD,]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
-                 sdf_volume_size=5.0, sdf_voxel_size=0.01, sdf_max_voxels: Optional[int] = 80_000_000,
+                 sdf_volume_size=5.0, sdf_voxel_size=0.005, sdf_max_voxels: Optional[int] = 320_000_000,
                  key_frame_threshold=0.3):
         """
         :param reconstruction_method: The method to use for reconstructing the background mesh(es).
@@ -361,8 +361,8 @@ class BackgroundMeshOptions(Options):
                                 "reconstruction method `TSDF_FUSION` as it automatically infers the volume "
                                 "size from the input data.", default=5.0)
         group.add_argument('--sdf_voxel_size', type=float,
-                           help="The size of a voxel in the SDF volume in cubic meters.", default=0.01)
-        group.add_argument('--sdf_max_voxels', type=int, default=80_000_000,
+                           help="The size of a voxel in the SDF volume in cubic meters.", default=0.005)
+        group.add_argument('--sdf_max_voxels', type=int, default=320_000_000,
                            help="The maximum number of voxels allowed in the resulting voxel volume."
                                 "This option only has an effect for the reconstruction method `TSDF_FUSION`. "
                                 "If specified, the `--sdf_voxel_size` option will be ignored.")
