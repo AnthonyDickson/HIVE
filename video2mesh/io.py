@@ -1123,8 +1123,11 @@ class VTMDataset(Dataset):
                 valid_points_y = (points_projected_onto_key_frame[:, 1] >= 0) & (
                         points_projected_onto_key_frame[:, 1] < height)
                 visible_points_mask = valid_points_x & valid_points_y
-
                 visible_points = points_projected_onto_key_frame[visible_points_mask]
+
+                if len(visible_points) == 0:
+                    continue
+
                 min_extents = np.min(visible_points, axis=0)
                 max_extents = np.max(visible_points, axis=0)
                 visible_area = np.product(max_extents - min_extents)
