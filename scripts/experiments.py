@@ -263,6 +263,7 @@ class Experiments:
 
         self.num_frames = num_frames
         self.frame_step = frame_step
+        self.log_file = log_file
 
         self.gt_label = 'gt'
         self.cm_label = 'cm'
@@ -271,40 +272,42 @@ class Experiments:
 
         self.labels = (self.gt_label, self.cm_label, self.est_label)
 
-        gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+        self.gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                      estimate_pose=False, estimate_depth=False,
-                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
-        cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+        self.cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                      estimate_pose=True, estimate_depth=False,
-                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
-        dpt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+        self.dpt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                      estimate_pose=False, estimate_depth=True,
-                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
-        est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
+                                     inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+        self.est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                       estimate_pose=True, estimate_depth=True,
-                                      inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=log_file)
+                                      inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
 
         self.pipeline_configurations = [
-            (self.gt_label, gt_options),
-            (self.cm_label, cm_options),
-            (self.dpt_label, dpt_options),
-            (self.est_label, est_options),
+            (self.gt_label, self.gt_options),
+            (self.cm_label, self.cm_options),
+            (self.dpt_label, self.dpt_options),
+            (self.est_label, self.est_options),
         ]
 
         self.dataset_paths = self.generate_dataset_paths(output_path, dataset_names, self.pipeline_configurations)
 
-
         self.summaries_path = pjoin(self.output_path, 'summaries')
         self.latex_path = pjoin(self.output_path, 'latex')
         self.trajectory_outputs_path = pjoin(self.output_path, 'trajectory')
-
-        self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
-        self.trajectory_results_path = pjoin(self.summaries_path, 'trajectory.json')
-
         self.tmp_path = pjoin(self.output_path, 'tmp')
 
         for path in (self.summaries_path, self.latex_path, self.tmp_path, self.trajectory_outputs_path):
             os.makedirs(path, exist_ok=True)
+
+        self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
+        self.trajectory_results_path = pjoin(self.summaries_path, 'trajectory.json')
+        self.kid_running_results_path = pjoin(self.summaries_path, 'kid_running.json')
+
+        self.colmap_options = COLMAPOptions(quality='medium')
+        self.webxr_options = WebXROptions(webxr_path=self.tmp_path)
 
     @staticmethod
     def generate_dataset_paths(output_path:str,
@@ -320,6 +323,61 @@ class Experiments:
 
         return output_paths
 
+    def run_kid_running_experiments(self, filename: str):
+        """
+        Run the experiments for the kid running sequence which include comparing inpainting modes and compression quality.
+
+        :param filename: The filename of the kid running video (assumed to be located in the dataset folder).
+        """
+        dataset_path = pjoin(self.data_path, filename)
+
+        if not os.path.isfile(dataset_path):
+            raise FileExistsError(f"Dataset does not exist at: {dataset_path}")
+
+        dataset_name = 'kid_running'
+        no_compression_label = 'no_compression'
+
+        configs = [
+            (self.est_label, self.est_options),
+            ('no_inpainting', PipelineOptions(num_frames=self.num_frames, frame_step=self.frame_step,
+                                              estimate_pose=True, estimate_depth=True,
+                                              inpainting_mode=InpaintingMode.Off, log_file=self.log_file)),
+            ('cv_inpainting', PipelineOptions(num_frames=self.num_frames, frame_step=self.frame_step,
+                                              estimate_pose=True, estimate_depth=True,
+                                              inpainting_mode=InpaintingMode.CV2_Image_Depth, log_file=self.log_file)),
+            (no_compression_label, self.est_options)
+        ]
+
+        kid_running_results = dict()
+
+        for label, pipeline_options in configs:
+            logging.info(f"Running pipeline for config (dataset, config): ({dataset_name}, {label})")
+
+            output_path = pjoin(self.output_path, f"{dataset_name}_{label}")
+            storage_options = StorageOptions(dataset_path=dataset_path,
+                                             output_path=output_path,
+                                             no_cache=True, overwrite_ok=True)
+            profiling_json_path = pjoin(output_path, 'profiling.json')
+            has_profiling_json = os.path.isfile(profiling_json_path)
+
+            is_valid_dataset = VTMDataset.is_valid_folder_structure(output_path)
+
+            if not is_valid_dataset or not has_profiling_json or self.overwrite_ok:
+                pipeline = Pipeline(options=pipeline_options,
+                                    storage_options=storage_options,
+                                    colmap_options=self.colmap_options,
+                                    webxr_options=self.webxr_options)
+                pipeline.run(compress=label == no_compression_label)
+
+            with open(profiling_json_path, 'r') as f:
+                profile = json.load(f)
+                set_key_path(kid_running_results, [dataset_name, label], profile)
+
+        with open(self.kid_running_results_path, 'w') as f:
+            json.dump(kid_running_results, f)
+
+        logging.info(f"Saved kid running results to {self.kid_running_results_path}.")
+
     def run_pipeline_experiments(self):
         pipeline_results = dict()
 
@@ -332,9 +390,6 @@ class Experiments:
                                                  output_path=self.dataset_paths[dataset_name][label],
                                                  no_cache=True, overwrite_ok=True)
 
-                colmap_options = COLMAPOptions(quality='medium')
-                webxr_options = WebXROptions(webxr_path=self.tmp_path)
-
                 profiling_json_path = pjoin(self.dataset_paths[dataset_name][label], 'profiling.json')
                 has_profiling_json = os.path.isfile(profiling_json_path)
 
@@ -343,8 +398,8 @@ class Experiments:
                 if not is_valid_dataset or not has_profiling_json or self.overwrite_ok:
                     pipeline = Pipeline(options=config,
                                         storage_options=storage_options,
-                                        colmap_options=colmap_options,
-                                        webxr_options=webxr_options)
+                                        colmap_options=self.colmap_options,
+                                        webxr_options=self.webxr_options)
                     pipeline.run()
 
                 with open(profiling_json_path, 'r') as f:
@@ -862,6 +917,7 @@ if __name__ == '__main__':
                               frame_step=15,
                               log_file=log_file)
 
+    experiments.run_kid_running_experiments(filename='kid_running.mp4')
     experiments.run_pipeline_experiments()
     experiments.export_pipeline_results()
     experiments.run_trajectory_experiments()

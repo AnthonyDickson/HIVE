@@ -154,11 +154,13 @@ class Pipeline:
         with timed_block(log_msg=log_msg, profiling=self.profiling, key_path=key_path) as timer:
             yield timer
 
-    def run(self, dataset: Optional[VTMDataset] = None):
+    def run(self, dataset: Optional[VTMDataset] = None, compress=True):
         """
         Run the pipeline to convert a video or RGB-D dataset into a 3D video.
 
-        :param dataset: By default, the pipeline will load the dataset specified in the command line options. You can specify a dataset here to use instead.
+        :param dataset: By default, the pipeline will load the dataset specified in the command line options.
+            You can specify a dataset here to use instead.
+        :param compress: Whether to compress the output mesh files. Defaults to `True`.
         """
         start_time = time.time()
         self._reset_cuda_stats()
@@ -197,10 +199,12 @@ class Pipeline:
 
         with self.timed_block("Compressing mesh data...", key_path=['timing', 'mesh_compression', 'total']):
             with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'foreground']):
-                self._compress_with_draco(foreground_scene_path)
+                if compress:
+                    self._compress_with_draco(foreground_scene_path)
 
             with self.timed_block(log_msg=None, key_path=['timing', 'mesh_compression', 'background']):
-                self._compress_with_draco(background_scene_path)
+                if compress:
+                    self._compress_with_draco(background_scene_path)
 
         with self.timed_block(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...",
                               key_path=['timing', 'webxr_export']):
