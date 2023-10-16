@@ -26,7 +26,7 @@ from tqdm import tqdm
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
 from third_party.colmap.scripts.python.read_write_model import read_model
-from video2mesh.geometric import Trajectory, get_pose_components, world2image
+from video2mesh.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
 from video2mesh.types import File
@@ -1075,6 +1075,73 @@ class VTMDataset(Dataset):
     @staticmethod
     def index_to_filename(index: int, file_extension="png") -> str:
         return f"{index:06d}.{file_extension}"
+
+    def select_key_frames(self, threshold=0.7) -> List[int]:
+        """
+        From a dataset select `key frames', frames with overlap less than the specified ratio.
+
+        :param threshold: The maximum overlap ratio before a frame is excluded from the key frame set. Note that
+            setting the threshold to 1 will return the set of all frames and a threshold of 0 will return just the
+            first frame.
+        :return: A set of key frames.
+        """
+        logging.info(f"Selecting key frames (threshold={threshold})...")
+
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError(f"Threshold must be a real number between zero and one (inclusive), but got {threshold}.")
+
+        if threshold == 0.0:
+            return [0]
+        elif threshold == 1.0:
+            return list(range(self.num_frames))
+
+        if threshold > 0.8:
+            logging.warning(f"Setting the key frame threshold to a high value (> 0.8) may result in long runtimes.")
+
+        width = self.metadata.width
+        height = self.metadata.height
+        camera_matrix = self.camera_matrix
+
+        key_frames = [0]
+
+        for frame in tqdm(range(1, self.num_frames)):
+            depth = self.bg_depth_dataset[frame]
+            mask = self.bg_mask_dataset[frame] == 0
+            pose = self.camera_trajectory[frame]
+            R, t = get_pose_components(pose_vec2mat(pose))
+
+            frame_points = point_cloud_from_depth(depth, mask, K=camera_matrix, R=R, t=t)
+
+            for key_frame in key_frames:
+                pose_key_frame = self.camera_trajectory[key_frame]
+                R, t = get_pose_components(pose_vec2mat(pose_key_frame))
+
+                points_projected_onto_key_frame, _ = world2image(frame_points, K=camera_matrix, R=R, t=t)
+
+                valid_points_x = (points_projected_onto_key_frame[:, 0] >= 0) & (
+                        points_projected_onto_key_frame[:, 0] < width)
+                valid_points_y = (points_projected_onto_key_frame[:, 1] >= 0) & (
+                        points_projected_onto_key_frame[:, 1] < height)
+                visible_points_mask = valid_points_x & valid_points_y
+
+                visible_points = points_projected_onto_key_frame[visible_points_mask]
+                min_extents = np.min(visible_points, axis=0)
+                max_extents = np.max(visible_points, axis=0)
+                visible_area = np.product(max_extents - min_extents)
+                overlap_ratio = visible_area / (width * height)
+
+                if overlap_ratio >= threshold:
+                    logging.debug(f"Excluding frame {frame} from key frames. Reason: The overlap between frame {frame} "
+                                  f"and the key frame {key_frame} was {overlap_ratio:.2f}, above the threshold of "
+                                  f"{threshold:.2f}.")
+                    break
+            else:
+                logging.debug(f"Adding frame {frame} to key frames.")
+                key_frames.append(frame)
+
+        logging.debug(f"Selected key frames: {key_frames}.")
+
+        return key_frames
 
 
 @contextlib.contextmanager

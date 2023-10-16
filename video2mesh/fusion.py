@@ -33,18 +33,20 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
     if num_frames == -1:
         num_frames = dataset.num_frames
 
+    if frame_set is None:
+        frame_set = range(num_frames)
+
     logging.info("Estimating voxel volume bounds...")
     vol_bnds = np.zeros((3, 2))
 
     # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
     # (this typically results in floating fragments in the static mesh.)
     mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
-    frame_range = frame_set if frame_set is not None else range(num_frames)
 
     # Need to take inverse since poses are world-to-cam, but TSDFFusion appears to expect cam-to-world poses.
     camera_trajectory = dataset.camera_trajectory.inverse().to_homogenous_transforms()
 
-    for i in frame_range:
+    for i in tqdm(frame_set):
         # Read depth image and camera pose
         mask = dataset.bg_mask_dataset[i]
         mask = dilate_mask(mask, mask_dilation_options)
@@ -72,7 +74,7 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     logging.info("Fusing frames...")
 
-    for i in tqdm(frame_range):
+    for i in tqdm(frame_set):
         color_image = dataset.bg_rgb_dataset[i]
         mask = dataset.bg_mask_dataset[i]
         mask = dilate_mask(mask, mask_dilation_options)

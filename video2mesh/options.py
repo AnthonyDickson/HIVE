@@ -263,37 +263,26 @@ class MeshFilteringOptions(Options):
 class MeshReconstructionMethod(enum.Enum):
     # Uses a TSDF to reconstruct the 3D scene like KinectFusion, but poses must be known beforehand.
     TSDFFusion = enum.auto()
-    # Similar to the TSDFFusion method, but run on small equal length subsequences instead of the entire video sequence.
-    TSDFFusionChunks = enum.auto()
     # Uses a TSDF to reconstruct the 3D scene like KinectFusion, but uses 3D correspondence guided frame registration.
     BundleFusion = enum.auto()
-    # Uses the first RGB-D frame to create background mesh.
-    StaticRGBD = enum.auto()
-    # Each frame will have a background mesh created from its RGB-D data
+    # Use RGB-D frame data to create background meshes, similar to the foreground meshes. Use the
+    # `key_frame_threshold` to control the number of frames included. See: VTMDataset.select_key_frames(...).
     RGBD = enum.auto()
-    # Like the `RGBD` method except the background is only swapped out after the camera has moved enough.
-    KeyframeRGBD = enum.auto()
 
     @classmethod
     def get_choices(cls):
         return {
             cls.TSDFFusion.get_cli_name(): cls.TSDFFusion,
-            cls.TSDFFusionChunks.get_cli_name(): cls.TSDFFusionChunks,
             cls.BundleFusion.get_cli_name(): cls.BundleFusion,
-            cls.StaticRGBD.get_cli_name(): cls.StaticRGBD,
             cls.RGBD.get_cli_name(): cls.RGBD,
-            cls.KeyframeRGBD.get_cli_name(): cls.KeyframeRGBD
         }
 
     @classmethod
     def get_cli_names(cls) -> Dict['MeshReconstructionMethod', str]:
         return {
             cls.TSDFFusion: 'tsdf_fusion',
-            cls.TSDFFusionChunks: 'tsdf_fusion_chunks',
             cls.BundleFusion: 'bundle_fusion',
-            cls.StaticRGBD: 'static_rgbd',
             cls.RGBD: 'rgbd',
-            cls.KeyframeRGBD: 'keyframe_rgbd',
         }
 
     def get_cli_name(self) -> str:
@@ -316,10 +305,11 @@ class MeshReconstructionMethod(enum.Enum):
 
 class BackgroundMeshOptions(Options):
     supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion,
-                                        MeshReconstructionMethod.StaticRGBD, MeshReconstructionMethod.RGBD]
+                                        MeshReconstructionMethod.RGBD,]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
-                 sdf_volume_size=5.0, sdf_voxel_size=0.02, sdf_max_voxels: Optional[int] = 80_000_000):
+                 sdf_volume_size=5.0, sdf_voxel_size=0.01, sdf_max_voxels: Optional[int] = 80_000_000,
+                 key_frame_threshold=0.3):
         """
         :param reconstruction_method: The method to use for reconstructing the background mesh(es).
         :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
@@ -331,6 +321,7 @@ class BackgroundMeshOptions(Options):
         :param sdf_max_voxels: (optional) The maximum number of voxels in the resulting voxel volume.
             This option only has an effect for the reconstruction method `tsdf_fusion`.
             If specified, the `sdf_voxel_size` option will be ignored.
+        :param key_frame_threshold: The maximum overlap ratio before a frame is excluded from the key frame set.
         """
         assert reconstruction_method in BackgroundMeshOptions.supported_reconstruction_methods, \
             f"Reconstruction method must be one of the following: " \
@@ -343,11 +334,16 @@ class BackgroundMeshOptions(Options):
         assert sdf_max_voxels is None or (isinstance(sdf_max_voxels, int) and sdf_max_voxels > 0), \
             f"Number of voxels number must be a positive integer or None, instead got {sdf_max_voxels}"
 
+        if not (0.0 <= key_frame_threshold <= 1.0):
+            raise ValueError(f"Key frame threshold must be between zero and one (inclusive), "
+                             f"but got {key_frame_threshold}.")
+
         self.reconstruction_method = reconstruction_method
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.sdf_volume_size = sdf_volume_size
         self.sdf_voxel_size = sdf_voxel_size
         self.sdf_max_voxels = sdf_max_voxels
+        self.key_frame_threshold = key_frame_threshold
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -365,11 +361,13 @@ class BackgroundMeshOptions(Options):
                                 "reconstruction method `TSDF_FUSION` as it automatically infers the volume "
                                 "size from the input data.", default=5.0)
         group.add_argument('--sdf_voxel_size', type=float,
-                           help="The size of a voxel in the SDF volume in cubic meters.", default=0.02)
+                           help="The size of a voxel in the SDF volume in cubic meters.", default=0.01)
         group.add_argument('--sdf_max_voxels', type=int, default=80_000_000,
                            help="The maximum number of voxels allowed in the resulting voxel volume."
                                 "This option only has an effect for the reconstruction method `TSDF_FUSION`. "
                                 "If specified, the `--sdf_voxel_size` option will be ignored.")
+        group.add_argument('--key_frame_threshold', type=float, default=0.3,
+                           help="The maximum overlap ratio before a frame is excluded from the key frame set. ")
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'BackgroundMeshOptions':
@@ -378,7 +376,8 @@ class BackgroundMeshOptions(Options):
             depth_mask_dilation_iterations=args.depth_mask_dilation_iterations,
             sdf_volume_size=args.sdf_volume_size,
             sdf_voxel_size=args.sdf_voxel_size,
-            sdf_max_voxels=args.sdf_max_voxels
+            sdf_max_voxels=args.sdf_max_voxels,
+            key_frame_threshold=args.key_frame_threshold
         )
 
 
