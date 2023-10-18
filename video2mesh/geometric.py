@@ -345,6 +345,10 @@ class Trajectory:
         """
         values = np.loadtxt(f, dtype=np.float32)
 
+        if len(values.shape) == 1:
+            # Convert from flat array to 2D array.
+            values = values.reshape((1, -1))
+
         return Trajectory(values)
 
     def normalise(self) -> 'Trajectory':

@@ -307,7 +307,7 @@ class BackgroundMeshOptions(Options):
     supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion,
                                         MeshReconstructionMethod.RGBD,]
 
-    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=32,
+    def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=8,
                  sdf_volume_size=5.0, sdf_voxel_size=0.005, sdf_max_voxels: Optional[int] = 320_000_000,
                  key_frame_threshold=0.3):
         """
@@ -355,7 +355,7 @@ class BackgroundMeshOptions(Options):
                            default='tsdf_fusion')
         group.add_argument('--depth_mask_dilation_iterations', type=int,
                            help="The number of times to dilate the dynamic object masks for masking the depth maps.",
-                           default=32)
+                           default=8)
         group.add_argument('--sdf_volume_size', type=float,
                            help="The size of the SDF volume in cubic meters. This option has no effect for the "
                                 "reconstruction method `TSDF_FUSION` as it automatically infers the volume "
