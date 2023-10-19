@@ -23,6 +23,7 @@ import resource
 import torch
 import trimesh
 from PIL import Image
+from scipy.ndimage import distance_transform_edt
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -30,7 +31,7 @@ from trimesh.exchange.export import export_mesh
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components
+from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components, image2world
 from video2mesh.image_processing import dilate_mask
 from video2mesh.io import VTMDataset, temporary_trajectory
 from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
@@ -354,9 +355,6 @@ class Pipeline:
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'per_object_mesh', 'total',
                                                 index, object_id]):
-                    if is_object and self.options.billboard:
-                        depth[mask] = np.median(depth[mask])
-
                     vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
 
                     if len(vertices) < 9:
@@ -409,6 +407,13 @@ class Pipeline:
                         vertices, faces, is_object,
                         min_components=self.filtering_options.min_num_components
                     )
+
+                with self.timed_block(log_msg=None,
+                                      key_path=['timing', 'foreground_reconstruction', 'billboard', index, object_id]):
+                    if is_object and self.options.billboard:
+                        camera_space_points = rotation @ (vertices.T + translation)
+                        camera_space_points[2, :] = np.median(camera_space_points[2, :])
+                        vertices = (rotation.T @ (camera_space_points - translation)).T
 
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'texturing', index, object_id]):
@@ -1113,6 +1118,7 @@ class Pipeline:
             ['timing', 'foreground_reconstruction', 'face_filtering'],
             ['timing', 'foreground_reconstruction', 'mesh_decimation'],
             ['timing', 'foreground_reconstruction', 'floater_removal'],
+            ['timing', 'foreground_reconstruction', 'billboard'],
             ['timing', 'foreground_reconstruction', 'texturing'],
             ['timing', 'foreground_reconstruction', 'texture_atlas_packing'],
             ['mesh_decimation', 'vertex_count', 'before'],
