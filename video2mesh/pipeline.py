@@ -17,6 +17,7 @@ from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple, Any, Union
 
+import cv2
 import numpy as np
 import openmesh as om
 import resource
@@ -411,9 +412,24 @@ class Pipeline:
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'billboard', index, object_id]):
                     if is_object and self.options.billboard:
-                        camera_space_points = rotation @ (vertices.T + translation)
-                        camera_space_points[2, :] = np.median(camera_space_points[2, :])
-                        vertices = (rotation.T @ (camera_space_points - translation)).T
+                        coordinates, _ = world2image(vertices, K=camera_matrix, R=rotation, t=translation)
+                        u_to_replace, v_to_replace = coordinates.T
+
+                        binary_image = np.zeros((rgb.shape[0], rgb.shape[1]), dtype=np.uint8)
+                        binary_image[v, u] = 255
+                        binary_image[v_to_replace, u_to_replace] = 255
+
+                        distance_transform = distance_transform_edt(binary_image)
+                        non_zero_distance = distance_transform > 0
+                        distance_transform[non_zero_distance] = np.log(distance_transform[non_zero_distance])
+
+                        median_depth = np.median(depth[mask])
+                        depth_map = -0.1 * distance_transform / distance_transform.max()
+                        depth_map[non_zero_distance] += median_depth
+
+                        camera_space_points = (rotation @ (vertices.T + translation)).T
+                        camera_space_points[:, 2] = depth_map[v_to_replace, u_to_replace]
+                        vertices = (rotation.T @ (camera_space_points.T - translation)).T
 
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'texturing', index, object_id]):
