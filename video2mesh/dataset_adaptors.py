@@ -472,6 +472,7 @@ class DatasetAdaptor(Dataset, ABC):
             # Create mask for inpainting and depth map
             mask = cv2.imread(pjoin(mask_path, mask_filename), cv2.IMREAD_GRAYSCALE)
             kernel = np.ones((5, 5), np.uint8)
+            # TODO: Use either an existing CLI option or create a new one to configure inpainting mask dilation.
             mask = cv2.dilate(mask, kernel, iterations=5)
             cv2.imwrite(pjoin(inpainted_mask_path, mask_filename), mask)
 

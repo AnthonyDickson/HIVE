@@ -863,34 +863,31 @@ class VTMDataset(Dataset):
         self.depth_dataset = ImageFolderDataset(self.path_to_depth_maps, transform=self._get_depth_map_transform())
         self.mask_dataset = ImageFolderDataset(self.path_to_masks)
 
-        self.inpainted_rgb_dataset, self.inpainted_depth_dataset, self.inpainted_mask_dataset = self._get_inpainted_frame_data()
+        self.inpainted_rgb_dataset, self.inpainted_depth_dataset = self._get_inpainted_frame_data()
 
         self._masked_depth_path: Optional[str] = None
 
     def _get_inpainted_frame_data(self) -> \
-            Tuple[Optional[ImageFolderDataset], Optional[ImageFolderDataset], Optional[ImageFolderDataset]]:
+            Tuple[Optional[ImageFolderDataset], Optional[ImageFolderDataset]]:
         """
         Returns the inpainted RGB, depth and mask datasets, if they exist.
         """
         if not os.path.isdir(self.path_to_inpainted_rgb_frames) or \
                 not os.path.isdir(self.path_to_inpainted_depth_maps) or \
                 not os.path.isdir(self.path_to_inpainted_masks):
-            return None, None, None
+            return None, None
 
         inpainted_rgb_dataset = ImageFolderDataset(self.path_to_inpainted_rgb_frames)
         inpainted_depth_dataset = ImageFolderDataset(self.path_to_inpainted_depth_maps,
                                                      transform=self._get_depth_map_transform())
-        inpainted_mask_dataset = ImageFolderDataset(self.path_to_inpainted_masks)
 
         num_frames = self.num_frames
 
-        if len(inpainted_rgb_dataset) != num_frames or len(inpainted_rgb_dataset) != num_frames or \
-                len(inpainted_mask_dataset) != num_frames:
+        if len(inpainted_rgb_dataset) != num_frames or len(inpainted_rgb_dataset) != num_frames:
             raise RuntimeError(f"Expected inpainted frame data to have {num_frames} frames, "
-                               f"but got {len(inpainted_rgb_dataset)}, {len(inpainted_depth_dataset)} "
-                               f"and {len(inpainted_mask_dataset)}.")
+                               f"but got {len(inpainted_rgb_dataset)} and {len(inpainted_depth_dataset)}")
 
-        return inpainted_rgb_dataset, inpainted_depth_dataset, inpainted_mask_dataset
+        return inpainted_rgb_dataset, inpainted_depth_dataset
 
     @property
     def bg_rgb_dataset(self) -> ImageFolderDataset:
@@ -903,14 +900,8 @@ class VTMDataset(Dataset):
         return self.inpainted_depth_dataset or self.depth_dataset
 
     @property
-    def bg_mask_dataset(self) -> ImageFolderDataset:
-        """The masks for the background. Will use inpainted frame data if available."""
-        return self.inpainted_mask_dataset or self.mask_dataset
-
-    @property
     def has_inpainted_frame_data(self) -> bool:
-        return self.inpainted_rgb_dataset is not None and self.inpainted_depth_dataset is not None and \
-            self.inpainted_mask_dataset is not None
+        return self.inpainted_rgb_dataset is not None and self.inpainted_depth_dataset is not None
 
     @property
     def path_to_metadata(self):
@@ -1106,7 +1097,7 @@ class VTMDataset(Dataset):
 
         for frame in tqdm(range(1, self.num_frames)):
             depth = self.bg_depth_dataset[frame]
-            mask = self.bg_mask_dataset[frame] == 0
+            mask = self.mask_dataset[frame] == 0
             pose = self.camera_trajectory[frame]
             R, t = get_pose_components(pose_vec2mat(pose))
 

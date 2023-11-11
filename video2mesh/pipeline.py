@@ -17,13 +17,13 @@ from os.path import join as pjoin
 from pathlib import Path
 from typing import Optional, List, Tuple, Any, Union
 
+import cv2
 import numpy as np
 import openmesh as om
 import resource
 import torch
 import trimesh
 from PIL import Image
-from scipy.ndimage import distance_transform_edt
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -299,7 +299,7 @@ class Pipeline:
         if background_only:
             rgb_dataset = dataset.bg_rgb_dataset
             depth_dataset = dataset.bg_depth_dataset
-            mask_dataset = dataset.bg_mask_dataset
+            mask_dataset = dataset.mask_dataset
         else:
             rgb_dataset = dataset.rgb_dataset
             depth_dataset = dataset.depth_dataset
@@ -337,9 +337,13 @@ class Pipeline:
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'binary_mask_creation', index,
                                                 object_id]):
-                    mask = mask_encoded == object_id
-
                     is_object = object_id > 0
+
+                    if is_object:
+                        mask = mask_encoded == object_id
+                        mask = dilate_mask(mask, self.dilation_options)
+                    elif not is_object and dataset.has_inpainted_frame_data:
+                        mask = np.ones(mask, dtype=bool)
 
                     coverage_ratio = mask.mean()
 
@@ -348,9 +352,6 @@ class Pipeline:
                         logging.debug(
                             f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
                         continue
-
-                    if is_object:
-                        mask = dilate_mask(mask, self.dilation_options)
 
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'per_object_mesh', 'total',
@@ -414,6 +415,11 @@ class Pipeline:
                         camera_space_points = rotation @ (vertices.T + translation)
                         camera_space_points[2, :] = np.median(camera_space_points[2, :])
                         vertices = (rotation.T @ (camera_space_points - translation)).T
+
+                        # TODO: Fix crash due to new vertices being projected outside original frame and causing the
+                        #  _get_mesh_texture_and_uv method to return no mesh. This is because the bounds of the
+                        #  projected 2D points contains negative coordinates. Need to filter out vertices to project
+                        #  to invalid 2D coordinates.
 
                 with self.timed_block(log_msg=None,
                                       key_path=['timing', 'foreground_reconstruction', 'texturing', index, object_id]):

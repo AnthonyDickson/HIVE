@@ -48,10 +48,7 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     for i in tqdm(frame_set):
         # Read depth image and camera pose
-        mask = dataset.bg_mask_dataset[i]
-        mask = dilate_mask(mask, mask_dilation_options)
         depth_im = dataset.bg_depth_dataset[i]
-        depth_im[mask > 0] = 0.0
         cam_pose = camera_trajectory[i]  # 4x4 rigid transformation matrix
 
         # Compute camera view frustum and extend convex hull
@@ -77,13 +74,17 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     logging.info("Fusing frames...")
 
+    has_inpainted_frame_data = dataset.has_inpainted_frame_data
+
     for i in tqdm(frame_set):
         color_image = dataset.bg_rgb_dataset[i]
-        mask = dataset.bg_mask_dataset[i]
-        mask = dilate_mask(mask, mask_dilation_options)
         depth_im = dataset.bg_depth_dataset[i]
-        depth_im[mask > 0] = 0.0
         cam_pose = camera_trajectory[i]
+
+        if not has_inpainted_frame_data:
+            mask = dataset.mask_dataset[i]
+            mask = dilate_mask(mask, mask_dilation_options)
+            depth_im[mask > 0] = 0.0
 
         # Integrate observation into voxel volume (assume color aligned with depth)
         tsdf_vol.integrate(color_image, depth_im, dataset.camera_matrix, cam_pose, obs_weight=1.)
