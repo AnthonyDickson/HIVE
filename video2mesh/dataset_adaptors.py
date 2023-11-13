@@ -1146,7 +1146,8 @@ class StrayScannerAdaptor(VideoAdaptorBase):
     def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1,
                  colmap_options=COLMAPOptions(),
                  resize_to: Optional[Union[int, Size]] = None,
-                 depth_confidence_filter_level=0):
+                 depth_confidence_filter_level=0,
+                 fix_orientation=True):
         """
         :param base_path: The path to the dataset.
         :param output_path: The path to write the new dataset to.
@@ -1160,6 +1161,8 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         :param depth_confidence_filter_level: The minimum confidence value (0, 1, or 2) for the corresponding depth
                                               value to be kept. E.g. if set to 1, all pixels in the depth map where the
                                               corresponding pixel in the confidence map is less than 1 will be ignored.
+        :param fix_orientation: If `True`, use the pose data to account the device orientation and rotate the frame
+            data if necessary.
         """
         video_path = pjoin(base_path, StrayScannerAdaptor.video_filename)
 
@@ -1167,6 +1170,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
                          frame_step=frame_step, colmap_options=colmap_options, resize_to=resize_to)
 
         self.depth_confidence_filter_level = depth_confidence_filter_level
+        self.fix_orientation = fix_orientation
 
         assert depth_confidence_filter_level in self.depth_confidence_levels, \
             f"Confidence filter must be one of the following: {self.depth_confidence_levels}."
@@ -1187,9 +1191,12 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         """
         camera_trajectory = self._load_camera_trajectory()
 
-        # Note: This step must be done BEFORE the camera trajectory is normalised because the rotation will be reset.
-        roll = Rotation.from_quat(camera_trajectory.rotations[0]).as_euler('xyz')[-1]
-        device_orientation = DeviceOrientation.from_angle(roll)
+        if self.fix_orientation:
+            # Note: This step must be done BEFORE the camera trajectory is normalised because the rotation will be reset.
+            roll = Rotation.from_quat(camera_trajectory.rotations[0]).as_euler('xyz')[-1]
+            device_orientation = DeviceOrientation.from_angle(roll)
+        else:
+            device_orientation = DeviceOrientation.Landscape
 
         # For non-landscape orientations the frames will be rotated so that they are the right way up.
         # So we need to rotate the trajectory to match how the frames will be rotated.
@@ -1442,7 +1449,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
                 # TODO: Make target image size configurable via cli.
                 resize_to=resize_to,
                 # TODO: Make depth confidence filter level configurable via cli.
-                depth_confidence_filter_level=depth_confidence_filter_level
+                depth_confidence_filter_level=depth_confidence_filter_level,
+                fix_orientation=not pipeline_options.estimate_pose
             )
         elif VideoAdaptor.is_valid_folder_structure(dataset_path):
             path_no_extensions, _ = os.path.splitext(dataset_path)
