@@ -1,0 +1,3 @@
+<component name="DependencyValidationManager">
+  <scope name="Source Code" pattern="file[video2mesh]:video2mesh/*||file[video2mesh]:scripts/*||file[video2mesh]:tests/*" />
+</component>

@@ -1,31 +1,46 @@
+#  HIVE, creates 3D mesh videos.
+#  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import abc
 import contextlib
+import cv2
 import datetime
+import imageio
 import json
 import logging
+import numpy as np
 import os
 import struct
 import subprocess
-from os.path import join as pjoin
-from pathlib import Path
-from typing import Union, Tuple, Optional, Callable, IO, List
-
-import cv2
-import imageio
-import numpy as np
 import torch
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
+from os.path import join as pjoin
+from pathlib import Path
 from scipy.spatial.transform import Rotation
-from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
-from tqdm import tqdm
-
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
 from third_party.colmap.scripts.python.read_write_model import read_model
+from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
+from tqdm import tqdm
+from typing import Union, Tuple, Optional, Callable, IO, List
+
 from video2mesh.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
 from video2mesh.image_processing import dilate_mask, calculate_target_resolution
 from video2mesh.options import COLMAPOptions, MaskDilationOptions
@@ -428,8 +443,8 @@ class COLMAPProcessor:
             R, t = get_pose_components(pose)
             projected_points, depth = world2image(points, K, R, t)
 
-            valid_points = (projected_points[:, 0] > 0) & (projected_points[:, 0] < source_image_shape[1]) &\
-                (projected_points[:, 1] > 0) & (projected_points[:, 1] < source_image_shape[0])
+            valid_points = (projected_points[:, 0] > 0) & (projected_points[:, 0] < source_image_shape[1]) & \
+                           (projected_points[:, 1] > 0) & (projected_points[:, 1] < source_image_shape[0])
 
             if valid_points.sum() < 1:
                 logging.debug(f"COLMAP image data for frame {image_data.name} has no valid points, skipping...")

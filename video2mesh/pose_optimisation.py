@@ -1,18 +1,33 @@
+#  HIVE, creates 3D mesh videos.
+#  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import argparse
+import cv2
 import enum
 import logging
-import os.path
-import shutil
-from os.path import join as pjoin
-from typing import Tuple, List, Optional, Iterable, Union
-
-import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import os.path
+import shutil
 import torch
+from os.path import join as pjoin
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
+from typing import Tuple, List, Optional, Iterable, Union
 
 from video2mesh.fusion import tsdf_fusion
 from video2mesh.geometric import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \

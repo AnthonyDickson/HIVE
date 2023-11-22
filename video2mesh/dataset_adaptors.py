@@ -3,30 +3,45 @@ This module contains the code for converting datasets of various formats into th
 includes estimating camera parameters and depth maps (when specified).
 """
 
+#  HIVE, creates 3D mesh videos.
+#  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import contextlib
+import cv2
 import enum
 import functools
+import imageio
 import logging
+import numpy as np
 import os
 import shutil
 import subprocess
+import torch
 from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Union, Tuple, List
-
-import cv2
-import imageio
-import numpy as np
-import torch
 from scipy.spatial.transform import Rotation
+from third_party.lama.bin.predict import predict as lama_predict
+from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
+from typing import Optional, Union, Tuple, List
 
 from third_party.dpt import dpt
-from third_party.lama.bin.predict import predict as lama_predict
-from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from video2mesh.geometric import Trajectory, CameraMatrix
 from video2mesh.image_processing import calculate_target_resolution
 from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
@@ -200,7 +215,8 @@ class DatasetAdaptor(Dataset, ABC):
 
         with timed_block(log_msg=None, profiling=profiling,
                          key_path=['timing', 'load_dataset', 'create_instance_segmentation_masks']):
-            create_masks(DataLoader(ImageFolderDataset(output_image_folder), batch_size=8), mask_folder=output_mask_folder)
+            create_masks(DataLoader(ImageFolderDataset(output_image_folder), batch_size=8),
+                         mask_folder=output_mask_folder)
 
         with timed_block(log_msg=None, profiling=profiling, key_path=['timing', 'load_dataset', 'get_depth_maps']):
             if estimate_depth:
@@ -214,8 +230,10 @@ class DatasetAdaptor(Dataset, ABC):
                          key_path=['timing', 'load_dataset', 'get_camera_parameters']):
             if static_camera:
                 # TODO: Refactor datasets to use CameraMatrix object instead of NumPy array
-                camera_matrix = KinectSensor.get_camera_matrix().scale(target_size=(metadata.height, metadata.width)).matrix
-                camera_trajectory = Trajectory(np.repeat([[0., 0., 0., 1., 0., 0., 0.]], repeats=metadata.num_frames, axis=0))
+                camera_matrix = KinectSensor.get_camera_matrix().scale(
+                    target_size=(metadata.height, metadata.width)).matrix
+                camera_trajectory = Trajectory(
+                    np.repeat([[0., 0., 0., 1., 0., 0., 0.]], repeats=metadata.num_frames, axis=0))
             elif estimate_pose:
                 debug_folder = pjoin(self.output_path, 'debug')
                 camera_matrix, camera_trajectory = self._estimate_camera_parameters(debug_folder, output_depth_folder,
@@ -343,8 +361,10 @@ class DatasetAdaptor(Dataset, ABC):
                 os.remove(pjoin(colmap_rgb_path, VTMDataset.index_to_filename(index, file_extension=file_extension)))
 
             for dst_index, src_index in enumerate(frames_subset):
-                src_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(src_index, file_extension=file_extension))
-                dst_path = pjoin(colmap_rgb_path, VTMDataset.index_to_filename(dst_index, file_extension=file_extension))
+                src_path = pjoin(colmap_rgb_path,
+                                 VTMDataset.index_to_filename(src_index, file_extension=file_extension))
+                dst_path = pjoin(colmap_rgb_path,
+                                 VTMDataset.index_to_filename(dst_index, file_extension=file_extension))
 
                 shutil.move(src_path, dst_path)
 
@@ -362,7 +382,8 @@ class DatasetAdaptor(Dataset, ABC):
                                                                                    metadata, frames_subset)
 
         if self.frame_step > 1:
-            pose_mapping = {original_frame_index: pose for original_frame_index, pose in zip(frames_subset, camera_poses_scaled)}
+            pose_mapping = {original_frame_index: pose for original_frame_index, pose in
+                            zip(frames_subset, camera_poses_scaled)}
             camera_poses_scaled = Trajectory.create_by_interpolating(pose_mapping, frame_count=self.num_frames)
 
         camera_poses_scaled = Trajectory(camera_poses_scaled[:self.num_frames])
@@ -522,7 +543,8 @@ class DatasetAdaptor(Dataset, ABC):
             lama_predict(imageDir=rgb_path, maskDir=inpainted_mask_path, outdir=inpainted_rgb_path,
                          model_path=lama_weights_path)
         else:
-            raise RuntimeError(f"The inpainting mode must either be {InpaintingMode.Off} or specify an image inpainting method.")
+            raise RuntimeError(
+                f"The inpainting mode must either be {InpaintingMode.Off} or specify an image inpainting method.")
 
         if InpaintingMode.CV2_Depth in mode:
             logging.info(f'Create inpainted depth using cv2.inpaint')
@@ -536,7 +558,8 @@ class DatasetAdaptor(Dataset, ABC):
             logging.info(f'Refactor depth data after LaMa inpainting')
             tqdm_imap(refactor_depth_after_lama, depth_filenames)
         else:
-            raise RuntimeError(f"The inpainting mode must either be {InpaintingMode.Off} or specify an depth inpainting method.")
+            raise RuntimeError(
+                f"The inpainting mode must either be {InpaintingMode.Off} or specify an depth inpainting method.")
 
         logging.info(f'Create black mask for background generation')
         tqdm_imap(create_black_mask, mask_filenames)
@@ -1407,7 +1430,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
 def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
                 resize_to: Optional[Union[int, Size]] = 640, depth_confidence_filter_level=0,
-                profiling: Optional[dict]=None) -> VTMDataset:
+                profiling: Optional[dict] = None) -> VTMDataset:
     """
     Get a VTM formatted dataset or create one from another dataset format.
 

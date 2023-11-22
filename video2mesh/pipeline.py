@@ -2,32 +2,47 @@
 This module contains the code for running the pipeline end-to-end (minus the renderer).
 """
 
+#  HIVE, creates 3D mesh videos.
+#  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import argparse
+import cv2
 import datetime
 import json
 import logging
+import numpy as np
+import openmesh as om
 import os
+import resource
 import shutil
 import subprocess
 import sys
 import time
+import torch
 import traceback
+import trimesh
+from PIL import Image
 from contextlib import contextmanager
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, List, Tuple, Any, Union
-
-import cv2
-import numpy as np
-import openmesh as om
-import resource
-import torch
-import trimesh
-from PIL import Image
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 from trimesh.exchange.export import export_mesh
+from typing import Optional, List, Tuple, Any, Union
 
 from video2mesh.dataset_adaptors import get_dataset
 from video2mesh.fusion import tsdf_fusion, bundle_fusion

@@ -1,8 +1,23 @@
+#  HIVE, creates 3D mesh videos.
+#  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import argparse
+import cv2
 import enum
 from typing import Optional, List, Dict
-
-import cv2
 
 from video2mesh.types import File
 
@@ -76,7 +91,8 @@ class StorageOptions(Options):
                            required=True)
         group.add_argument('--output_path', type=str, required=True,
                            help='Where to save the outputs.')
-        group.add_argument('--overwrite_ok', help='Whether it is okay to overwrite preexisting mesh data in the output and export folders.',
+        group.add_argument('--overwrite_ok',
+                           help='Whether it is okay to overwrite preexisting mesh data in the output and export folders.',
                            action='store_true')
         group.add_argument('--no_cache', help='Whether cached datasets/results should be ignored.',
                            action='store_true')
@@ -305,7 +321,7 @@ class MeshReconstructionMethod(enum.Enum):
 
 class BackgroundMeshOptions(Options):
     supported_reconstruction_methods = [MeshReconstructionMethod.TSDFFusion, MeshReconstructionMethod.BundleFusion,
-                                        MeshReconstructionMethod.RGBD,]
+                                        MeshReconstructionMethod.RGBD, ]
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=10,
                  sdf_volume_size=5.0, sdf_voxel_size=0.005, sdf_max_voxels: Optional[int] = 320_000_000,
@@ -407,8 +423,10 @@ class ForegroundTrajectorySmoothingOptions(Options):
             num_epochs=args.fts_num_epochs
         )
 
+
 class WebXROptions(Options):
     """Configuration for the WebXR renderer, and the metadata."""
+
     def __init__(self, webxr_path='third_party/webxr3dvideo/docs/video', webxr_url='localhost:8080',
                  webxr_add_ground_plane=False, webxr_add_sky_box=False):
         """
@@ -444,6 +462,7 @@ class WebXROptions(Options):
             webxr_add_sky_box=args.webxr_add_sky_box
         )
 
+
 class InpaintingMode(enum.Flag):
     Off = 0
     CV2_Image = enum.auto()
@@ -472,7 +491,8 @@ class InpaintingMode(enum.Flag):
         elif self.Lama_Image_Depth:
             return 4
         else:
-            raise RuntimeError(f"{self.name} does not have an integer mapping, only {self.get_modes()} have an integer mapping.")
+            raise RuntimeError(
+                f"{self.name} does not have an integer mapping, only {self.get_modes()} have an integer mapping.")
 
     @classmethod
     def from_integer(cls, value: int) -> 'InpaintingMode':
@@ -489,7 +509,6 @@ class InpaintingMode(enum.Flag):
         else:
             raise RuntimeError(f"Unrecognised integer value for {cls.__name__}, expected one of {cls.get_modes()}.")
 
-
     @classmethod
     def get_name(cls, value: int) -> str:
         return cls.from_integer(value).name
@@ -497,6 +516,7 @@ class InpaintingMode(enum.Flag):
     @classmethod
     def get_modes_as_integer(cls) -> List[int]:
         return [mode.to_integer() for mode in cls.get_modes()]
+
 
 class PipelineOptions(Options):
 
