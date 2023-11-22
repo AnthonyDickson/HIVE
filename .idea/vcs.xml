@@ -2,16 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/AdaBins" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/adelai_depth" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/colmap" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/colmap/doc/_build/html" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth/monodepth/mannequin_challenge" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth/third_party/OpticalFlowToolkit" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth/third_party/colmap" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth/third_party/colmap/doc/_build/html" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/third_party/consistent_depth/third_party/flownet2" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/dpt" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/lama" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/tsdf_fusion_python" vcs="Git" />
