@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="video2mesh (Docker, GradIO)" type="PythonConfigurationType" factoryName="Python">
+  <configuration default="false" name="HIVE (Docker, Kid Running, EST)" type="PythonConfigurationType" factoryName="Python">
     <module name="video2mesh" />
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
@@ -24,14 +24,7 @@
       <option name="networkDisabled" value="false" />
       <option name="networkMode" value="bridge" />
       <option name="portBindings">
-        <list>
-          <DockerPortBindingImpl>
-            <option name="containerPort" value="8081" />
-            <option name="hostIp" value="0.0.0.0" />
-            <option name="hostPort" value="8081" />
-            <option name="protocol" value="tcp" />
-          </DockerPortBindingImpl>
-        </list>
+        <list />
       </option>
       <option name="publishAllPorts" value="false" />
       <option name="runCliOptions" value="--entrypoint= --rm --gpus all --shm-size 512M" />
@@ -48,8 +41,8 @@
       </option>
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
-    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/video2mesh/interface.py" />
-    <option name="PARAMETERS" value="--port 8081" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/hive/pipeline.py" />
+    <option name="PARAMETERS" value="--dataset_path data/kid_running.mp4 --output_path outputs/kid_running_est --no_cache --overwrite_ok --estimate_pose --estimate_depth --quality medium --inpainting_mode 2" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />

@@ -2,20 +2,20 @@
   <configuration default="false" name="Update WebXR GitHub Pages Source" type="docker-deploy" factoryName="docker-image" server-name="Docker">
     <deployment type="docker-image">
       <settings>
-        <option name="imageTag" value="dican732/webxr3dvideo:node-16" />
+        <option name="imageTag" value="anthonydickson/hive-renderer:node-16" />
         <option name="command" value="build" />
-        <option name="containerName" value="Build-WebXR" />
+        <option name="containerName" value="Build-Hive-Renderer" />
         <option name="commandLineOptions" value="--rm" />
         <option name="showCommandPreview" value="true" />
         <option name="volumeBindings">
           <list>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/src" />
-              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/src" />
+              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\src" />
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/docs" />
+              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\" />
             </DockerVolumeBindingImpl>
           </list>
         </option>

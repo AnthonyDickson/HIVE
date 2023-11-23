@@ -17,9 +17,9 @@
 import gradio as gr
 from argparse import ArgumentParser
 
-from video2mesh.options import BackgroundMeshOptions, COLMAPOptions, MaskDilationOptions, MeshDecimationOptions, \
+from hive.options import BackgroundMeshOptions, COLMAPOptions, MaskDilationOptions, MeshDecimationOptions, \
     MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, StorageOptions, WebXROptions, InpaintingMode
-from video2mesh.pipeline import Pipeline
+from hive.pipeline import Pipeline
 
 
 class Interface:
@@ -70,14 +70,14 @@ class Interface:
             with gr.Accordion("Quickstart", open=True):
                 with gr.Row():
                     gr.Markdown(
-                        """For a more detailed explanation, refer to the [README](https://github.com/AnthonyDickson/video2mesh/blob/master/README.md).
+                        """For a more detailed explanation, refer to the [README](https://github.com/AnthonyDickson/HIVE/blob/master/README.md).
                         
                         # Quickstart
                         1. Fill in the CLI options below.
                         2. Click the button at the bottom of the page that says 'Start Pipeline'.
                         3. In a separate terminal tab/window, run the following command to start the web viewer:
                            ```shell
-                           docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16
+                           docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/HIVE_Renderer/src:/app/src:ro -v $(pwd)/third_party/HIVE_Renderer/docs:/app/docs anthonydickson/hive-renderer:node-16
                            ```
                         4. When the pipeline is finished running, it will give you a link (check the first terminal you opened). 
                            Click on this link to view the 3D video.
@@ -155,7 +155,7 @@ class Interface:
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
                     with gr.Column():
-                        webxr_path = gr.Text(value='third_party/webxr3dvideo/docs/video/', label="webxr_path",
+                        webxr_path = gr.Text(value='third_party/HIVE_Renderer/docs/video/', label="webxr_path",
                                              interactive=True)
                     with gr.Column():
                         webxr_url = gr.Text(value='http://localhost:8080', label="webxr_url", interactive=True)
@@ -237,7 +237,7 @@ class Interface:
                       webxr_path, webxr_url, webxr_add_ground_plane, webxr_add_sky_box}
             btn.click(fn=start_pipeline, inputs=inputs, outputs=None)
 
-        demo.title = "HIVE (video2mesh)"
+        demo.title = "HIVE (hive)"
 
         return demo
 

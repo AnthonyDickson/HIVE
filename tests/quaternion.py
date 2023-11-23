@@ -21,7 +21,7 @@ from numpy import asarray as to_npy
 from scipy.spatial.transform import Rotation
 from torch import tensor as to_tensor
 
-from video2mesh.geometric import Quaternion
+from hive.geometric import Quaternion
 
 
 def quat_to_scipy(quat: Quaternion) -> Rotation:

@@ -34,22 +34,22 @@ from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
 from scipy.spatial.transform import Rotation
-from third_party.lama.bin.predict import predict as lama_predict
-from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 from typing import Optional, Union, Tuple, List
 
-from third_party.dpt import dpt
-from video2mesh.geometric import Trajectory, CameraMatrix
-from video2mesh.image_processing import calculate_target_resolution
-from video2mesh.io import Dataset, DatasetMetadata, VTMDataset, COLMAPProcessor, ImageFolderDataset, \
+from hive.geometric import Trajectory, CameraMatrix
+from hive.image_processing import calculate_target_resolution
+from hive.io import Dataset, DatasetMetadata, HiveDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
-from video2mesh.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
-from video2mesh.sensor import KinectSensor
-from video2mesh.types import Size, File
-from video2mesh.utils import tqdm_imap, timed_block
+from hive.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
+from hive.sensor import KinectSensor
+from hive.types import Size, File
+from hive.utils import tqdm_imap, timed_block
+from third_party.dpt import dpt
+from third_party.lama.bin.predict import predict as lama_predict
+from third_party.unreal_dataset.UnrealDatasetInfo import UnrealDatasetInfo
 
 
 # TODO: Make depth estimation customisable via cli (e.g. max depth)
@@ -152,7 +152,7 @@ class DatasetAdaptor(Dataset, ABC):
 
         def copy_image(index: int):
             image = self.get_frame(index)
-            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index, file_extension=file_extension))
+            output_image_path = pjoin(output_path, HiveDataset.index_to_filename(index, file_extension=file_extension))
             imageio.v3.imwrite(output_image_path, image)
 
         tqdm_imap(copy_image, range(num_frames))
@@ -167,13 +167,13 @@ class DatasetAdaptor(Dataset, ABC):
 
         def copy_image(index: int):
             image = self.get_depth_map(index)
-            output_image_path = pjoin(output_path, VTMDataset.index_to_filename(index, file_extension='png'))
+            output_image_path = pjoin(output_path, HiveDataset.index_to_filename(index, file_extension='png'))
             imageio.v3.imwrite(output_image_path, image)
 
         tqdm_imap(copy_image, range(self.num_frames))
 
     def convert(self, estimate_pose: bool, estimate_depth: bool, inpainting_mode: InpaintingMode, static_camera=False,
-                no_cache=False, profiling: Optional[dict] = None) -> VTMDataset:
+                no_cache=False, profiling: Optional[dict] = None) -> HiveDataset:
         """
         Convert a dataset into the standard format.
 
@@ -206,7 +206,7 @@ class DatasetAdaptor(Dataset, ABC):
         with timed_block(log_msg="Creating metadata for dataset.", profiling=profiling,
                          key_path=['timing', 'load_dataset', 'create_metadata']):
             metadata = self.get_metadata(estimate_pose, estimate_depth)
-            metadata_path = pjoin(self.output_path, VTMDataset.metadata_filename)
+            metadata_path = pjoin(self.output_path, HiveDataset.metadata_filename)
             metadata.save(metadata_path)
 
         with timed_block(log_msg="Copying RGB frames.", profiling=profiling,
@@ -243,12 +243,12 @@ class DatasetAdaptor(Dataset, ABC):
                 camera_trajectory = self.get_camera_trajectory()
 
             logging.info(f"Creating camera matrix file.")
-            camera_matrix_path = pjoin(self.output_path, VTMDataset.camera_matrix_filename)
+            camera_matrix_path = pjoin(self.output_path, HiveDataset.camera_matrix_filename)
             # noinspection PyTypeChecker
             np.savetxt(camera_matrix_path, camera_matrix)
 
             logging.info(f"Creating camera trajectory file.")
-            camera_trajectory_path = pjoin(self.output_path, VTMDataset.camera_trajectory_filename)
+            camera_trajectory_path = pjoin(self.output_path, HiveDataset.camera_trajectory_filename)
             # noinspection PyTypeChecker
             camera_trajectory.save(camera_trajectory_path)
 
@@ -257,9 +257,9 @@ class DatasetAdaptor(Dataset, ABC):
 
         logging.info(f"Created new dataset at {self.output_path}.")
 
-        return VTMDataset(self.output_path)
+        return HiveDataset(self.output_path)
 
-    def _try_get_cached_dataset(self, estimate_pose: bool, estimate_depth: bool) -> Optional[VTMDataset]:
+    def _try_get_cached_dataset(self, estimate_pose: bool, estimate_depth: bool) -> Optional[HiveDataset]:
         """
         Attempt to load a cached dataset.
 
@@ -271,8 +271,8 @@ class DatasetAdaptor(Dataset, ABC):
         :param estimate_depth: Whether to estimate depth maps or use provided ground truth depth maps.
         :return: The cached dataset, if it exists. Otherwise, returns `None`.
         """
-        if VTMDataset.is_valid_folder_structure(self.output_path):
-            dataset = VTMDataset(self.output_path)
+        if HiveDataset.is_valid_folder_structure(self.output_path):
+            dataset = HiveDataset(self.output_path)
 
             num_frames = len(os.listdir(dataset.path_to_rgb_frames))
             num_depth_maps = len(os.listdir(dataset.path_to_depth_maps))
@@ -305,9 +305,9 @@ class DatasetAdaptor(Dataset, ABC):
 
         os.makedirs(self.output_path)
 
-        image_folder = create_folder(self.output_path, VTMDataset.rgb_folder)
-        depth_folder = create_folder(self.output_path, VTMDataset.depth_folder)
-        mask_folder = create_folder(self.output_path, VTMDataset.mask_folder)
+        image_folder = create_folder(self.output_path, HiveDataset.rgb_folder)
+        depth_folder = create_folder(self.output_path, HiveDataset.depth_folder)
+        mask_folder = create_folder(self.output_path, HiveDataset.mask_folder)
 
         return image_folder, depth_folder, mask_folder
 
@@ -358,13 +358,13 @@ class DatasetAdaptor(Dataset, ABC):
 
         if self.frame_step > 1:
             for index in set(frames).difference(frames_subset):
-                os.remove(pjoin(colmap_rgb_path, VTMDataset.index_to_filename(index, file_extension=file_extension)))
+                os.remove(pjoin(colmap_rgb_path, HiveDataset.index_to_filename(index, file_extension=file_extension)))
 
             for dst_index, src_index in enumerate(frames_subset):
                 src_path = pjoin(colmap_rgb_path,
-                                 VTMDataset.index_to_filename(src_index, file_extension=file_extension))
+                                 HiveDataset.index_to_filename(src_index, file_extension=file_extension))
                 dst_path = pjoin(colmap_rgb_path,
-                                 VTMDataset.index_to_filename(dst_index, file_extension=file_extension))
+                                 HiveDataset.index_to_filename(dst_index, file_extension=file_extension))
 
                 shutil.move(src_path, dst_path)
 
@@ -417,7 +417,7 @@ class DatasetAdaptor(Dataset, ABC):
             colmap_depth = colmap_processor.get_sparse_depth_maps(camera_matrix, camera_poses)
 
         def transform(depth_map):
-            depth_map = VTMDataset.depth_scaling_factor * depth_map.astype(np.float32)
+            depth_map = HiveDataset.depth_scaling_factor * depth_map.astype(np.float32)
             depth_map[depth_map > metadata.max_depth] = 0.0
 
             return depth_map
@@ -457,7 +457,7 @@ class DatasetAdaptor(Dataset, ABC):
                 index, depth_map = index_depth_map
                 depth_map = 1000 * depth_map  # convert to mm
                 depth_map = depth_map.astype(np.uint16)
-                imageio.v3.imwrite(pjoin(colmap_depth_output_path, VTMDataset.index_to_filename(index)), depth_map)
+                imageio.v3.imwrite(pjoin(colmap_depth_output_path, HiveDataset.index_to_filename(index)), depth_map)
 
             logging.debug(f"Writing dense COLMAP depth maps to {colmap_depth_output_path}...")
             tqdm_imap(save_depth, list(zip(frames_subset, colmap_depth_scaled)))
@@ -475,17 +475,17 @@ class DatasetAdaptor(Dataset, ABC):
 
         logging.info("Creating inpainted frame data.")
 
-        rgb_path = pjoin(self.output_path, VTMDataset.rgb_folder)
-        depth_path = pjoin(self.output_path, VTMDataset.depth_folder)
-        mask_path = pjoin(self.output_path, VTMDataset.mask_folder)
+        rgb_path = pjoin(self.output_path, HiveDataset.rgb_folder)
+        depth_path = pjoin(self.output_path, HiveDataset.depth_folder)
+        mask_path = pjoin(self.output_path, HiveDataset.mask_folder)
 
         rgb_filenames = sorted(os.listdir(rgb_path))
         depth_filenames = sorted(os.listdir(depth_path))
         mask_filenames = sorted(os.listdir(mask_path))
 
-        inpainted_rgb_path = create_folder(self.output_path, VTMDataset.inpainted_rgb_folder)
-        inpainted_depth_path = create_folder(self.output_path, VTMDataset.inpainted_depth_folder)
-        inpainted_mask_path = create_folder(self.output_path, VTMDataset.inpainted_mask_folder)
+        inpainted_rgb_path = create_folder(self.output_path, HiveDataset.inpainted_rgb_folder)
+        inpainted_depth_path = create_folder(self.output_path, HiveDataset.inpainted_depth_folder)
+        inpainted_mask_path = create_folder(self.output_path, HiveDataset.inpainted_mask_folder)
 
         lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
 
@@ -741,7 +741,7 @@ class TUMAdaptor(DatasetAdaptor):
                                fps=self.fps, width=self.width, height=self.height,
                                estimate_pose=estimate_pose, estimate_depth=estimate_depth,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
-                               depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
+                               depth_scale=HiveDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_camera_matrix(self) -> np.ndarray:
         return self.intrinsic_matrix
@@ -835,10 +835,10 @@ class UnrealAdaptor(DatasetAdaptor):
         return self.camera_trajectory[index]
 
     def get_frame(self, index: int) -> np.ndarray:
-        return imageio.v3.imread(pjoin(self.base_path, self.rgb_folder, VTMDataset.index_to_filename(index)))
+        return imageio.v3.imread(pjoin(self.base_path, self.rgb_folder, HiveDataset.index_to_filename(index)))
 
     def get_depth_map(self, index: int) -> np.ndarray:
-        depth_map = imageio.v3.imread(pjoin(self.base_path, self.depth_folder, VTMDataset.index_to_filename(index)))
+        depth_map = imageio.v3.imread(pjoin(self.base_path, self.depth_folder, HiveDataset.index_to_filename(index)))
         depth_map = depth_map.astype(np.uint16)
         # Depth should already be in mm, the expected format, so scaling is needed.
 
@@ -946,7 +946,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
         return DatasetMetadata(num_frames=video_metadata.num_frames, fps=video_metadata.fps, width=width, height=height,
                                frame_step=self.frame_step, estimate_pose=estimate_pose, estimate_depth=estimate_depth,
                                depth_mask_dilation_iterations=depth_mask_dilation_iterations,
-                               depth_scale=VTMDataset.depth_scaling_factor, colmap_options=self.colmap_options)
+                               depth_scale=HiveDataset.depth_scaling_factor, colmap_options=self.colmap_options)
 
     def get_full_num_frames(self):
         return self._count_frames()
@@ -1300,7 +1300,7 @@ class StrayScannerAdaptor(VideoAdaptorBase):
                            file_extension=file_extension)
 
     def get_depth_map(self, index: int) -> np.ndarray:
-        filename = VTMDataset.index_to_filename(index, file_extension='png')
+        filename = HiveDataset.index_to_filename(index, file_extension='png')
         depth_map_path = pjoin(self.base_path, self.depth_folder, filename)
         depth_map = imageio.v3.imread(depth_map_path)
 
@@ -1430,7 +1430,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
 def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(), pipeline_options=PipelineOptions(),
                 resize_to: Optional[Union[int, Size]] = 640, depth_confidence_filter_level=0,
-                profiling: Optional[dict] = None) -> VTMDataset:
+                profiling: Optional[dict] = None) -> HiveDataset:
     """
     Get a VTM formatted dataset or create one from another dataset format.
 
@@ -1451,8 +1451,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
     dataset_path = storage_options.dataset_path
     output_path = storage_options.output_path
 
-    if not storage_options.no_cache and VTMDataset.is_valid_folder_structure(output_path):
-        dataset = VTMDataset(output_path)
+    if not storage_options.no_cache and HiveDataset.is_valid_folder_structure(output_path):
+        dataset = HiveDataset(output_path)
     else:
         base_kwargs = dict(
             base_path=dataset_path,

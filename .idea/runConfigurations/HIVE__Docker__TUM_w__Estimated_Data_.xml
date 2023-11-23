@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="video2mesh (Docker, TUM w/ Estimated Data)" type="PythonConfigurationType" factoryName="Python">
+  <configuration default="false" name="HIVE (Docker, TUM w/ Estimated Data)" type="PythonConfigurationType" factoryName="Python">
     <module name="video2mesh" />
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
@@ -42,7 +42,7 @@
     </EXTENSION>
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="SCRIPT_NAME" value="$PROJECT_DIR$/video2mesh/pipeline.py" />
-    <option name="PARAMETERS" value="--dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path outputs/rgbd_dataset_freiburg3_walking_xyz_est --overwrite_ok --no_cache --estimate_pose --estimate_depth --num_frames 150" />
+    <option name="PARAMETERS" value="--dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path outputs/rgbd_dataset_freiburg3_walking_xyz_est --overwrite_ok --no_cache --estimate_pose --estimate_depth --inpainting_mode 2 --num_frames 150" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />

@@ -1,5 +1,3 @@
-"""This module defines the camera parameters for common cameras/sensors."""
-
 #  HIVE, creates 3D mesh videos.
 #  Copyright (C) 2023 Anthony Dickson anthony.dickson9656@gmail.com
 #
@@ -16,12 +14,19 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from video2mesh.geometric import CameraMatrix
+import argparse
 
+from hive.interface import Interface
+from hive.pipeline import main
 
-class KinectSensor:
-    """The Kinect RGB-D sensor used in the NYU v2 RGB-D dataset and the TUM RGB-D dataset."""
+if __name__ == '__main__':
 
-    @staticmethod
-    def get_camera_matrix() -> CameraMatrix:
-        return CameraMatrix(fx=580., fy=580., cx=319.5, cy=239.5, width=640, height=480)
+    parser = argparse.ArgumentParser(description="Video2Mash")
+    parser.add_argument("--dataset_path")
+    args, leftovers = parser.parse_known_args()
+
+    if args.dataset_path is not None:
+        main()
+    else:
+        interface = Interface.get_interface()
+        interface.launch(server_name="0.0.0.0", server_port=8081)

@@ -2,8 +2,8 @@
   <configuration default="false" name="Run WebXR Server" type="docker-deploy" factoryName="docker-image" server-name="Docker">
     <deployment type="docker-image">
       <settings>
-        <option name="imageTag" value="dican732/webxr3dvideo:node-16" />
-        <option name="containerName" value="WebXR-3D-Video-Server" />
+        <option name="imageTag" value="anthonydickson/hive-renderer:node-16" />
+        <option name="containerName" value="Hive-Renderer" />
         <option name="portBindings">
           <list>
             <DockerPortBindingImpl>
@@ -18,12 +18,12 @@
           <list>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/src" />
-              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/src" />
+              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\src\" />
               <option name="readOnly" value="true" />
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="$PROJECT_DIR$/third_party/webxr3dvideo/docs" />
+              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\docs" />
             </DockerVolumeBindingImpl>
           </list>
         </option>

@@ -19,7 +19,7 @@ import cv2
 import enum
 from typing import Optional, List, Dict
 
-from video2mesh.types import File
+from hive.types import File
 
 
 class ReprMixin:
@@ -427,7 +427,7 @@ class ForegroundTrajectorySmoothingOptions(Options):
 class WebXROptions(Options):
     """Configuration for the WebXR renderer, and the metadata."""
 
-    def __init__(self, webxr_path='third_party/webxr3dvideo/docs/video', webxr_url='localhost:8080',
+    def __init__(self, webxr_path='third_party/HIVE_Renderer/docs/video', webxr_url='localhost:8080',
                  webxr_add_ground_plane=False, webxr_add_sky_box=False):
         """
         :param webxr_path: Where to export the 3D video files to.
@@ -445,7 +445,7 @@ class WebXROptions(Options):
         group = parser.add_argument_group('WebXR')
 
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
-                           default='third_party/webxr3dvideo/docs/video')
+                           default='third_party/HIVE_Renderer/docs/video')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
                            default='http://localhost:8080')
         group.add_argument('--webxr_add_ground_plane', action='store_true',

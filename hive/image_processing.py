@@ -23,8 +23,8 @@ import cv2
 import logging
 import numpy as np
 
-from video2mesh.options import MaskDilationOptions
-from video2mesh.utils import validate_shape
+from hive.options import MaskDilationOptions
+from hive.utils import validate_shape
 
 
 def dilate_mask(mask, dilation_options: MaskDilationOptions):

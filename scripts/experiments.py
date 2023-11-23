@@ -29,13 +29,13 @@ import numpy as np
 import pandas as pd
 import trimesh
 
-from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometric import Trajectory
-from video2mesh.io import VTMDataset, temporary_trajectory, DatasetMetadata
-from video2mesh.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
+from hive.fusion import tsdf_fusion, bundle_fusion
+from hive.geometric import Trajectory
+from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata
+from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
     WebXROptions
-from video2mesh.pipeline import Pipeline
-from video2mesh.utils import setup_logger, tqdm_imap, set_key_path
+from hive.pipeline import Pipeline
+from hive.utils import setup_logger, tqdm_imap, set_key_path
 
 
 def setup(output_path: str, overwrite_ok: bool):
@@ -109,7 +109,7 @@ def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajecto
         mesh.export(pjoin(experiment_path, f"mesh.ply"))
 
 
-def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_options: BackgroundMeshOptions) -> Optional[
+def tsdf_fusion_with_colmap(dataset: HiveDataset, frame_set: List[int], mesh_options: BackgroundMeshOptions) -> Optional[
     trimesh.Trimesh]:
     depth_folder = pjoin(dataset.base_path, 'colmap_depth')
     rgb_files = [dataset.rgb_dataset.image_filenames[i] for i in frame_set]
@@ -128,17 +128,17 @@ def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_opti
 
     os.makedirs(tmp_dir)
 
-    metadata.save(pjoin(tmp_dir, VTMDataset.metadata_filename))
-    np.savetxt(pjoin(tmp_dir, VTMDataset.camera_matrix_filename), camera_matrix)
-    np.savetxt(pjoin(tmp_dir, VTMDataset.camera_trajectory_filename), poses)
+    metadata.save(pjoin(tmp_dir, HiveDataset.metadata_filename))
+    np.savetxt(pjoin(tmp_dir, HiveDataset.camera_matrix_filename), camera_matrix)
+    np.savetxt(pjoin(tmp_dir, HiveDataset.camera_trajectory_filename), poses)
 
-    rgb_path = pjoin(tmp_dir, VTMDataset.rgb_folder)
+    rgb_path = pjoin(tmp_dir, HiveDataset.rgb_folder)
     os.makedirs(rgb_path)
 
     def copy_rgb(index_filename):
         index, filename = index_filename
         src = pjoin(dataset.path_to_rgb_frames, filename)
-        dst = pjoin(rgb_path, VTMDataset.index_to_filename(index))
+        dst = pjoin(rgb_path, HiveDataset.index_to_filename(index))
         shutil.copy(src, dst)
 
     tqdm_imap(copy_rgb, list(enumerate(rgb_files)))
@@ -146,24 +146,24 @@ def tsdf_fusion_with_colmap(dataset: VTMDataset, frame_set: List[int], mesh_opti
     def copy_depth(index_filename):
         index, filename = index_filename
         src = pjoin(depth_folder, filename)
-        dst = pjoin(depth_path, VTMDataset.index_to_filename(index))
+        dst = pjoin(depth_path, HiveDataset.index_to_filename(index))
         shutil.copy(src, dst)
 
-    depth_path = pjoin(tmp_dir, VTMDataset.depth_folder)
+    depth_path = pjoin(tmp_dir, HiveDataset.depth_folder)
     os.makedirs(depth_path)
     tqdm_imap(copy_depth, list(enumerate(depth_files)))
 
     def copy_mask(index_filename):
         index, filename = index_filename
         src = pjoin(dataset.path_to_masks, filename)
-        dst = pjoin(mask_path, VTMDataset.index_to_filename(index))
+        dst = pjoin(mask_path, HiveDataset.index_to_filename(index))
         shutil.copy(src, dst)
 
-    mask_path = pjoin(tmp_dir, VTMDataset.mask_folder)
+    mask_path = pjoin(tmp_dir, HiveDataset.mask_folder)
     os.makedirs(mask_path)
     tqdm_imap(copy_mask, list(enumerate(mask_files)))
 
-    tmp_dataset = VTMDataset(tmp_dir)
+    tmp_dataset = HiveDataset(tmp_dir)
     try:
         mesh = tsdf_fusion(tmp_dataset, mesh_options)
     except ValueError:  # ValueError is raised from the marching cubes function when tsdf_volume.min() > 0.
@@ -376,7 +376,7 @@ class Experiments:
             profiling_json_path = pjoin(output_path, 'profiling.json')
             has_profiling_json = os.path.isfile(profiling_json_path)
 
-            is_valid_dataset = VTMDataset.is_valid_folder_structure(output_path)
+            is_valid_dataset = HiveDataset.is_valid_folder_structure(output_path)
 
             if not is_valid_dataset or not has_profiling_json or self.overwrite_ok:
                 pipeline = Pipeline(options=pipeline_options,
@@ -409,7 +409,7 @@ class Experiments:
                 profiling_json_path = pjoin(self.dataset_paths[dataset_name][label], 'profiling.json')
                 has_profiling_json = os.path.isfile(profiling_json_path)
 
-                is_valid_dataset = VTMDataset.is_valid_folder_structure(self.dataset_paths[dataset_name][label])
+                is_valid_dataset = HiveDataset.is_valid_folder_structure(self.dataset_paths[dataset_name][label])
 
                 if not is_valid_dataset or not has_profiling_json or self.overwrite_ok:
                     pipeline = Pipeline(options=config,
@@ -743,10 +743,10 @@ class Experiments:
         trajectory_results = dict()
 
         for dataset_name in self.dataset_names:
-            dataset_gt = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
+            dataset_gt = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
 
             for label in (self.cm_label, self.est_label):
-                dataset = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
+                dataset = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
 
                 logging.info(f"Running trajectory comparison for dataset '{dataset_name}' and config '{label}'.")
                 run_trajectory_comparisons(dataset, pred_trajectory=dataset.camera_trajectory,
@@ -868,11 +868,11 @@ class Experiments:
         recon_folder = pjoin(self.output_path, 'reconstruction')
 
         for dataset_name in self.dataset_names:
-            dataset_gt = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
+            dataset_gt = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
             mesh_options = BackgroundMeshOptions()
 
             for label in (self.gt_label, self.cm_label, self.est_label):
-                dataset = VTMDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
+                dataset = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
 
                 logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
                 mesh_output_path = pjoin(recon_folder, dataset_name, label)

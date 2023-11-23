@@ -29,12 +29,12 @@ from scipy.spatial.transform import Slerp, Rotation
 from tqdm import tqdm
 from typing import Tuple, List, Optional, Iterable, Union
 
-from video2mesh.fusion import tsdf_fusion
-from video2mesh.geometric import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
+from hive.fusion import tsdf_fusion
+from hive.geometric import Quaternion, subtract_pose, add_pose, get_identity_pose, point_cloud_from_depth, \
     Trajectory
-from video2mesh.io import VTMDataset
-from video2mesh.options import BackgroundMeshOptions, MeshReconstructionMethod
-from video2mesh.utils import tqdm_imap, temp_seed, Domain, check_domain
+from hive.io import HiveDataset
+from hive.options import BackgroundMeshOptions, MeshReconstructionMethod
+from hive.utils import tqdm_imap, temp_seed, Domain, check_domain
 
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -267,7 +267,7 @@ class FeatureExtractionOptions:
 class FeatureExtractor:
     """Extracts correspondences between image pairs and the depth at those correspondences."""
 
-    def __init__(self, dataset: VTMDataset, frame_pairs: FramePairs,
+    def __init__(self, dataset: HiveDataset, frame_pairs: FramePairs,
                  feature_extraction_options=FeatureExtractionOptions(),
                  debug_path: Optional[str] = None):
         """
@@ -969,7 +969,7 @@ class PoseOptimiser:
 
     DEBUG_FOLDER = 'pose_optim'
 
-    def __init__(self, dataset: VTMDataset, frame_sampling=FrameSamplingMode.Hierarchical,
+    def __init__(self, dataset: HiveDataset, frame_sampling=FrameSamplingMode.Hierarchical,
                  feature_extraction_options=FeatureExtractionOptions(),
                  optimisation_options=OptimisationOptions(), debug=True):
         """
@@ -1616,7 +1616,7 @@ class PoseOptimiser:
 
 
 class ForegroundPoseOptimiser:
-    def __init__(self, dataset: VTMDataset, learning_rate=1e-5, num_epochs=100):
+    def __init__(self, dataset: HiveDataset, learning_rate=1e-5, num_epochs=100):
         self.dataset = dataset
         self.learning_rate = learning_rate
         self.num_epochs = num_epochs
@@ -1723,10 +1723,10 @@ def main():
                         help='Random seed to use when initialising camera trajectory with random data.')
     args = parser.parse_args()
 
-    if not VTMDataset.is_valid_folder_structure(args.dataset_path):
+    if not HiveDataset.is_valid_folder_structure(args.dataset_path):
         raise RuntimeError(f"The path {args.dataset_path} does not point to a valid dataset.")
 
-    dataset = VTMDataset(args.dataset_path)
+    dataset = HiveDataset(args.dataset_path)
 
     num_frames = args.num_frames
 

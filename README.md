@@ -1,5 +1,5 @@
-# Video2Mesh
-This project looks at creating a 3D video from an RGB-D (red, green, blue and depth) video.
+# HIVE (Home Immersive Video Experience)
+This project looks at creating a 3D free-viewpoint video from an RGB-D (red, green, blue and depth) video.
 ![demo of 3D video](images/video_3d_demo.gif)
 
 # Getting Started
@@ -28,7 +28,7 @@ Here are the steps to quickly run a video.
 2. Create a folder in the repository root to store the outputs.
 3. Run the following command in a terminal from the repository root:
     ```shell
-    PORT_NUMBER=8081; docker run --name HIVE --rm --gpus all -p ${PORT_NUMBER}:${PORT_NUMBER} -v $(pwd):/app -it dican732/video2mesh:latest python3 -m video2mesh.interface --port ${PORT_NUMBER}
+    PORT_NUMBER=8081; docker run --name HIVE --rm --gpus all -p ${PORT_NUMBER}:${PORT_NUMBER} -v $(pwd):/app -it anthonydickson/hive:latest python3 -m hive.interface --port ${PORT_NUMBER}
     ```
 4. Navigate to [localhost:8081](http://localhost:8081) and fill in `dataset_path` and `output_path` with the dataset path and output folder you created in steps 1 and 2, and click the button at the bottom of the page that says 'Start Pipeline'. 
    You can leave the other settings at their default values.
@@ -36,7 +36,7 @@ Here are the steps to quickly run a video.
    For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
 5. In another terminal, start the web viewer:
    ```shell
-   docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16  
+   docker run--name Hive-Renderer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16  
    ```
 6. After the pipeline has finished running, check the first terminal you opened for a link. Navigate to that link in your web browser to view the 3D video.
 
@@ -53,26 +53,26 @@ Choose one of three options for setting up the dev environment (in the recommend
 ### Pre-Built Docker Image
 1. Pull (download) the pre-built image (~18 GB): 
       ```shell
-      docker pull dican732/video2mesh:runtime-cu118
+      docker pull anthonydickson/hive:runtime-cu118
       ```
-   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `dican732/video2mesh:dev-cu118`.
+   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `anthonydickson/video2mesh:dev-cu118`.
 
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Building the Docker image locally
 1. Run the build command:
       ```shell
-      docker build -f Dockerfile.dev -t dican732/video2mesh .
+      docker build -f Dockerfile.dev -t anthonydickson/hive .
       ```
 
 2. There are some custom CUDA kernels that require GPU access to be built. These can be installed via the following command: 
     ```shell
-    docker run --rm -v $(pwd):/app -it dican732/video2mesh bash -c "cd thirdparty/consistent_depth/third_party/flownet2/ && chmod +x install.sh && ./install.sh && bash"
+    docker run --rm -v $(pwd):/app -it anthonydickson/hive bash -c "cd thirdparty/consistent_depth/third_party/flownet2/ && chmod +x install.sh && ./install.sh && bash"
     ```
   
 3. Once this command has finished and the container is ***still running***, run the following command to update the Docker image with the newly installed Python packages: 
     ```shell
-    IMAGE_NAME=dican732/video2mesh
+    IMAGE_NAME=anthonydickson/hive
     CONTAINER_ID=$(docker ps | grep ${IMAGE_NAME} | awk '{ print $1 }')
     docker commit $CONTAINER_ID $IMAGE_NAME
     ```
@@ -122,38 +122,38 @@ Make sure you download and extract the dataset to the `data/` folder.
 Below is an example of how to run the program with ground truth data and a static background:
 1. Local Python:
     ```shell
-    python -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
+    python -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
     ```
 
 2. Docker:
     ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
+    docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
     ```
 
 Below is an example of how to run the program with estimated data and a static background:
 1. Local Python:
     ```shell
-    python -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
+    python -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
     ```
 
 2. Docker:
     ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
+    docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
     ```
 
 ### PyCharm Users
 There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
 
 ### CLI Options
-If you want help with the CLI and the options, you can either refer to [options.py](video2mesh/options.py) or view the help via:
+If you want help with the CLI and the options, you can either refer to [options.py](hive/options.py) or view the help via:
 1. Local Python:
     ```shell
-    python -m video2mesh --help
+    python -m hive --help
     ```
 
 2. Docker:
     ```shell
-    docker run --rm -v $(pwd):/app -it dican732/video2mesh python3 -m video2mesh --help
+    docker run --rm -v $(pwd):/app -it anthonydickson/hive python3 -m hive --help
     ```
 
 ### Common CLI Options
@@ -178,18 +178,18 @@ If you want help with the CLI and the options, you can either refer to [options.
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
 ```shell
-docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh 
+docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive 
 ```
 For example, if you wanted to test whether the container is CUDA enabled: 
 ```shell
-docker run --rm --gpus all -v $(pwd):/app -it dican732/video2mesh python3 -c "import torch; print(torch.cuda.is_available())"
+docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ### Gradio Web Interface
 You can run the pipeline from a web based interface instead of the CLI.
 Assuming you are using Docker, you can run this by running the following command:
 ```shell
-docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it dican732/video2mesh:runtime-cu118 python3 -m video2mesh.interface
+docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it anthonydickson/hive:runtime-cu118 python3 -m hive.interface
 ```
 and navigating to [localhost:8081](http://localhost:8081).
 Note that if you are using Docker, the dataset path and output paths should be relative to the project root folder.
@@ -199,7 +199,7 @@ Thank you to Felix for implementing this web interface and the image inpainting.
 ### Viewing the 3D Video
 - Start the Docker container:
    ```shell
-   docker run --rm  --name WebXR-3D-Video-Server -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs dican732/webxr3dvideo:node-16 
+   docker run --rm  --name Hive-Renderer -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16 
    ```
   or if you are using PyCharm there is a run configuration included.
 - When you run the pipeline it will print the link to view the video.
@@ -215,7 +215,7 @@ Thank you to Felix for implementing this web interface and the image inpainting.
   - `R`: Restart the video playback.
   - `S`: Show/hide the framerate statistics.
 
-Refer to the [WebXR repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
+Refer to the [Hive Renderer repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
 
 # Data Format
 ## Input Data Format
@@ -223,7 +223,7 @@ This program accepts datasets in three formats:
 - TUM [RGB-D SLAM Dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
 - RGB-D datasets created on an iOS device using [StrayScanner](https://apps.apple.com/nz/app/stray-scanner/id1557051662)
 - RGB Video
-- The VTM format (see [VTM Dataset Format](#vtm-dataset-format))
+- The HIVE dataset format (see [HIVE Dataset Format](#hive-dataset-format))
 
 The above datasets are automatically converted to the VTM format.
 
@@ -240,8 +240,8 @@ Each 3D video is saved to a folder with the glTF formatted mesh files and JSON m
 This folder is saved under the dataset folder.
 
 
-## VTM Dataset Format
-Overall, the expected folder structure for the VTM format is as follows:
+## HIVE Dataset Format
+Overall, the expected folder structure for the HIVE dataset format is as follows:
 
 ```
 <dataset>
@@ -323,18 +323,13 @@ Within each dataset folder, there should be the following 5 items:
 
 
 # Algorithm Overview
-## Pipeline
-![pipeline overview](images/vtm_pipeline_overview.png)
-
 ## Dataset Creation
-![dataset creation overview](images/vtm_dataset_creation_overview.png)
+![dataset creation overview](images/vtm_dataset_creation_overview.jpg)
 
 ## Mesh Reconstruction
-![dynamic mesh reconstruction overview](images/vtm_dynamic_mesh_reconstruction.png)
+![dynamic mesh reconstruction overview](images/vtm_dynamic_mesh_reconstruction.jpg)
+![static mesh reconstruction overview](images/vtm_static_mesh_reconstruction.jpg)
 Background mesh reconstruction uses [TSDFFusion](https://github.com/andyzeng/tsdf-fusion-python) by default, but it can also use the above method if the user requests it.
 
 ## WebXR Renderer
-![webxr renderer overview](images/vtm_renderer_overview.png)
-
-## Pose Optimisation (Obsolete)
-![pose optimisation overview](images/vtm_pose_optimisation.png)
+![webxr renderer overview](images/vtm_renderer_overview.jpg)

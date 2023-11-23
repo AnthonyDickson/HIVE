@@ -19,7 +19,6 @@ This module contains the code for running the pipeline end-to-end (minus the ren
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
-import cv2
 import datetime
 import json
 import logging
@@ -41,19 +40,18 @@ from pathlib import Path
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
-from trimesh.exchange.export import export_mesh
 from typing import Optional, List, Tuple, Any, Union
 
-from video2mesh.dataset_adaptors import get_dataset
-from video2mesh.fusion import tsdf_fusion, bundle_fusion
-from video2mesh.geometric import point_cloud_from_depth, world2image, get_pose_components, image2world
-from video2mesh.image_processing import dilate_mask
-from video2mesh.io import VTMDataset, temporary_trajectory
-from video2mesh.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
+from hive.dataset_adaptors import get_dataset
+from hive.fusion import tsdf_fusion, bundle_fusion
+from hive.geometric import point_cloud_from_depth, world2image, get_pose_components
+from hive.image_processing import dilate_mask
+from hive.io import HiveDataset, temporary_trajectory
+from hive.options import StorageOptions, COLMAPOptions, MeshDecimationOptions, \
     MaskDilationOptions, MeshFilteringOptions, MeshReconstructionMethod, PipelineOptions, BackgroundMeshOptions, \
     ForegroundTrajectorySmoothingOptions, WebXROptions
-from video2mesh.pose_optimisation import ForegroundPoseOptimiser
-from video2mesh.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger, format_bytes, \
+from hive.pose_optimisation import ForegroundPoseOptimiser
+from hive.utils import validate_camera_parameter_shapes, validate_shape, tqdm_imap, setup_logger, format_bytes, \
     set_key_path, timed_block, get_key_path
 
 
@@ -104,8 +102,8 @@ class Pipeline:
 
         :return: An instance of the pipeline.
         """
-        parser = argparse.ArgumentParser("video2mesh.py", description="Create 3D meshes from a RGB-D sequence with "
-                                                                      "camera trajectory annotations.")
+        parser = argparse.ArgumentParser("HIVE", description="Create 3D mesh videos from a RGB-D sequence with "
+                                                             "camera trajectory annotations.")
         PipelineOptions.add_args(parser)
         StorageOptions.add_args(parser)
         MaskDilationOptions.add_args(parser)
@@ -117,7 +115,7 @@ class Pipeline:
 
         args = parser.parse_args()
 
-        video2mesh_options = PipelineOptions.from_args(args)
+        pipeline_options = PipelineOptions.from_args(args)
         storage_options = StorageOptions.from_args(args)
         filtering_options = MeshFilteringOptions.from_args(args)
         dilation_options = MaskDilationOptions.from_args(args)
@@ -127,7 +125,7 @@ class Pipeline:
         webxr_options = WebXROptions.from_args(args)
 
         pipeline = Pipeline(
-            options=video2mesh_options,
+            options=pipeline_options,
             storage_options=storage_options,
             decimation_options=decimation_options,
             dilation_options=dilation_options,
@@ -170,7 +168,7 @@ class Pipeline:
         with timed_block(log_msg=log_msg, profiling=self.profiling, key_path=key_path) as timer:
             yield timer
 
-    def run(self, dataset: Optional[VTMDataset] = None, compress=True):
+    def run(self, dataset: Optional[HiveDataset] = None, compress=True):
         """
         Run the pipeline to convert a video or RGB-D dataset into a 3D video.
 
@@ -244,7 +242,7 @@ class Pipeline:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
 
-    def _create_background_scene(self, dataset: VTMDataset) -> trimesh.Scene:
+    def _create_background_scene(self, dataset: HiveDataset) -> trimesh.Scene:
         """
         Create the background mesh(es) from an RGB-D dataset.
 
@@ -275,7 +273,7 @@ class Pipeline:
 
         return background_scene
 
-    def _create_foreground_scene(self, dataset: VTMDataset) -> trimesh.Scene:
+    def _create_foreground_scene(self, dataset: HiveDataset) -> trimesh.Scene:
         """
         Create the foreground mesh(es) from an RGB-D dataset.
 
@@ -296,7 +294,7 @@ class Pipeline:
 
         return foreground_scene
 
-    def _create_scene(self, dataset: VTMDataset, include_background=False, background_only=False) -> trimesh.Scene:
+    def _create_scene(self, dataset: HiveDataset, include_background=False, background_only=False) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
@@ -485,7 +483,7 @@ class Pipeline:
         return scene
 
     @staticmethod
-    def _create_empty_scene(dataset: VTMDataset) -> trimesh.Scene:
+    def _create_empty_scene(dataset: HiveDataset) -> trimesh.Scene:
         """
         Create an empty trimesh scene initialised with a camera.
 
@@ -720,7 +718,7 @@ class Pipeline:
         return atlas, final_uvs
 
     @classmethod
-    def _create_static_mesh(cls, dataset: VTMDataset, num_frames=-1, options=BackgroundMeshOptions(),
+    def _create_static_mesh(cls, dataset: HiveDataset, num_frames=-1, options=BackgroundMeshOptions(),
                             frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
         """
         Create a mesh of the static elements from an RGB-D dataset.
@@ -827,7 +825,7 @@ class Pipeline:
             'compression_ratio': compression_ratio
         })
 
-    def _center_scenes(self, dataset: VTMDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
+    def _center_scenes(self, dataset: HiveDataset, foreground_scene: trimesh.Scene, background_scene: trimesh.Scene) -> \
             Tuple[trimesh.Scene, trimesh.Scene]:
         """
         Center the scenes at the world origin and orient them so that the render is looking at the front of scene.
@@ -878,7 +876,7 @@ class Pipeline:
 
         return foreground_scene, background_scene
 
-    def _align_bundle_fusion_reconstruction(self, dataset: VTMDataset, scene: trimesh.Scene) -> trimesh.Scene:
+    def _align_bundle_fusion_reconstruction(self, dataset: HiveDataset, scene: trimesh.Scene) -> trimesh.Scene:
         """
         BundleFusion outputs a mesh that has been transformed in multiple ways (e.g., mirror and rotation).
         This function attempts to undo these transformations and align the background mesh with the foreground mesh.
@@ -952,7 +950,7 @@ class Pipeline:
         return scene_bounds
 
     @staticmethod
-    def _get_dataset_name(dataset: VTMDataset) -> str:
+    def _get_dataset_name(dataset: HiveDataset) -> str:
         """Get the `name` of a dataset (the folder name)."""
         return Path(dataset.base_path).name
 

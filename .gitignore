@@ -6,5 +6,5 @@ weights/
 checkpoints/
 experiment_results/
 *.log
-video2mesh/__pycache__
+hive/__pycache__
 third_party/webxr3dvideo/docs/video/

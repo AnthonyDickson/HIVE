@@ -2,11 +2,11 @@
   <configuration default="false" name="Build WebXR Image" type="docker-deploy" factoryName="dockerfile" server-name="Docker">
     <deployment type="dockerfile">
       <settings>
-        <option name="imageTag" value="dican732/webxr3dvideo:node-16" />
+        <option name="imageTag" value="anthonydickson/hive_renderer:node-16" />
         <option name="buildOnly" value="true" />
         <option name="containerName" value="" />
         <option name="showCommandPreview" value="true" />
-        <option name="sourceFilePath" value="third_party/webxr3dvideo/Dockerfile" />
+        <option name="sourceFilePath" value="third_party/HIVE_Renderer/Dockerfile" />
       </settings>
     </deployment>
     <method v="2" />

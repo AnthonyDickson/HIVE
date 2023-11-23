@@ -27,8 +27,8 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
 from typing import Optional, Tuple, Dict
 
-from video2mesh.types import File, Size
-from video2mesh.utils import validate_shape, validate_camera_parameter_shapes
+from hive.types import File, Size
+from hive.utils import validate_shape, validate_camera_parameter_shapes
 
 
 def pose_vec2mat(pose: np.ndarray) -> np.ndarray:

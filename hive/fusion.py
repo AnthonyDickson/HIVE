@@ -27,13 +27,13 @@ from os.path import join as pjoin
 from tqdm import tqdm
 from typing import Optional, List
 
+from hive.image_processing import dilate_mask
+from hive.io import HiveDataset
+from hive.options import BackgroundMeshOptions, MaskDilationOptions, MeshReconstructionMethod
 from third_party.tsdf_fusion_python import fusion
-from video2mesh.image_processing import dilate_mask
-from video2mesh.io import VTMDataset
-from video2mesh.options import BackgroundMeshOptions, MaskDilationOptions, MeshReconstructionMethod
 
 
-def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames=-1,
+def tsdf_fusion(dataset: HiveDataset, options=BackgroundMeshOptions(), num_frames=-1,
                 frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
     """
     Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
@@ -110,7 +110,7 @@ def tsdf_fusion(dataset: VTMDataset, options=BackgroundMeshOptions(), num_frames
 
     # TODO: Cleanup mesh for floating fragments (e.g. via connected components analysis).
     # TODO: Fix this. It seems to mess up the order of the face vertices or something.
-    # verts, faces = Video2Mesh.cleanup_with_connected_components(verts, faces, is_object=False, min_components=10)
+    # verts, faces = Pipeline.cleanup_with_connected_components(verts, faces, is_object=False, min_components=10)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=colors, vertex_normals=norms)
 
     return mesh
@@ -258,11 +258,11 @@ def get_bundle_fusion_path() -> str:
     except KeyError:
         logging.error(f"Could not find the environment variable 'BUNDLE_FUSION_PATH'. "
                       f"Make sure that you set this environment variable or use the development Docker image "
-                      f"(dican732/video2mesh:dev-cu116).")
+                      f"(anthonydickson/hive:dev-cu118).")
         raise
 
 
-def bundle_fusion(output_folder: str, dataset: VTMDataset,
+def bundle_fusion(output_folder: str, dataset: HiveDataset,
                   options=BackgroundMeshOptions(MeshReconstructionMethod.BundleFusion), num_frames: int = -1) \
         -> trimesh.Trimesh:
     """

@@ -8,7 +8,7 @@
       <excludeFolder url="file://$MODULE_DIR$/outputs" />
       <excludeFolder url="file://$MODULE_DIR$/third_party/lama/outputs" />
     </content>
-    <orderEntry type="jdk" jdkName="Remote Python 3.8.10 Docker (dican732/video2mesh:runtime-cu118)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Remote Python 3.8.10 Docker (anthonydickson/hive:runtime-cu118)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="AdaBins" />
   </component>

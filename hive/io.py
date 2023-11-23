@@ -34,18 +34,18 @@ from detectron2.engine import DefaultPredictor
 from os.path import join as pjoin
 from pathlib import Path
 from scipy.spatial.transform import Rotation
-from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
-from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
-from third_party.colmap.scripts.python.read_write_model import read_model
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
 from typing import Union, Tuple, Optional, Callable, IO, List
 
-from video2mesh.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
-from video2mesh.image_processing import dilate_mask, calculate_target_resolution
-from video2mesh.options import COLMAPOptions, MaskDilationOptions
-from video2mesh.types import File
-from video2mesh.utils import tqdm_imap, check_domain, Domain
+from hive.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
+from hive.image_processing import dilate_mask, calculate_target_resolution
+from hive.options import COLMAPOptions, MaskDilationOptions
+from hive.types import File
+from hive.utils import tqdm_imap, check_domain, Domain
+from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
+from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
+from third_party.colmap.scripts.python.read_write_model import read_model
 
 
 def load_raw_float32_image(file_name):
@@ -840,8 +840,8 @@ class DatasetMetadata:
         return DatasetMetadata.from_json(json_dict)
 
 
-class VTMDataset(Dataset):
-    """The main dataset format for the video2mesh (VTM) project."""
+class HiveDataset(Dataset):
+    """The main dataset format for the HIVE project."""
 
     metadata_filename = "metadata.json"
     camera_matrix_filename = "camera_matrix.txt"
@@ -1006,7 +1006,7 @@ class VTMDataset(Dataset):
 
         return transform
 
-    def create_masked_depth(self, dilation_options=MaskDilationOptions(num_iterations=64)) -> 'VTMDataset':
+    def create_masked_depth(self, dilation_options=MaskDilationOptions(num_iterations=64)) -> 'HiveDataset':
         start = datetime.datetime.now()
 
         masked_depth_folder = self.masked_depth_folder
@@ -1154,7 +1154,7 @@ class VTMDataset(Dataset):
 
 
 @contextlib.contextmanager
-def temporary_trajectory(dataset: VTMDataset, trajectory: Trajectory):
+def temporary_trajectory(dataset: HiveDataset, trajectory: Trajectory):
     """
     Context manager that temporarily replaces the trajectory of a dataset.
 
