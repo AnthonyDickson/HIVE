@@ -3,7 +3,7 @@
 	url = https://github.com/colmap/colmap.git
 [submodule "third_party/HIVE_Renderer"]
 	path = third_party/HIVE_Renderer
-	url = https://github.com/AnthonyDickson/webxr3dvideo.git
+	url = https://github.com/AnthonyDickson/HIVE_Renderer.git
 [submodule "third_party/tsdf_fusion_python"]
 	path = third_party/tsdf_fusion_python
 	url = https://github.com/AnthonyDickson/tsdf-fusion-python.git
