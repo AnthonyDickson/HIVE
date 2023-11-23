@@ -1,8 +1,8 @@
 [submodule "third_party/colmap"]
 	path = third_party/colmap
 	url = https://github.com/colmap/colmap.git
-[submodule "third_party/webxr3dvideo"]
-	path = third_party/webxr3dvideo
+[submodule "third_party/HIVE_Renderer"]
+	path = third_party/HIVE_Renderer
 	url = https://github.com/AnthonyDickson/webxr3dvideo.git
 [submodule "third_party/tsdf_fusion_python"]
 	path = third_party/tsdf_fusion_python
