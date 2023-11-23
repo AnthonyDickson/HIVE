@@ -15,7 +15,7 @@ This project looks at creating a 3D free-viewpoint video from an RGB-D (red, gre
 ## Cloning the Project
 Clone the repo:
 ```shell
-git clone --recurse-submodules https://github.com/AnthonyDickson/video2mesh.git 
+git clone --recurse-submodules https://github.com/AnthonyDickson/HIVE.git 
 ```
 If you forget to or cannot clone with `--recurse-submodules`, then clone the git dependencies with the following:
 ```shell
@@ -56,7 +56,7 @@ Choose one of three options for setting up the dev environment (in the recommend
       ```shell
       docker pull anthonydickson/hive:runtime-cu118
       ```
-   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `anthonydickson/video2mesh:dev-cu118`.
+   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `anthonydickson/hive:dev-cu118`.
 
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
