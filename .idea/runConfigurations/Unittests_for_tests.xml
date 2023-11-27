@@ -3,7 +3,7 @@
     <module name="video2mesh" />
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
-    <option name="SDK_HOME" value="docker://eight0153/video2mesh:cu116/python3" />
+    <option name="SDK_HOME" value="docker://anthonydickson/hive:runtime-cu118/python3" />
     <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
     <option name="IS_MODULE_SDK" value="false" />
     <option name="ADD_CONTENT_ROOTS" value="true" />

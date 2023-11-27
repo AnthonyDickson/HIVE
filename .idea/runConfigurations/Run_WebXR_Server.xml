@@ -18,12 +18,12 @@
           <list>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/src" />
-              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\src\" />
+              <option name="hostPath" value="$PROJECT_DIR$/third_party/HIVE_Renderer/src" />
               <option name="readOnly" value="true" />
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="D:\PycharmProjects\video2mesh\third_party\HIVE_Renderer\docs" />
+              <option name="hostPath" value="$PROJECT_DIR$/third_party/HIVE_Renderer/docs" />
             </DockerVolumeBindingImpl>
           </list>
         </option>
