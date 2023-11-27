@@ -1,5 +1,6 @@
 # HIVE (Home Immersive Video Experience)
 This project looks at creating a 3D free-viewpoint video from an RGB-D (red, green, blue and depth) video.
+
 ![demo of 3D video](images/demo.gif)
 
 # Getting Started
