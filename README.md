@@ -333,3 +333,16 @@ Background mesh reconstruction uses [TSDFFusion](https://github.com/andyzeng/tsd
 
 ## WebXR Renderer
 ![webxr renderer overview](images/vtm_renderer_overview.jpg)
+
+# Citing
+If you use our code, please cite:
+```
+@inproceedings{dickson2022vrvideos,
+    title={VRVideos: A Flexible Pipeline for VR Video Creation},
+    author={Dickson, Anthony and Shanks, Jeremy and Ventura, Jonathan and Knott, Alistair and Zollmann, Stefanie},
+    booktitle={2022 IEEE International Conference on Artificial Intelligence and Virtual Reality (AIVR)},
+    pages={1--5},
+    year={2022},
+    organization={IEEE}
+}
+```
