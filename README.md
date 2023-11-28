@@ -1,16 +1,14 @@
 # HIVE (Home Immersive Video Experience)
-This project looks at creating a 3D free-viewpoint video from an RGB-D (red, green, blue and depth) video.
+HIVE is a program for creating 3D free-viewpoint video from RGB video.
 
 ![demo of 3D video](images/demo.gif)
 
 # Getting Started
 ## System Requirements
 - Windows or Ubuntu
-- WSL for Windows users
+- NVIDIA GPU with 6 GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
 - CUDA 11.6+
-- Docker
-- NVIDIA GPU with 6GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
-- 16GB of RAM
+- 16 GB of RAM
 
 ## Cloning the Project
 Clone the repo:
@@ -54,33 +52,18 @@ Choose one of three options for setting up the dev environment (in the recommend
 ### Pre-Built Docker Image
 1. Pull (download) the pre-built image (~18 GB): 
       ```shell
-      docker pull anthonydickson/hive:runtime-cu118
+      docker pull anthonydickson/hive
       ```
-   **Note:** This image is just running the pipeline. If you want to run the more experimental code (e.g., Bundle Fusion, other depth estimation models) you will need to use the development image `anthonydickson/hive:dev-cu118`.
+   **Note:** This image (`anthonydickson/hive:runtime-cu118`) is just for running the pipeline. If you want to run the more experimental code (e.g., BundleFusion) you will need to use the development image `anthonydickson/hive:dev-cu118`.
 
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Building the Docker image locally
 1. Run the build command:
       ```shell
-      docker build -f Dockerfile.dev -t anthonydickson/hive .
+      docker build -f Dockerfile.runtime -t anthonydickson/hive .
       ```
-
-2. There are some custom CUDA kernels that require GPU access to be built. These can be installed via the following command: 
-    ```shell
-    docker run --rm -v $(pwd):/app -it anthonydickson/hive bash -c "cd thirdparty/consistent_depth/third_party/flownet2/ && chmod +x install.sh && ./install.sh && bash"
-    ```
-  
-3. Once this command has finished and the container is ***still running***, run the following command to update the Docker image with the newly installed Python packages: 
-    ```shell
-    IMAGE_NAME=anthonydickson/hive
-    CONTAINER_ID=$(docker ps | grep ${IMAGE_NAME} | awk '{ print $1 }')
-    docker commit $CONTAINER_ID $IMAGE_NAME
-    ```
-     
-4. You can now exit the Docker container started in step 2.
-
-5. Done! Go to [Running the Program](#running-the-program) for basic usage.
+2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Local Installation
 1. Install Python 3.8. A virtual environment (e.g., Conda, virtualenv, pipenv) is recommended.
@@ -208,7 +191,7 @@ Thank you to Felix for implementing this web interface and the image inpainting.
   - Left click + dragging the mouse will orbit.
   - Right click + dragging the mouse will pan.
   - Scrolling will zoom in and out.
-  - `<space>`: Pause/play the video.
+  - `<space>`, `j`: Pause/play the video.
   - `C`: Reset the camera's position and rotation.
   - `G`: Go to a particular frame.
   - `L`: Toggle whether to use camera pose from metadata for XR headset.
@@ -330,7 +313,6 @@ Within each dataset folder, there should be the following 5 items:
 ## Mesh Reconstruction
 ![dynamic mesh reconstruction overview](images/vtm_dynamic_mesh_reconstruction.jpg)
 ![static mesh reconstruction overview](images/vtm_static_mesh_reconstruction.jpg)
-Background mesh reconstruction uses [TSDFFusion](https://github.com/andyzeng/tsdf-fusion-python) by default, but it can also use the above method if the user requests it.
 
 ## WebXR Renderer
 ![webxr renderer overview](images/vtm_renderer_overview.jpg)
