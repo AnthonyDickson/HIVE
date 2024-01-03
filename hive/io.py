@@ -1082,13 +1082,14 @@ class HiveDataset(Dataset):
     def index_to_filename(index: int, file_extension="png") -> str:
         return f"{index:06d}.{file_extension}"
 
-    def select_key_frames(self, threshold=0.7) -> List[int]:
+    def select_key_frames(self, threshold=0.7, frame_step=30) -> List[int]:
         """
         From a dataset select `key frames', frames with overlap less than the specified ratio.
 
         :param threshold: The maximum overlap ratio before a frame is excluded from the key frame set. Note that
             setting the threshold to 1 will return the set of all frames and a threshold of 0 will return just the
             first frame.
+        :param frame_step: The interval to sample frames at. A frame step of one will check every frame.
         :return: A set of key frames.
         """
         logging.info(f"Selecting key frames (threshold={threshold})...")
@@ -1104,13 +1105,16 @@ class HiveDataset(Dataset):
         if threshold > 0.8:
             logging.warning(f"Setting the key frame threshold to a high value (> 0.8) may result in long runtimes.")
 
+        if frame_step < 1:
+            raise ValueError(f"Frame step must be a positive integer, but got {frame_step} instead.")
+
         width = self.metadata.width
         height = self.metadata.height
         camera_matrix = self.camera_matrix
 
         key_frames = [0]
 
-        for frame in tqdm(range(1, self.num_frames)):
+        for frame in tqdm(range(1, self.num_frames, frame_step)):
             depth = self.bg_depth_dataset[frame]
             mask = self.mask_dataset[frame] == 0
             pose = self.camera_trajectory[frame]
