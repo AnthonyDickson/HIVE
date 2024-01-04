@@ -994,6 +994,16 @@ class HiveDataset(Dataset):
     def cy(self) -> float:
         return self.camera_matrix[1, 2]
 
+    @property
+    def fov_x(self) -> float:
+        """The horizontal field of view in degrees."""
+        return float(np.rad2deg(2. * np.arctan2(self.frame_width, 2. * self.fx)))
+
+    @property
+    def fov_y(self) -> float:
+        """The vertical field of view in degrees."""
+        return float(np.rad2deg(2 * np.arctan2(self.frame_height, 2 * self.fy)))
+
     def __len__(self):
         return self.num_frames
 

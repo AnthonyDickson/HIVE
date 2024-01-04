@@ -15,7 +15,7 @@
             </DockerVolumeBindingImpl>
             <DockerVolumeBindingImpl>
               <option name="containerPath" value="/app/docs" />
-              <option name="hostPath" value="$PROJECT_DIR$/third_party/HIVE_Renderer" />
+              <option name="hostPath" value="$PROJECT_DIR$/third_party/HIVE_Renderer/docs" />
             </DockerVolumeBindingImpl>
           </list>
         </option>

@@ -223,7 +223,7 @@ class Pipeline:
         with self.timed_block(f"Exporting mesh data to local WebXR server folder {self.webxr_options.webxr_path}...",
                               key_path=['timing', 'webxr_export']):
             self._export_video_webxr(self.mesh_path, fg_scene_name="fg", bg_scene_name="bg",
-                                     metadata=self._get_webxr_metadata(fps=dataset.fps),
+                                     metadata=self._get_webxr_metadata(dataset),
                                      export_name=(self._get_dataset_name(dataset)))
 
         elapsed_time_seconds = time.time() - start_time
@@ -954,15 +954,17 @@ class Pipeline:
         """Get the `name` of a dataset (the folder name)."""
         return Path(dataset.base_path).name
 
-    def _get_webxr_metadata(self, fps: float) -> dict:
+    def _get_webxr_metadata(self, dataset: HiveDataset) -> dict:
         """
         Create the metadata for the WebXR export.
 
-        :param fps: The frame rate of the dataset that is being processed.
+        :param dataset: The dataset with information on the framerate and focal length.
         :return: A JSON-encodable dictionary containing the fields: `fps`, `num_frames` and `use_vertex_colour_for_bg`.
         """
         return dict(
-            fps=fps,
+            fps=dataset.fps,
+            fov_y=int(dataset.fov_y),
+            aspect_ratio=dataset.frame_width / dataset.frame_height,
             num_frames=self.num_frames,
             use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method != MeshReconstructionMethod.RGBD,
             add_ground_plane=self.webxr_options.webxr_add_ground_plane,
