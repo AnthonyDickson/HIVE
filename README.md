@@ -4,11 +4,40 @@ HIVE is a program for creating 3D free-viewpoint video from RGB video.
 ![demo of 3D video](images/demo.gif)
 
 # Getting Started
+The following instructions assume you are using Docker to run HIVE.
+
+We recommend you to use the standalone Docker image `anthonydickson/hive:standalone` if you are only interested in running HIVE.
+It contains everything needed to run HIVE.
+If you want to run edited code, refer to [Setting Up Your Development Environment](#setting-up-your-development-environment).
 ## System Requirements
 - Windows or Ubuntu
 - NVIDIA GPU with 6 GB+ memory, e.g. RTX 2080 Ti, RTX 3060.
 - CUDA 11.6+
 - 16 GB of RAM
+
+## Quickstart
+Here are the steps to quickly run a video through HIVE. You only need to download (pull) the Docker image.
+1. Make sure you have Docker installed and GPU support is enabled. You can check this by running a container with the options `--gpus all` and verifying that the `nvidia-smi` command shows the correct information.
+2. Create one folder containing two folders, a folder for your videos/datasets and a folder for the outputs:
+    ```shell
+    mkdir HIVE
+    cd HIVE
+    mkdir data
+    mkdir outputs
+    ```
+3. Copy your videos or RGB-D datasets (TUM, StrayScanner or Unreal) into your data folder, e.g. `HIVE/data`.
+4. Run the following command in a terminal from inside the root folder, e.g. `HIVE/`:
+    ```shell
+    GUI_PORT_NUMBER=8081;SERVER_PORT_NUMBER=8080; docker run --name HIVE --rm --gpus all -p ${GUI_PORT_NUMBER}:${GUI_PORT_NUMBER} -p ${SERVER_PORT_NUMBER}:{SERVER_PORT_NUMBER} -v $(pwd)/data:/app/data -v $(pwd)/outputs:/app/outputs -it anthonydickson/hive:standalone python3 -m hive.interface --port ${GUI_PORT_NUMBER}
+    ```
+5. Navigate to [localhost:8081](http://localhost:8081) and fill in `dataset_path` and `output_path` with the relative path to the dataset in your data folder and the relative path of the output folder in your outputs folder, and click the button at the bottom of the page that says 'Start Pipeline'. 
+   You can leave the other settings at their default values.
+   For long videos, you can set `num_frames` to something like 150 to make it run faster.
+   For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
+6. After the pipeline has finished running, check the terminal output for a link. Navigate to that link in your web browser to view the 3D video.
+
+**Note:** Oculus headset users can use desktop mode in Oculus Link to view the 3D video in VR.
+Run the steps above as normal, and at the end click the button at the bottom of the screen saying 'Enter VR' from your headset.
 
 ## Cloning the Project
 Clone the repo:
@@ -20,28 +49,6 @@ If you forget to or cannot clone with `--recurse-submodules`, then clone the git
 git submodule update --init --recursive
 ```
 This command can also be used to pull/update any changes in the submodules. 
-
-## Quickstart
-Here are the steps to quickly run a video.
-1. Create a folder in the repository root that contains your videos or RGB-D datasets (TUM, Unreal or StrayScanner).
-2. Create a folder in the repository root to store the outputs.
-3. Run the following command in a terminal from the repository root:
-    ```shell
-    PORT_NUMBER=8081; docker run --name HIVE --rm --gpus all -p ${PORT_NUMBER}:${PORT_NUMBER} -v $(pwd):/app -it anthonydickson/hive:latest python3 -m hive.interface --port ${PORT_NUMBER}
-    ```
-4. Navigate to [localhost:8081](http://localhost:8081) and fill in `dataset_path` and `output_path` with the dataset path and output folder you created in steps 1 and 2, and click the button at the bottom of the page that says 'Start Pipeline'. 
-   You can leave the other settings at their default values.
-   For long videos, you can set `num_frames` to something like 150 to make it run faster.
-   For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
-5. In another terminal, start the web viewer:
-   ```shell
-   docker run--name Hive-Renderer --rm  -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16  
-   ```
-6. After the pipeline has finished running, check the first terminal you opened for a link. Navigate to that link in your web browser to view the 3D video.
-
-**Note:** Oculus headset users can use desktop mode in Oculus Link to view the 3D video in VR.
-Run the steps above as normal, and at the end click the button at the bottom of the screen saying 'Enter VR' from your headset. 
-
 
 ## Setting Up Your Development Environment
 Choose one of three options for setting up the dev environment (in the recommended order):
@@ -103,44 +110,28 @@ The sequence `fr3/walking_xyz` is a good one to start with.
 Make sure you download and extract the dataset to the `data/` folder.
 
 ### Example Usage
-Below is an example of how to run the program with ground truth data and a static background:
-1. Local Python:
-    ```shell
-    python -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
-    ```
+The following examples assume you are using the standalone Docker image.
 
-2. Docker:
-    ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150
-    ```
+Below is an example of how to run the program with ground truth data:
+```shell
+docker run --rm --gpus all -v $(pwd)/data:/app/data -v $(pwd)/outputs:/app:outputs -p 8080:8080 -it anthonydickson/hive:standalone python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --webxr_run_server
+```
 
-Below is an example of how to run the program with estimated data and a static background:
-1. Local Python:
-    ```shell
-    python -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
-    ```
-
-2. Docker:
-    ```shell
-    docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth
-    ```
+Below is an example of how to run the program with estimated data:
+```shell
+docker run --rm --gpus all -v $(pwd)/data:/app/data -v $(pwd)/outputs:/app:outputs -p 8080:8080 -it anthonydickson/hive:standalone python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth --webxr_run_server
+```
 
 ### PyCharm Users
 There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
 
 ### CLI Options
 If you want help with the CLI and the options, you can either refer to [options.py](hive/options.py) or view the help via:
-1. Local Python:
-    ```shell
-    python -m hive --help
-    ```
+```shell
+docker run --rm -it anthonydickson/hive python3 -m hive --help
+```
 
-2. Docker:
-    ```shell
-    docker run --rm -v $(pwd):/app -it anthonydickson/hive python3 -m hive --help
-    ```
-
-### Common CLI Options
+Below is a list of the most useful CLI options:
 - `--dataset_path <path/to/dataset>` Specify the path to either: a video file, TUM dataset or an iPhone dataset (StrayScanner).
 - `--output_path <path/to/folder>` Specify where the results should be written to.
 - `--overwrite_ok` Allow existing video files in `output_path` or the WebXR export path to be overwritten.
@@ -148,9 +139,8 @@ If you want help with the CLI and the options, you can either refer to [options.
 - `--estimate_depth` By default the pipeline will try to use any depth maps that are provided with the input sequence. Use this flag to estimate depth maps instead.
 - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to estimate the camera parameters via COLMAP instead.
 - `--num_frames <int>` If specified, any frames after this index are truncated.
-- `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
 - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
-- `--inpainting_mode` Use Lama to inpaint the background.
+- `--inpainting_mode` Inpaint gaps in the background.
     - `0` - no inpainting.
     - `1` - Depth: cv2, Background: cv2
     - `2` - Depth: cv2, Background: LaMa
@@ -158,46 +148,38 @@ If you want help with the CLI and the options, you can either refer to [options.
     - `4` - Depth: LaMa, Background: LaMa
 - `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
 - `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
+- `--webxr_run_server` Whether to automatically run the renderer web server.
 
 ### Docker
 The Docker containers will, by default, bring up the python interpreter. All you need to do to get the main script (or any other script) running is to append the usual command, minus the call to python, to the following:
 ```shell
-docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive 
+docker run --rm --gpus all -it anthonydickson/hive:standalone 
 ```
 For example, if you wanted to test whether the container is CUDA enabled: 
 ```shell
-docker run --rm --gpus all -v $(pwd):/app -it anthonydickson/hive python3 -c "import torch; print(torch.cuda.is_available())"
+docker run --rm --gpus all -it anthonydickson/hive:standalone python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ### Gradio Web Interface
 You can run the pipeline from a web based interface instead of the CLI.
 Assuming you are using Docker, you can run this by running the following command:
 ```shell
-docker run -v $(pwd):/app -p 0.0.0.0:8081:8081 --rm --gpus all -it anthonydickson/hive:runtime-cu118 python3 -m hive.interface
+docker run -v $(pwd)/data:/app/data -v $(pwd)/outputs:/app/outputs -p 8081:8081 -p 8080:8080 --rm --gpus all -it anthonydickson/hive:standalone python3 -m hive.interface
 ```
 and navigating to [localhost:8081](http://localhost:8081).
-Note that if you are using Docker, the dataset path and output paths should be relative to the project root folder.
+Note that you should use relative paths for the dataset path and output paths.
 
 Thank you to Felix for implementing this web interface and the image inpainting.
 
 ### Viewing the 3D Video
 - Start the Docker container:
-   ```shell
-   docker run --rm  --name Hive-Renderer -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16 
-   ```
-  or if you are using PyCharm there is a run configuration included.
-- When you run the pipeline it will print the link to view the video.
-- The renderer using orbit controls where:
-  - Left click + dragging the mouse will orbit.
-  - Right click + dragging the mouse will pan.
-  - Scrolling will zoom in and out.
-  - `<space>`, `j`: Pause/play the video.
-  - `C`: Reset the camera's position and rotation.
-  - `G`: Go to a particular frame.
-  - `L`: Toggle whether to use camera pose from metadata for XR headset.
-  - `P`: Save the camera's pose and metadata to disk.
-  - `R`: Restart the video playback.
-  - `S`: Show/hide the framerate statistics.
+  1. If you are using the standalone Docker image, simply add the flag `--webxr_run_server` when you run HIVE.
+  2. If you cloned the repo and are using the Docker image `anthonydickson/hive:runtime-cu118`:
+  ```shell
+  docker run --rm  --name Hive-Renderer -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16 
+  ```
+  If you are using PyCharm there is a run configuration included.
+- When you run the pipeline it will print the link to view the video, navigate to this link in your browser.
 
 Refer to the [Hive Renderer repo](https://github.com/AnthonyDickson/webxr3dvideo) for the code.
 

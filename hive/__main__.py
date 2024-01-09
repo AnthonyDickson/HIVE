@@ -14,19 +14,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import argparse
-
-from hive.interface import Interface
 from hive.pipeline import main
 
 if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser(description="Video2Mash")
-    parser.add_argument("--dataset_path")
-    args, leftovers = parser.parse_known_args()
-
-    if args.dataset_path is not None:
-        main()
-    else:
-        interface = Interface.get_interface()
-        interface.launch(server_name="0.0.0.0", server_port=8081)
+    main()

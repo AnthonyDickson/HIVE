@@ -3,3 +3,4 @@ outputs/
 third_party/
 experiment_results/
 *.log
+.git/

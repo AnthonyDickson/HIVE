@@ -1,0 +1,14 @@
+FROM anthonydickson/hive:runtime-cu118
+
+RUN git clone --recurse-submodules -j8 https://github.com/AnthonyDickson/HIVE.git /app
+
+RUN apt update && \
+    curl -fsSL https://deb.nodesource.com/setup_16.x  | bash - && \
+    apt install -y --no-install-recommends nodejs && \
+    apt -y autoremove && \
+    apt -y clean && \
+    apt -y autoclean && \
+    rm -rf /var/lib/apt/lists/*
+RUN cd /app/third_party/HIVE_Renderer && npm install -y
+
+EXPOSE 8080

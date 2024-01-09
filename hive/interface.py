@@ -52,9 +52,11 @@ class Interface:
                 depth_mask_dilation_iterations=int(o[depth_mask_dilation_iterations]),
                 sdf_volume_size=float(o[sdf_volume_size]), sdf_voxel_size=float(o[sdf_voxel_size]),
                 sdf_max_voxels=int(o[sdf_max_voxels]))
-            webxr_options = WebXROptions(webxr_path=o[webxr_path], webxr_url=o[webxr_url],
+            webxr_options = WebXROptions(webxr_source_path=o[webxr_source_path], webxr_path=o[webxr_path],
+                                         webxr_url=o[webxr_url],
                                          webxr_add_ground_plane=o[webxr_add_ground_plane],
-                                         webxr_add_sky_box=o[webxr_add_sky_box])
+                                         webxr_add_sky_box=o[webxr_add_sky_box],
+                                         webxr_run_server=o[webxr_run_server])
 
             print("Running the pipeline with the following configuration: ", options, storage_options,
                   decimation_options, dilation_options, filtering_options, colmap_options, static_mesh_options,
@@ -75,11 +77,7 @@ class Interface:
                         # Quickstart
                         1. Fill in the CLI options below.
                         2. Click the button at the bottom of the page that says 'Start Pipeline'.
-                        3. In a separate terminal tab/window, run the following command to start the web viewer:
-                           ```shell
-                           docker run--name WebXR-3D-Video-Viewer --rm  -p 8080:8080 -v $(pwd)/third_party/HIVE_Renderer/src:/app/src:ro -v $(pwd)/third_party/HIVE_Renderer/docs:/app/docs anthonydickson/hive-renderer:node-16
-                           ```
-                        4. When the pipeline is finished running, it will give you a link (check the first terminal you opened). 
+                        3. When the pipeline is finished running, it will give you a link (check the terminal output). 
                            Click on this link to view the 3D video.
                         
                         # Common CLI Options
@@ -90,7 +88,6 @@ class Interface:
                         - `--estimate_depth` By default the pipeline will try to use any depth maps in the `depth` folder. Use this flag to use estimated depth maps instead.
                         - `--estimate_pose` By default the pipeline will try to use ground truth camera intrinsics matrix and poses in the `camera_matrix.txt` and `camera_trajectory.txt` files. Use this flag to use COLMAP to estimate the camera parameters instead.
                         - `--num_frames <int>` If specified, any frames after this index are truncated.
-                        - `--webxr_add_sky_box` Adds a sky box to the video in the renderer.
                         - `--align_scene` Whether to align the scene with the ground plane. Enable this if the recording device was held at an angle (facing upwards or downwards, not level) and the scene is not level in the renderer. This setting is recommended if you are using estimated pose.
                         - `--inpainting_mode` Use Lama to inpaint the background.
                             - `0` - no inpainting.
@@ -100,19 +97,7 @@ class Interface:
                             - `4` - Depth: LaMa, Background: LaMa
                         - `--billboard` Creates flat billboards for foreground objects. This is intended as a workaround for cases where the estimated depth results in stretched out meshes with missing body parts.
                         - `--static_camera` Indicate that the camera was not moving during capture. This will use the Kinect sensor camera matrix and the identity pose for the camera trajectory. Note: You do not need the flag `--estimate_pose` when using this flag.
-                        
-                        # Web Viewer Controls
-                        The renderer using orbit controls where:
-                        - Left click + dragging the mouse will orbit.
-                        - Right click + dragging the mouse will pan.
-                        - Scrolling will zoom in and out.
-                        - `<space>`: Pause/play the video.
-                        - `C`: Reset the camera's position and rotation.
-                        - `G`: Go to a particular frame.
-                        - `L`: Toggle whether to use camera pose from metadata for XR headset.
-                        - `P`: Save the camera's pose and metadata to disk.
-                        - `R`: Restart the video playback.
-                        - `S`: Show/hide the framerate statistics.
+                        - `--webxr_run_server` Whether to automatically run the renderer web server.
                         """
                     )
 
@@ -155,10 +140,13 @@ class Interface:
             with gr.Accordion("WebXROptions", open=False):
                 with gr.Row():
                     with gr.Column():
+                        webxr_source_path = gr.Text(value='third_party/HIVE_Renderer', label="webxr_source_path",
+                                             interactive=True)
                         webxr_path = gr.Text(value='third_party/HIVE_Renderer/docs/video/', label="webxr_path",
                                              interactive=True)
                     with gr.Column():
                         webxr_url = gr.Text(value='http://localhost:8080', label="webxr_url", interactive=True)
+                        webxr_run_server = gr.Checkbox(value=True, label="webxr_run_server", interactive=True)
                     with gr.Column():
                         webxr_add_ground_plane = gr.Checkbox(value=False, label="webxr_add_ground_plane",
                                                              interactive=True)
@@ -225,16 +213,13 @@ class Interface:
                                              interactive=True)
 
             btn = gr.Button(value="Start Pipeline")
-            inputs = {num_frames, frame_step, estimate_pose, estimate_depth, background_only, align_scene, log_file,
-                      use_inpainting, billboard, static_camera, disable_coverage_constraint, disable_scaling,
-                      dataset_path, output_path, overwrite_ok, no_cache,
-                      num_faces_background, num_faces_object, decimation_max_error,
-                      dilate_mask_iter,
-                      max_pixel_dist, max_depth_dist, min_num_components,
-                      is_single_camera, dense, quality, binary_path, vocab_path,
-                      mesh_reconstruction_method, depth_mask_dilation_iterations, sdf_volume_size, sdf_voxel_size,
-                      sdf_max_voxels,
-                      webxr_path, webxr_url, webxr_add_ground_plane, webxr_add_sky_box}
+            inputs = {dataset_path, output_path, overwrite_ok, no_cache, num_frames, frame_step, use_inpainting,
+                      log_file, estimate_pose, estimate_depth, background_only, align_scene, billboard, static_camera,
+                      disable_scaling, disable_coverage_constraint, webxr_source_path, webxr_path, webxr_url,
+                      webxr_run_server, webxr_add_ground_plane, webxr_add_sky_box, mesh_reconstruction_method,
+                      depth_mask_dilation_iterations, sdf_volume_size, sdf_voxel_size, sdf_max_voxels, max_depth_dist,
+                      max_pixel_dist, min_num_components, dilate_mask_iter, num_faces_background, num_faces_object,
+                      decimation_max_error, is_single_camera, dense, quality, binary_path, vocab_path}
             btn.click(fn=start_pipeline, inputs=inputs, outputs=None)
 
         demo.title = "HIVE (hive)"

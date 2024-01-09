@@ -427,23 +427,31 @@ class ForegroundTrajectorySmoothingOptions(Options):
 class WebXROptions(Options):
     """Configuration for the WebXR renderer, and the metadata."""
 
-    def __init__(self, webxr_path='third_party/HIVE_Renderer/docs/video', webxr_url='localhost:8080',
-                 webxr_add_ground_plane=False, webxr_add_sky_box=False):
+    def __init__(self, webxr_source_path: str = 'third_party/HIVE_Renderer',
+                 webxr_path='third_party/HIVE_Renderer/docs/video',
+                 webxr_url='localhost:8080', webxr_add_ground_plane=False, webxr_add_sky_box=False,
+                 webxr_run_server=False):
         """
+        :param webxr_source_path: (optional) The path to the source code for the renderer.
         :param webxr_path: Where to export the 3D video files to.
         :param webxr_url: The URL to the WebXR 3D video player.
         :param webxr_add_ground_plane: Whether to render a white ground plane to the scene in the renderer. Useful for debugging.
         :param webxr_add_sky_box: Whether to render a sky as a 360 degree background (cube map).
+        :param webxr_run_server: Whether to automatically start the web server.
         """
+        self.webxr_source_path = webxr_source_path
         self.webxr_path = webxr_path
         self.webxr_url = webxr_url
         self.webxr_add_ground_plane = webxr_add_ground_plane
         self.webxr_add_sky_box = webxr_add_sky_box
+        self.webxr_run_server = webxr_run_server
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
         group = parser.add_argument_group('WebXR')
 
+        group.add_argument('--webxr_source_path', type=str,
+                           help='The path to the source code for the renderer.', default='third_party/HIVE_Renderer')
         group.add_argument('--webxr_path', type=str, help='Where to export the 3D video files to.',
                            default='third_party/HIVE_Renderer/docs/video')
         group.add_argument('--webxr_url', type=str, help='The URL to the WebXR 3D video player.',
@@ -452,14 +460,18 @@ class WebXROptions(Options):
                            help='Whether to render a white ground plane to the scene in the renderer.')
         group.add_argument('--webxr_add_sky_box', action='store_true',
                            help='Whether to render a sky cube map in the background.')
+        group.add_argument('--webxr_run_server', action='store_true',
+                           help='Whether to automatically start the web server.')
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'WebXROptions':
         return WebXROptions(
+            webxr_source_path=args.webxr_source_path,
             webxr_path=args.webxr_path,
             webxr_url=args.webxr_url,
             webxr_add_ground_plane=args.webxr_add_ground_plane,
-            webxr_add_sky_box=args.webxr_add_sky_box
+            webxr_add_sky_box=args.webxr_add_sky_box,
+            webxr_run_server=args.webxr_run_server
         )
 
 

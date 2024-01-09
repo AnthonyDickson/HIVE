@@ -237,6 +237,9 @@ class Pipeline:
         logging.info(f"Start the WebXR server and go to this URL: "
                      f"{self.webxr_options.webxr_url}?video={self._get_dataset_name(dataset)}")
 
+        if self.webxr_options.webxr_run_server:
+            subprocess.run(["npm", "run", "start"], cwd=self.webxr_options.webxr_source_path)
+
     @staticmethod
     def _reset_cuda_stats():
         torch.cuda.reset_peak_memory_stats()
