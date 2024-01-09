@@ -60,16 +60,16 @@ Choose one of three options for setting up the dev environment (in the recommend
 ### Pre-Built Docker Image
 1. Pull (download) the pre-built image (~18 GB): 
       ```shell
-      docker pull anthonydickson/hive
+      docker pull anthonydickson/hive:runtime-cu118
       ```
-   **Note:** This image (`anthonydickson/hive:runtime-cu118`) is just for running the pipeline. If you want to run the more experimental code (e.g., BundleFusion) you will need to use the development image `anthonydickson/hive:dev-cu118`.
+   **Note:** This image is just for running the pipeline. If you want to run the more experimental code (e.g., BundleFusion) you will need to use the development image `anthonydickson/hive:dev-cu118`.
 
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Building the Docker image locally
 1. Run the build command:
       ```shell
-      docker build -f Dockerfile.runtime -t anthonydickson/hive .
+      docker build -f Dockerfile.runtime -t anthonydickson/hive:runtime-cu118 .
       ```
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
@@ -122,6 +122,12 @@ Below is an example of how to run the program with estimated data:
 ```shell
 docker run --rm --gpus all -v $(pwd)/data:/app/data -v $(pwd)/outputs:/app:outputs -p 8080:8080 -it anthonydickson/hive:standalone python3 -m hive --dataset_path data/rgbd_dataset_freiburg3_walking_xyz --output_path data/rgbd_dataset_freiburg3_walking_xyz_output --num_frames 150 --frame_step 15 --estimate_pose --estimate_depth --webxr_run_server
 ```
+### Running Examples in a Development Environment
+If you are using the cloned repo and either the runtime or dev Docker image, you will need change the commands in this README file by:
+- mounting the entire repository folder `-v $(pwd):/app` instead of just the data and outputs folders,
+- removing the port bindings (e.g., `-p 8080:8080`),
+- removing the flag `--webxr_run_server`,
+- running the renderer web server manually (see [Viewing the 3D Video](#viewing-the-3d-video)).
 
 ### PyCharm Users
 There should be run configurations for PyCharm included when you clone the repo from GitHub in the `.idea` folder.
