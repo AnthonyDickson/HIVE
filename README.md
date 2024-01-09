@@ -35,6 +35,7 @@ Here are the steps to quickly run a video through HIVE. You only need to downloa
    For long videos, you can set `num_frames` to something like 150 to make it run faster.
    For datasets with ground truth data, uncheck `estimate_pose` and/or `estimate_depth` to use the ground truth data.
 6. After the pipeline has finished running, check the terminal output for a link. Navigate to that link in your web browser to view the 3D video.
+7. To run another video, exit the Docker container in your terminal (Ctrl+C).
 
 **Note:** Oculus headset users can use desktop mode in Oculus Link to view the 3D video in VR.
 Run the steps above as normal, and at the end click the button at the bottom of the screen saying 'Enter VR' from your headset.
@@ -174,6 +175,11 @@ Thank you to Felix for implementing this web interface and the image inpainting.
 ### Viewing the 3D Video
 - Start the Docker container:
   1. If you are using the standalone Docker image, simply add the flag `--webxr_run_server` when you run HIVE.
+     If you want to view a video from an output folder, run the following command:
+     ```shell
+     docker run --rm -p 8080:8080 -v $(pwd)/outputs/<dataset_name>/mesh:/app/third_party/HIVE_Renderer/docs/demo -it anthonydickson/hive:standalone bash -c "cd /app/third_party/HIVE_Renderer && npm run start" 
+     ```
+     and navigate to [localhost:8080](http://localhost:8080).
   2. If you cloned the repo and are using the Docker image `anthonydickson/hive:runtime-cu118`:
   ```shell
   docker run --rm  --name Hive-Renderer -p 8080:8080 -v $(pwd)/third_party/webxr3dvideo/src:/app/src:ro -v $(pwd)/third_party/webxr3dvideo/docs:/app/docs anthonydickson/hive-renderer:node-16 
