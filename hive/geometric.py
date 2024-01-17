@@ -661,6 +661,20 @@ class CameraMatrix:
             [0., 0., 1.]
         ])
 
+    def transpose(self) -> 'CameraMatrix':
+        """Swap the x and y components.
+
+        This is equivalent to rotating from a landscape orientation to a portrait orientation, or vice versa.
+        """
+        return CameraMatrix(
+            fx=self.fy,
+            fy=self.fx,
+            cx=self.cy,
+            cy=self.cx,
+            width=self.height,
+            height=self.width
+        )
+
     def scale(self, target_size: Size) -> 'CameraMatrix':
         """
         Get the camera matrix for the Kinect Sensor.

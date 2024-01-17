@@ -967,7 +967,6 @@ class Pipeline:
         return dict(
             fps=dataset.fps,
             fov_y=int(dataset.fov_y),
-            aspect_ratio=dataset.frame_width / dataset.frame_height,
             num_frames=self.num_frames,
             use_vertex_colour_for_bg=self.background_mesh_options.reconstruction_method != MeshReconstructionMethod.RGBD,
             add_ground_plane=self.webxr_options.webxr_add_ground_plane,

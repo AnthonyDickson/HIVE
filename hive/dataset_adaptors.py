@@ -20,24 +20,25 @@ includes estimating camera parameters and depth maps (when specified).
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import contextlib
-import cv2
 import enum
 import functools
-import imageio
 import logging
-import numpy as np
 import os
 import shutil
 import subprocess
-import torch
 from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
+from typing import Optional, Union, Tuple, List
+
+import cv2
+import imageio
+import numpy as np
+import torch
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
-from typing import Optional, Union, Tuple, List
 
 from hive.geometric import Trajectory, CameraMatrix
 from hive.image_processing import calculate_target_resolution
@@ -226,12 +227,17 @@ class DatasetAdaptor(Dataset, ABC):
                 logging.info(f"Copying depth maps.")
                 self.copy_depth_maps(output_depth_folder)
 
-        with timed_block(log_msg=None, profiling=profiling,
-                         key_path=['timing', 'load_dataset', 'get_camera_parameters']):
+        with (timed_block(log_msg=None, profiling=profiling,
+                          key_path=['timing', 'load_dataset', 'get_camera_parameters'])):
             if static_camera:
                 # TODO: Refactor datasets to use CameraMatrix object instead of NumPy array
-                camera_matrix = KinectSensor.get_camera_matrix().scale(
-                    target_size=(metadata.height, metadata.width)).matrix
+                camera_matrix = KinectSensor.get_camera_matrix()
+                is_portrait = metadata.height > metadata.width
+
+                if is_portrait:
+                    camera_matrix = camera_matrix.transpose()
+
+                camera_matrix = camera_matrix.scale(target_size=(metadata.height, metadata.width)).matrix
                 camera_trajectory = Trajectory(
                     np.repeat([[0., 0., 0., 1., 0., 0., 0.]], repeats=metadata.num_frames, axis=0))
             elif estimate_pose:
