@@ -724,8 +724,8 @@ class Experiments:
         latex_lines.append(r"\midrule")
         latex_lines.append(f"Average & {Latex.to_mean_stddev(all_mesh_count, formatter=Latex.format_one_dp)} & "
                            f"{Latex.to_mean_stddev(all_times, formatter=Latex.format_one_dp)} & "
-                           f"{Latex.to_mean_stddev(all_compressed_file_size, formatter=Latex.bytes_to_megabytes)} & "
                            f"{Latex.to_mean_stddev(all_uncompressed_file_size, formatter=Latex.bytes_to_megabytes)} & "
+                           f"{Latex.to_mean_stddev(all_compressed_file_size, formatter=Latex.bytes_to_megabytes)} & "
                            f"{Latex.to_mean_stddev(all_data_saving, formatter=Latex.percent_formatter)} & "
                            f"{Latex.to_mean_stddev(all_compression_ratio, formatter='{:,.2f}:1'.format)} \\\\")
         latex_lines.append(r"\bottomrule")
