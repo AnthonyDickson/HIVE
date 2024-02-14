@@ -36,7 +36,7 @@ def pose_vec2mat(pose: np.ndarray) -> np.ndarray:
     Convert a transformation 7-vector [r, t] to a (4, 4) homogenous transformation matrix.
 
     :param pose: The 7-vector to convert.
-    :return: The (4, 4) homogeneous transformation matrix.
+    :return: The (4, 4) homogenous transformation matrix.
     """
     validate_shape(pose, 'pose', expected_shape=(7,))
     R = Rotation.from_quat(pose[:4]).as_matrix()
@@ -56,6 +56,7 @@ def pose_mat2vec(pose: np.ndarray) -> np.ndarray:
     :param pose: The (4, 4) homogenous transformation matrix to convert.
     :return: The 7-vector transformation.
     """
+    validate_shape(pose, 'pose', expected_shape=(4, 4))
     quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()
     translation_vector = pose[:3, 3]
 

@@ -29,7 +29,7 @@ import subprocess
 from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Union, Tuple, List
+from typing import Optional, Union, Tuple, List, Dict
 
 import cv2
 import imageio
@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 
-from hive.geometric import Trajectory, CameraMatrix
+from hive.geometric import Trajectory, CameraMatrix, pose_mat2vec
 from hive.image_processing import calculate_target_resolution
 from hive.io import Dataset, DatasetMetadata, HiveDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
@@ -63,7 +63,7 @@ class DatasetAdaptor(Dataset, ABC):
         :param output_path: The path to write the new dataset to.
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
-            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+            If set to 1, samples all frames (i.e. no effect). Otherwise, if set to n > 1, samples every n frames.
         :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         """
         super().__init__(base_path=base_path)
@@ -307,7 +307,8 @@ class DatasetAdaptor(Dataset, ABC):
         """
         if os.path.isdir(self.output_path):
             raise RuntimeError(f"The output path {self.output_path} already exists! "
-                               f"Possible fix: Change the output path or specify the flag `--no_cache` to delete the output path if it already exists.")
+                               f"Possible fix: Change the output path or specify the flag `--no_cache` to delete the "
+                               f"output path if it already exists.")
 
         os.makedirs(self.output_path)
 
@@ -1032,7 +1033,7 @@ class VideoAdaptor(VideoAdaptorBase):
         :param output_path: The path to write the new dataset to.
         :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
         :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
-            If set to 1, samples all frames (i.e. no effect). Otherwise if set to n > 1, samples every n frames.
+            If set to 1, samples all frames (i.e. no effect). Otherwise, if set to n > 1, samples every n frames.
         :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
         :param resize_to: The resolution (height, width) to resize the images to.
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
@@ -1335,6 +1336,105 @@ class StrayScannerAdaptor(VideoAdaptorBase):
         return depth_map
 
 
+class LLFFAdaptor(VideoAdaptorBase):
+    """Datasets in the multi-camera video formats of github.com/Fyusion/LLFF."""
+    # TODO: Allow access to other camera feeds
+
+    pose_filename = "poses_bounds.npy"
+    required_files = [pose_filename]
+    required_folders = []
+
+    def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
+                 resize_to: Optional[Union[int, Size]] = None, camera_feed: int = 0):
+        """
+        :param base_path: The path to the dataset.
+        :param output_path: The path to write the new dataset to.
+        :param num_frames: The maximum of frames to process. Set to -1 (default) to process all frames.
+        :param frame_step: The frequency to sample frames at for COLMAP and pose optimisation.
+            If set to 1, samples all frames (i.e. no effect). Otherwise, if set to n > 1, samples every n frames.
+        :param colmap_options: The configuration to use for COLMAP if estimating camera parameters.
+        :param resize_to: The resolution (height, width) to resize the images to.
+            If an int is given, the longest side will be scaled to this value and the shorter side will have its new
+            length automatically calculated.
+        :param camera_feed: Which camera feed to use.
+        """
+        contents = os.listdir(base_path)
+        self.video_filenames = list(filter(lambda filename: Path(filename).suffix == '.mp4', contents))
+
+        if len(self.video_filenames) < 1:
+            raise FileNotFoundError(f"Dataset should have at least one video file, but found zero videos.")
+
+        self.video_indices = [int(filename[3:5]) for filename in self.video_filenames]
+        if camera_feed not in self.video_indices:
+            raise ValueError(f"Cannot use camera feed #{camera_feed}, valid camera feeds: {self.video_indices}.")
+
+        self.camera_feed = camera_feed
+
+        video_path = pjoin(base_path, self.video_filenames[self.camera_feed])
+
+        super().__init__(base_path=base_path, output_path=output_path, num_frames=num_frames, frame_step=frame_step,
+                         colmap_options=colmap_options, video_path=video_path, resize_to=resize_to)
+
+        self.intrinsics_by_camera, self.pose_data_by_camera = self._load_camera_parameters(self.video_indices)
+
+    def _load_camera_parameters(self, video_indices: List[int]) \
+            -> Tuple[Dict[int, CameraMatrix], Dict[int, np.ndarray]]:
+        pose_path = os.path.join(self.base_path, self.pose_filename)
+        pose_data = np.load(pose_path)
+
+        # Each line is the flattened 3x5 pose and intrinsics matrix with the depth bounds (near, 0.01% percentile,
+        # far, 99.9% percentile) appended.
+        poses_intrinsics, bounds = pose_data[:, :-2], pose_data[:, -2:]
+        poses_intrinsics = poses_intrinsics.reshape((-1, 3, 5))
+        # Pose is the 3x4 concatenated 3x3 rotation matrix and the 3x1 translation column vector.
+        # Intrinsic is a Nx3 matrix where the rows are the intrinsics by camera, and the columns are the height, width
+        # and focal length.
+        poses, intrinsics = poses_intrinsics[:, :, :4], poses_intrinsics[:, :, 4]
+
+        poses_homogenous = np.zeros((len(pose_data), 4, 4))
+        poses_homogenous[:, :3, :] = poses
+        # This sets the bottom right element to one to complete the diagonal, otherwise you cannot take the inverse.
+        poses_homogenous[:, 3, 3] = 1.0
+        # Take inverse since poses are cam-to-world, but the math expects world-to-cam.
+        poses_w2c = np.linalg.inv(poses_homogenous)
+        poses_centered = poses_homogenous[0] @ poses_w2c
+        pose_vectors = {video_indices[i]: pose_mat2vec(pose) for i, pose in enumerate(poses_centered)}
+        # TODO: The pose data/intrinsics above does not seem to be correct, the scene is rotated about 45 on all axes
+        #  and is stretched out. Check issues in https://github.com/Fyusion/LLFF and https://github.com/bmild/nerf for
+        #  possible solutions.
+        #  Note that this dataset produces the expected results when using the `--static_camera` flag.
+
+        def convert_to_camera_matrix(intrinsic):
+            height, width, focal_length = intrinsic
+
+            return CameraMatrix(
+                fx=focal_length,
+                fy=focal_length,
+                cx=width / 2,
+                cy=height / 2,
+                width=int(width),
+                height=int(height)
+            )
+
+        camera_matrices = {video_indices[i]: convert_to_camera_matrix(intrinsic)
+                           for i, intrinsic in enumerate(intrinsics)}
+
+        return camera_matrices, pose_vectors
+
+    def get_camera_matrix(self) -> np.ndarray:
+        return self.intrinsics_by_camera[self.camera_feed].matrix
+
+    def get_pose(self, index: int) -> np.ndarray:
+        return self.pose_data_by_camera[self.camera_feed]
+
+    def get_camera_trajectory(self) -> Trajectory:
+        pose = self.get_pose(0)
+        num_frames = self.num_frames
+        pose_data = np.repeat(pose.reshape((1, -1)), num_frames, axis=0)
+
+        return Trajectory(pose_data)
+
+
 def create_folder(*args, exist_ok=False):
     path = pjoin(*args)
 
@@ -1472,6 +1572,8 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
             dataset_converter = TUMAdaptor(**base_kwargs)
         elif UnrealAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = UnrealAdaptor(**base_kwargs)
+        elif LLFFAdaptor.is_valid_folder_structure(dataset_path):
+            dataset_converter = LLFFAdaptor(**base_kwargs, resize_to=resize_to)
         elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = StrayScannerAdaptor(
                 **base_kwargs,
@@ -1482,8 +1584,6 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
                 fix_orientation=not pipeline_options.estimate_pose
             )
         elif VideoAdaptor.is_valid_folder_structure(dataset_path):
-            path_no_extensions, _ = os.path.splitext(dataset_path)
-
             dataset_converter = VideoAdaptor(resize_to=resize_to, **base_kwargs)
         elif not os.path.isdir(dataset_path):
             raise RuntimeError(f"Could not open the path {dataset_path} or it is not a folder.")
