@@ -62,8 +62,6 @@ Choose one of three options for setting up the dev environment (in the recommend
       ```shell
       docker pull anthonydickson/hive:runtime-cu118
       ```
-   **Note:** This image is just for running the pipeline. If you want to run the more experimental code (e.g., BundleFusion) you will need to use the development image `anthonydickson/hive:dev-cu118`.
-
 2. Done! Go to [Running the Program](#running-the-program) for basic usage.
 
 ### Building the Docker image locally
