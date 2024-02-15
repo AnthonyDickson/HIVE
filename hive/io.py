@@ -1092,7 +1092,7 @@ class HiveDataset(Dataset):
     def index_to_filename(index: int, file_extension="png") -> str:
         return f"{index:06d}.{file_extension}"
 
-    def select_key_frames(self, threshold=0.7, frame_step=30) -> List[int]:
+    def select_key_frames(self, threshold=0.3, frame_step=30) -> List[int]:
         """
         From a dataset select `key frames', frames with overlap less than the specified ratio.
 
