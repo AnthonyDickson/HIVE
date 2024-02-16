@@ -967,6 +967,24 @@ class Experiments:
 
         logging.info(f"Exported Bundle Fusion experiment results to {bundle_fusion_latex_path}.")
 
+    def export_latex_preamble(self):
+        """Create a latex file that contains the package imports and commands necessary for rendering the tables from
+        this script."""
+        latex_lines = [
+            r"\usepackage{booktabs}  % For \toprule, \midrule and \bottomrule commands",
+            r"\usepackage{multirow}  % Multi-row table cells",
+            r"\usepackage{pifont}  % Various symbols",
+            r"\newcommand{\cmark}{\ding{51}}  % A checkmark/tick",
+            r"\newcommand{\xmark}{\ding{55}}  % A cross mark"
+        ]
+
+        preamble_path = pjoin(self.latex_path, 'preamble.tex')
+
+        with open(preamble_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Wrote Latex preamble to {preamble_path}.")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1006,3 +1024,4 @@ if __name__ == '__main__':
     experiments.export_trajectory_results()
     experiments.run_bundlefusion_experiments()
     experiments.export_bundle_fusion_results()
+    experiments.export_latex_preamble()
