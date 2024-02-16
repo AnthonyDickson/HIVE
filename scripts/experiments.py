@@ -884,27 +884,23 @@ class Experiments:
         bundle_fusion_results = dict()
 
         for dataset_name in self.dataset_names:
-            dataset_gt = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{self.gt_label}"))
-            frame_set = dataset_gt.select_key_frames(threshold=self.mesh_options.key_frame_threshold,
-                                                     frame_step=self.frame_step)
             bundle_fusion_results[dataset_name] = dict()
 
-            for label in (self.gt_label, self.cm_label, self.est_label):
+            for label in (self.gt_label, self.est_label):
                 dataset = HiveDataset(pjoin(self.output_path, f"{dataset_name}_{label}"))
+                frame_set = dataset.select_key_frames(threshold=self.mesh_options.key_frame_threshold,
+                                                      frame_step=self.frame_step)
 
                 logging.info(f"Running comparisons for dataset '{dataset_name}' and config '{label}'...")
                 mesh_output_path = pjoin(recon_folder, dataset_name, label)
                 os.makedirs(mesh_output_path, exist_ok=True)
-                logging.info('Creating ground truth mesh...')
-                gt_mesh = tsdf_fusion(dataset_gt, self.mesh_options, frame_set=frame_set)
-                gt_mesh.export(pjoin(mesh_output_path, f"{self.gt_label}.ply"))
 
-                logging.info('Creating TSDFFusion mesh with estimated data...')
+                logging.info('Creating TSDFFusion mesh...')
                 pred_mesh = tsdf_fusion(dataset, self.mesh_options, frame_set=frame_set)
                 pred_mesh.export(pjoin(mesh_output_path, f"{self.est_label}.ply"))
 
                 # This is needed in case BundleFusion has already been run with the dataset.
-                logging.info('Creating BundleFusion mesh with estimated data...')
+                logging.info('Creating BundleFusion mesh...')
                 dataset.overwrite_ok = self.overwrite_ok
 
                 try:
@@ -915,15 +911,61 @@ class Experiments:
                     logging.warning(f"Encountered error while running BundleFusion: {e}")
                     bundle_fusion_results[dataset_name][label] = False
 
-                logging.info('Creating TSDFFusion mesh with COLMAP depth...')
-
                 if label != self.gt_label and (mesh := tsdf_fusion_with_colmap(dataset, frame_set, self.mesh_options)):
+                    logging.info('Creating TSDFFusion mesh with COLMAP depth...')
                     mesh.export(pjoin(mesh_output_path, 'colmap_depth.ply'))
 
         with open(self.bundle_fusion_results_path, 'w') as f:
             json.dump(bundle_fusion_results, f)
 
         logging.info(f"Saved BundleFusion results to {self.bundle_fusion_results_path}.")
+
+    def export_bundle_fusion_results(self):
+        with open(self.bundle_fusion_results_path, 'r') as f:
+            bundle_fusion_results = json.load(f)
+
+        latex_lines = [
+            r"\begin{tabular}{llll}",
+            r"\toprule",
+            r"Dataset & Config & \multicolumn{2}{c}{Produced Mesh?} \\",
+            r"        &        & BundleFusion & HIVE \\",
+            r"\midrule",
+        ]
+
+        successes = {
+            self.gt_label: 0,
+            self.est_label: 0
+        }
+
+        for dataset_name in bundle_fusion_results:
+            latex_lines.append(rf"\multirow{{2}}{{*}}{{{Latex.format_dataset_name(dataset_name)}}}")
+
+            for label in bundle_fusion_results[dataset_name]:
+                produced_mesh = bundle_fusion_results[dataset_name][label]
+
+                if produced_mesh:
+                    successes[label] += 1
+
+                symbol_text = r"\cmark" if produced_mesh else r"\xmark"
+                row_text = rf" & {label.upper()} & {symbol_text} & \cmark \\"
+                latex_lines.append(row_text)
+
+            latex_lines.append(r"\midrule")
+
+        item_count = len(bundle_fusion_results)
+        bf_success_rates = {label: successes[label] / item_count for label in (self.gt_label, self.est_label)}
+
+        latex_lines.append(rf"All & {self.gt_label.upper()} & {bf_success_rates[self.gt_label] * 100:.0f}\% & 100\% \\")
+        latex_lines.append(rf"All & {self.est_label.upper()} & {bf_success_rates[self.est_label] * 100:.0f}\% & 100\% \\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        bundle_fusion_latex_path = pjoin(self.latex_path, 'bundle_fusion.tex')
+
+        with open(bundle_fusion_latex_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Exported Bundle Fusion experiment results to {bundle_fusion_latex_path}.")
 
 
 if __name__ == '__main__':
@@ -963,3 +1005,4 @@ if __name__ == '__main__':
     experiments.run_trajectory_experiments()
     experiments.export_trajectory_results()
     experiments.run_bundlefusion_experiments()
+    experiments.export_bundle_fusion_results()
