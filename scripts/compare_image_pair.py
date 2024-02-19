@@ -21,9 +21,9 @@ from argparse import Namespace, ArgumentParser
 import cv2
 import numpy as np
 import torch
-from lpips import lpips
-from matplotlib import pyplot as plt
+from lpips import LPIPS
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+
 
 def measure_lpips(reference_image, comparison_image, lpips_fn):
     reference_image = (reference_image / 255) * 2.0 - 1.0
@@ -49,18 +49,33 @@ def get_arguments() -> Namespace:
 
     return args
 
+
+def compare_images(ref_image, est_image, lpips_fn=None):
+    """
+    Calculate image similarity between two images.
+
+    :param ref_image: An image loaded via OpenCV (`cv2.imread`) to compare against.
+    :param est_image: An image loaded via OpenCV (`cv2.imread`) to compare against the reference image.
+    :param lpips_fn: The LPIPS function to use. If `None`, the default LPIPS function is used (AlexNet).
+    :return: A 3-tuple containing the structural similarity, peak-signal-to-noise ratio, and the LPIPS scores.
+    """
+    ref_gray = cv2.cvtColor(ref_image, cv2.COLOR_BGR2GRAY)
+    est_gray = cv2.cvtColor(est_image, cv2.COLOR_BGR2GRAY)
+
+    ssim_score = structural_similarity(ref_gray, est_gray, win_size=7)
+    psnr_score = peak_signal_noise_ratio(ref_gray, est_gray)
+
+    lpips_fn = LPIPS(net='alex') if lpips_fn is None else lpips_fn
+    lpips_score = measure_lpips(ref_image, est_image, lpips_fn)
+
+    return ssim_score, psnr_score, lpips_score
+
+
 def main(ref_image: str, est_image: str):
     ref_image = cv2.imread(ref_image)
     est_image = cv2.imread(est_image)
-
-    ssim_score = structural_similarity(cv2.cvtColor(ref_image, cv2.COLOR_BGR2GRAY),
-                                       cv2.cvtColor(est_image, cv2.COLOR_BGR2GRAY), win_size=7)
-    psnr_score = peak_signal_noise_ratio(cv2.cvtColor(ref_image, cv2.COLOR_BGR2GRAY),
-                                         cv2.cvtColor(est_image, cv2.COLOR_BGR2GRAY))
-
-    lpips_fn = lpips.LPIPS(net='alex')
-    lpips_score = measure_lpips(ref_image, est_image, lpips_fn)
-
+    lpips_fn = LPIPS(net='alex')
+    ssim_score, psnr_score, lpips_score = compare_images(ref_image, est_image, lpips_fn)
     print(f"SSIM: {ssim_score:,.2f} - PSNR: {psnr_score:,.2f} dB - LPIPS: {lpips_score:,.2f}")
 
 
