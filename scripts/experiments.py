@@ -20,8 +20,10 @@ import logging
 import os.path
 import shutil
 import statistics
+import subprocess
 from collections import defaultdict
 from os.path import join as pjoin
+from pathlib import Path
 from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import numpy as np
@@ -316,9 +318,11 @@ class Experiments:
         self.summaries_path = pjoin(self.output_path, 'summaries')
         self.latex_path = pjoin(self.output_path, 'latex')
         self.trajectory_outputs_path = pjoin(self.output_path, 'trajectory')
+        self.compression_outputs_path = pjoin(self.output_path, 'compression')
         self.tmp_path = pjoin(self.output_path, 'tmp')
 
-        for path in (self.summaries_path, self.latex_path, self.tmp_path, self.trajectory_outputs_path):
+        for path in (self.summaries_path, self.latex_path, self.tmp_path, self.compression_outputs_path,
+                     self.trajectory_outputs_path):
             os.makedirs(path, exist_ok=True)
 
         self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
@@ -896,8 +900,8 @@ class Experiments:
                 os.makedirs(mesh_output_path, exist_ok=True)
 
                 logging.info('Creating TSDFFusion mesh...')
-                pred_mesh = tsdf_fusion(dataset, self.mesh_options, frame_set=frame_set)
-                pred_mesh.export(pjoin(mesh_output_path, f"{self.est_label}.ply"))
+                tsdf_mesh = tsdf_fusion(dataset, self.mesh_options, frame_set=frame_set)
+                tsdf_mesh.export(pjoin(mesh_output_path, "tsdf.ply"))
 
                 # This is needed in case BundleFusion has already been run with the dataset.
                 logging.info('Creating BundleFusion mesh...')
@@ -985,6 +989,50 @@ class Experiments:
 
         logging.info(f"Wrote Latex preamble to {preamble_path}.")
 
+    def run_compression_experiments(self):
+        def compress_mesh(path_to_glb, output_folder):
+            src_path = Path(path_to_glb)
+            dst_path = Path(os.path.join(output_folder, src_path.name))
+
+            command = ['draco_transcoder', '-i', str(src_path), '-o', str(dst_path)]
+
+            with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
+                for line in p.stdout:
+                    logging.debug(line.rstrip('\n'))
+
+            if (return_code := p.wait()) != 0:
+                logging.warning(f"draco_transcoder exited with code {return_code}.")
+            else:
+                logging.info(f"Output compressed mesh to {dst_path}")
+
+        for dataset_name in self.dataset_names:
+            for label, config in self.pipeline_configurations:
+                dataset_name_and_label = f"{dataset_name}_{label}"
+
+                logging.info(f"Running Compression Comparison for {dataset_name_and_label}...")
+
+                dataset = HiveDataset(pjoin(self.output_path, dataset_name_and_label))
+                output_path = pjoin(self.compression_outputs_path, dataset_name_and_label)
+                os.makedirs(output_path, exist_ok=True)
+                storage_options = StorageOptions(dataset_path=pjoin(self.data_path, dataset_name_and_label),
+                                                 output_path=output_path,
+                                                 overwrite_ok=True)
+                config = config.copy()
+                config.num_frames = 1
+                pipeline = Pipeline(options=config, storage_options=storage_options,
+                                    static_mesh_options=self.mesh_options)
+                pipeline.run(dataset=dataset, compress=False)
+
+                mesh_folder = pipeline.mesh_path
+                compressed_mesh_folder = pjoin(output_path, 'mesh_compressed')
+                logging.info(f"Compressing mesh data...")
+
+                for filename in os.listdir(mesh_folder):
+                    if Path(filename).suffix == '.glb':
+                        compress_mesh(path_to_glb=pjoin(mesh_folder, filename), output_folder=compressed_mesh_folder)
+                    else:
+                        shutil.copy(pjoin(mesh_folder, filename), pjoin(compressed_mesh_folder, filename))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1025,3 +1073,4 @@ if __name__ == '__main__':
     experiments.run_bundlefusion_experiments()
     experiments.export_bundle_fusion_results()
     experiments.export_latex_preamble()
+    experiments.run_compression_experiments()

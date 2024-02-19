@@ -619,3 +619,19 @@ class PipelineOptions(Options):
                                disable_scaling=args.disable_scaling,
                                disable_coverage_constraint=args.disable_coverage_constraint,
                                log_file=args.log_file)
+
+    def copy(self) -> 'PipelineOptions':
+        return PipelineOptions(
+            num_frames=self.num_frames,
+            frame_step=self.frame_step,
+            estimate_pose=self.estimate_pose,
+            estimate_depth=self.estimate_depth,
+            background_only=self.background_only,
+            static_camera=self.static_camera,
+            align_scene=self.align_scene,
+            inpainting_mode=self.inpainting_mode,
+            billboard=self.billboard,
+            disable_scaling=self.disable_scaling,
+            disable_coverage_constraint=self.disable_coverage_constraint,
+            log_file=self.log_file
+        )
