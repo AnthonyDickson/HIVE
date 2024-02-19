@@ -70,20 +70,11 @@ RUN git clone https://github.com/AnthonyDickson/BundleFusion_Ubuntu_Pangolin.git
     cmake -DVISUALIZATION=OFF .. && \
     make -j8
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 ENV WEIGHTS_PATH=/root/.cache/pretrained
 ENV COLMAP_VOCAB_PATH=/root/.cache/colmap
+RUN mkdir -p ${WEIGHTS_PATH} && mkdir -p ${COLMAP_VOCAB_PATH}
 
-COPY scripts/download_weights.py download_weights.py
-
-# The first line downloads the weights for the MC depth estimation model, the AdaBins base model and Detectron2.
-RUN mkdir -p ${WEIGHTS_PATH} &&  \
-    python3 download_weights.py && \
-    rm download_weights.py
-
-# DPT weights
+# Download DPT weights
 RUN wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2ce69ec7.pt -O ${WEIGHTS_PATH}/dpt_hybrid_nyu.pt
 
 # Download weights for lama inpainting.
@@ -93,8 +84,14 @@ RUN cd ${WEIGHTS_PATH} && \
     rm big-lama.zip
 
 # COLMAP vocab file.
-RUN mkdir -p ${COLMAP_VOCAB_PATH} &&  \
-    wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
+RUN wget https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin -O ${COLMAP_VOCAB_PATH}/vocab.bin
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY scripts/download_weights.py download_weights.py
+RUN python3 download_weights.py && \
+    rm download_weights.py
 
 WORKDIR /app
 CMD ["python3"]
