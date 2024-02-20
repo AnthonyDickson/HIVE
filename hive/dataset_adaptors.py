@@ -46,7 +46,7 @@ from hive.io import Dataset, DatasetMetadata, HiveDataset, COLMAPProcessor, Imag
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from hive.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
 from hive.sensor import KinectSensor
-from hive.types import Size, File
+from hive.custom_types import Size, File
 from hive.utils import tqdm_imap, timed_block
 from third_party.dpt import dpt
 from third_party.lama.bin.predict import predict as lama_predict

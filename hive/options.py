@@ -19,7 +19,7 @@ import cv2
 import enum
 from typing import Optional, List, Dict
 
-from hive.types import File
+from hive.custom_types import File
 
 
 class ReprMixin:

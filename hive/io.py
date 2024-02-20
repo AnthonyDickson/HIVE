@@ -41,7 +41,7 @@ from typing import Union, Tuple, Optional, Callable, IO, List
 from hive.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
 from hive.image_processing import dilate_mask, calculate_target_resolution
 from hive.options import COLMAPOptions, MaskDilationOptions
-from hive.types import File
+from hive.custom_types import File
 from hive.utils import tqdm_imap, check_domain, Domain
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage

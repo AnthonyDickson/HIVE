@@ -27,7 +27,7 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
 from typing import Optional, Tuple, Dict
 
-from hive.types import File, Size
+from hive.custom_types import File, Size
 from hive.utils import validate_shape, validate_camera_parameter_shapes
 
 
