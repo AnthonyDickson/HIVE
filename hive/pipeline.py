@@ -22,25 +22,26 @@ import argparse
 import datetime
 import json
 import logging
-import numpy as np
-import openmesh as om
 import os
-import resource
 import shutil
 import subprocess
 import sys
 import time
-import torch
 import traceback
-import trimesh
-from PIL import Image
 from contextlib import contextmanager
 from os.path import join as pjoin
 from pathlib import Path
+from typing import Optional, List, Tuple, Any, Union
+
+import numpy as np
+import openmesh as om
+import resource
+import torch
+import trimesh
+from PIL import Image
 from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
-from typing import Optional, List, Tuple, Any, Union
 
 from hive.dataset_adaptors import get_dataset
 from hive.fusion import tsdf_fusion, bundle_fusion
@@ -254,7 +255,8 @@ class Pipeline:
         :return: The background scene.
         """
         if self.background_mesh_options.reconstruction_method == MeshReconstructionMethod.RGBD:
-            background_scene = self._create_scene(dataset, include_background=True, background_only=True)
+            background_scene = self._create_scene(dataset, num_frames=self.num_frames, include_background=True,
+                                                  background_only=True)
         else:
             background_scene = self._create_empty_scene(dataset)
 
@@ -291,26 +293,28 @@ class Pipeline:
                                                           num_epochs=self.fts_options.num_epochs).run()
 
             with temporary_trajectory(dataset, smoothed_trajectory):
-                foreground_scene = self._create_scene(dataset)
+                foreground_scene = self._create_scene(dataset, num_frames=self.num_frames)
         else:
-            foreground_scene = self._create_scene(dataset)
+            foreground_scene = self._create_scene(dataset, num_frames=self.num_frames)
 
         return foreground_scene
 
-    def _create_scene(self, dataset: HiveDataset, include_background=False, background_only=False) -> trimesh.Scene:
+    def _create_scene(self, dataset: HiveDataset, num_frames: int, include_background=False,
+                      background_only=False) -> trimesh.Scene:
         """
         Create a 'scene', a collection of 3D meshes, from each frame in an RGB-D dataset.
 
         :param dataset: The set of RGB frames and depth maps to use as input.
+        :param num_frames: How many frames to process. If set to -1, all frames are processed.
         :param include_background: Whether to include the background mesh for each frame.
         :param background_only: Whether to exclude dynamic foreground objects.
         :return: The Trimesh scene object.
         """
         # TODO: Can the various bool flag arguments be combined into a single bit flag?
-        if self.num_frames == -1:
+        if num_frames == -1:
             num_frames = dataset.num_frames
         else:
-            num_frames = self.num_frames
+            num_frames = num_frames
 
         if background_only:
             rgb_dataset = dataset.bg_rgb_dataset
@@ -484,6 +488,140 @@ class Pipeline:
                 scene.add_geometry(mesh, node_name=f"{i:06d}")
 
         return scene
+
+    def process_frame(self, dataset: HiveDataset, index: int, background_only=False, include_background=False) -> trimesh.Trimesh:
+        """
+        Process a single frame from a dataset.
+
+        This is similar to the `._create_scene(...)` method, but it does not include profiling code.
+        It is mainly intended to be used outside the main pipeline in experiments.
+
+        :param dataset: A RGB-D dataset.
+        :param index: The index for the frame to use.
+        :param background_only: Whether to include only the background (i.e., ignore foreground elements).
+        :param include_background: Whether to include the background in the mesh. If `False`, only dynamic foreground
+            elements are included.
+        :return: A textured triangle mesh.
+        """
+        if background_only:
+            rgb_dataset = dataset.bg_rgb_dataset
+            depth_dataset = dataset.bg_depth_dataset
+            mask_dataset = dataset.mask_dataset
+        else:
+            rgb_dataset = dataset.rgb_dataset
+            depth_dataset = dataset.depth_dataset
+            mask_dataset = dataset.mask_dataset
+
+        camera_matrix = dataset.camera_matrix
+
+        rgb = rgb_dataset[index]
+        depth = depth_dataset[index]
+        mask_encoded = mask_dataset[index]
+        # noinspection PyShadowingNames
+        pose = dataset.camera_trajectory.to_homogenous_transforms()[index]
+
+        frame_vertices = np.zeros((0, 3))
+        frame_faces = np.zeros((0, 3))
+
+        uv_atlas = []
+        texture_atlas = []
+
+        vertex_count = 0
+
+        # Construct 3D Point Cloud
+        rgb = np.ascontiguousarray(rgb[:, :, :3])
+        rotation, translation = get_pose_components(pose)
+
+        mask_start_i = 0 if include_background else 1
+        # noinspection PyArgumentList
+        mask_end_i = 1 if background_only else mask_encoded.max() + 1
+
+        for object_id in range(mask_start_i, mask_end_i):
+            is_object = object_id > 0
+
+            if is_object:
+                mask = mask_encoded == object_id
+                mask = dilate_mask(mask, self.dilation_options)
+            elif not is_object and dataset.has_inpainted_frame_data:
+                mask = np.ones(mask, dtype=bool)
+
+            coverage_ratio = mask.mean()
+
+            if coverage_ratio < 0.01 and not self.options.disable_coverage_constraint:
+                # TODO: Make minimum coverage ratio configurable?
+                logging.debug(
+                    f"Skipping object #{object_id} in frame {index + 1} due to insufficient coverage.")
+                continue
+
+            vertices = point_cloud_from_depth(depth, mask, camera_matrix, rotation, translation)
+
+            if len(vertices) < 9:
+                logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
+                              f"due to insufficient number of vertices ({len(vertices)}).")
+                continue
+
+            valid_pixels = mask & (depth > 0.0)
+            v, u = valid_pixels.nonzero()
+            # Need to take transpose since stacking UV coordinates gives (2, N) shaped array to get the
+            # expected (N, 2) shape.
+            points2d = np.vstack((u, v)).T
+            masked_depth = depth[valid_pixels]
+
+            # TODO: Filter long stretched out bits of floor attached to peoples' feet.
+            faces = self._triangulate_faces(points2d)
+
+            faces = self._filter_faces(points2d, masked_depth, faces, self.filtering_options)
+
+            if len(faces) < 1:
+                logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
+                              f"due to insufficient number of faces ({len(faces)}).")
+                continue
+
+
+            vertices, faces = self._cleanup_with_connected_components(
+                vertices, faces, is_object,
+                min_components=self.filtering_options.min_num_components
+            )
+
+            if is_object and self.options.billboard:
+                camera_space_points = rotation @ (vertices.T + translation)
+                camera_space_points[2, :] = np.median(camera_space_points[2, :])
+                vertices = (rotation.T @ (camera_space_points - translation)).T
+
+                # TODO: Fix crash due to new vertices being projected outside original frame and causing the
+                #  _get_mesh_texture_and_uv method to return no mesh. This is because the bounds of the
+                #  projected 2D points contains negative coordinates. Need to filter out vertices to project
+                #  to invalid 2D coordinates.
+
+            texture, uv = self._get_mesh_texture_and_uv(vertices, rgb, camera_matrix, rotation, translation)
+            texture_atlas.append(texture)
+            uv_atlas.append(uv)
+
+            frame_vertices = np.vstack((frame_vertices, vertices))
+            frame_faces = np.vstack((frame_faces, faces + vertex_count))
+            # Vertex count must be updated afterwards.
+            vertex_count += len(vertices)
+
+        if len(texture_atlas) == 0:
+            # noinspection PyShadowingNames
+            mesh = trimesh.Trimesh()
+            logging.debug(f"Mesh for frame #{index + 1} is empty!")
+        else:
+            packed_textures, packed_uv = self._pack_textures(texture_atlas, uv_atlas, n_rows=1)
+
+            # noinspection PyUnresolvedReferences,PyShadowingNames
+            mesh = trimesh.Trimesh(
+                frame_vertices,
+                frame_faces,
+                visual=trimesh.visual.TextureVisuals(
+                    uv=packed_uv,
+                    material=trimesh.visual.material.PBRMaterial(
+                        baseColorTexture=Image.fromarray(packed_textures.astype(np.uint8)),
+                    )
+                )
+            )
+
+        return mesh
 
     @staticmethod
     def _create_empty_scene(dataset: HiveDataset) -> trimesh.Scene:
@@ -721,8 +859,8 @@ class Pipeline:
         return atlas, final_uvs
 
     @classmethod
-    def _create_static_mesh(cls, dataset: HiveDataset, num_frames=-1, options=BackgroundMeshOptions(),
-                            frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+    def create_static_mesh(cls, dataset: HiveDataset, num_frames=-1, options=BackgroundMeshOptions(),
+                           frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
         """
         Create a mesh of the static elements from an RGB-D dataset.
 

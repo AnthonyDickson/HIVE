@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Remote Python 3.8.10 Docker (dican732/video2mesh:runtime-cu118)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.8.10 Docker (anthonydickson/hive:runtime-cu118)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="anthonydickson/hive:runtime-cu118" project-jdk-type="Python SDK" />
 </project>

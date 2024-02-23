@@ -17,18 +17,21 @@
 import argparse
 import json
 import logging
+import math
 import os.path
+import shlex
 import shutil
 import statistics
 import subprocess
-from collections import defaultdict
+from contextlib import contextmanager
+from dataclasses import dataclass
 from os.path import join as pjoin
-from pathlib import Path
 from typing import Tuple, Dict, Optional, List, Union, Callable
 
+import cv2
 import numpy as np
-import pandas as pd
 import trimesh
+from lpips import LPIPS
 
 from hive.fusion import tsdf_fusion, bundle_fusion
 from hive.geometric import Trajectory
@@ -37,32 +40,7 @@ from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions,
     WebXROptions
 from hive.pipeline import Pipeline
 from hive.utils import setup_logger, tqdm_imap, set_key_path
-
-
-def setup(output_path: str, overwrite_ok: bool):
-    if os.path.isdir(output_path) and not overwrite_ok:
-        user_input = input(f"The output folder at {output_path} already exists, "
-                           f"do you want to delete this folder before continuing? (y/n):")
-        should_delete = user_input.lower() == 'y'
-
-        if should_delete:
-            shutil.rmtree(output_path)
-        else:  # elif not overwrite_ok:
-            raise RuntimeError(f"The output folder at {output_path} already exists. "
-                               "Either change the output path or delete the existing folder.")
-
-    os.makedirs(output_path, exist_ok=overwrite_ok)
-
-
-def add_key(key, dataset_name, pred_label, results_dict):
-    if key not in results_dict:
-        results_dict[key] = dict()
-
-    if dataset_name not in results_dict[key]:
-        results_dict[key][dataset_name] = dict()
-
-    if pred_label not in results_dict[key][dataset_name]:
-        results_dict[key][dataset_name][pred_label] = dict()
+from scripts.compare_image_pair import compare_images
 
 
 def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajectory: Trajectory, dataset_name: str,
@@ -174,32 +152,18 @@ def tsdf_fusion_with_colmap(dataset: HiveDataset, frame_set: List[int], mesh_opt
     return mesh
 
 
-def export_results(output_path):
-    def read_results(path):
-        with open(path, 'r') as f:
-            results = json.load(f)
-            pd_results_dict = defaultdict(lambda: defaultdict(float))
+@contextmanager
+def virtual_display():
+    display = os.environ['DISPLAY'] or ':99'
+    width_height_depth = os.environ['XVFB_WHD'] or '1920x1080x24'
 
-            for metric in results:
-                for dataset in results[metric]:
-                    for method in results[metric][dataset]:
-                        if metric == 'rpe':
-                            for sub_metric in results[metric][dataset][method]:
-                                pd_results_dict[dataset, method][metric, sub_metric] = results[metric][dataset][method][
-                                    sub_metric]
-                        else:
-                            pd_results_dict[dataset, method][metric, '-'] = results[metric][dataset][method]
+    cmd = shlex.split(f"Xvfb {display} -screen 0 {width_height_depth}")
+    virtual_display_process = subprocess.Popen(cmd)
 
-            return pd.DataFrame.from_dict(pd_results_dict, orient='index')
-
-    with pd.ExcelWriter(pjoin(output_path, 'results.xlsx')) as writer:
-        trajectory_results_df = read_results(pjoin(output_path, 'trajectory', 'summary.json'))
-        trajectory_results_df.to_excel(writer, sheet_name='TRAJECTORY_BY_DATASET')
-        trajectory_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='TRAJECTORY_BY_METHOD')
-
-        pipeline_results_df = read_results(pjoin(output_path, 'pipeline', 'summary.json'))
-        pipeline_results_df.to_excel(writer, sheet_name='PIPELINE_BY_DATASET')
-        pipeline_results_df.groupby(level=1).mean().to_excel(writer, sheet_name='PIPELINE_BY_METHOD')
+    try:
+        yield
+    finally:
+        virtual_display_process.terminate()
 
 
 class Latex:
@@ -262,6 +226,16 @@ class Latex:
         return f"{number * 1e-9:,.1f}"
 
 
+@dataclass
+class MeshCompressionExperimentConfig:
+    uncompressed_mesh_folder = 'mesh_uncompressed'
+    compressed_mesh_folder = 'mesh_compressed'
+    uncompressed_mesh_extension = '.ply'
+    compressed_mesh_extension = '.drc'
+    fg_mesh_name = 'fg'
+    bg_mesh_name = 'bg'
+
+
 # TODO: Pull out each experiment type into own class.
 # TODO: Add experiments for view reconstruction from Novel View Synthesis datasets. Record cam00 (reference view)
 #  metrics separately from the rest.
@@ -283,6 +257,8 @@ class Experiments:
         self.num_frames = num_frames
         self.frame_step = frame_step
         self.log_file = log_file
+
+        self.mesh_compression_experiment_config = MeshCompressionExperimentConfig()
 
         self.gt_label = 'gt'
         self.cm_label = 'cm'
@@ -329,6 +305,7 @@ class Experiments:
         self.trajectory_results_path = pjoin(self.summaries_path, 'trajectory.json')
         self.kid_running_results_path = pjoin(self.summaries_path, 'kid_running.json')
         self.bundle_fusion_results_path = pjoin(self.summaries_path, 'bundle_fusion.json')
+        self.compression_results_path = pjoin(self.summaries_path, 'compression.json')
 
         self.colmap_options = COLMAPOptions(quality='medium')
         self.webxr_options = WebXROptions(webxr_path=self.tmp_path)
@@ -960,7 +937,8 @@ class Experiments:
         bf_success_rates = {label: successes[label] / item_count for label in (self.gt_label, self.est_label)}
 
         latex_lines.append(rf"All & {self.gt_label.upper()} & {bf_success_rates[self.gt_label] * 100:.0f}\% & 100\% \\")
-        latex_lines.append(rf"All & {self.est_label.upper()} & {bf_success_rates[self.est_label] * 100:.0f}\% & 100\% \\")
+        latex_lines.append(
+            rf"All & {self.est_label.upper()} & {bf_success_rates[self.est_label] * 100:.0f}\% & 100\% \\")
         latex_lines.append(r"\bottomrule")
         latex_lines.append(r"\end{tabular}")
 
@@ -990,48 +968,198 @@ class Experiments:
         logging.info(f"Wrote Latex preamble to {preamble_path}.")
 
     def run_compression_experiments(self):
-        def compress_mesh(path_to_glb, output_folder):
-            src_path = Path(path_to_glb)
-            dst_path = Path(os.path.join(output_folder, src_path.name))
-
-            command = ['draco_transcoder', '-i', str(src_path), '-o', str(dst_path)]
-
-            with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=1, universal_newlines=True) as p:
-                for line in p.stdout:
-                    logging.debug(line.rstrip('\n'))
-
-            if (return_code := p.wait()) != 0:
-                logging.warning(f"draco_transcoder exited with code {return_code}.")
-            else:
-                logging.info(f"Output compressed mesh to {dst_path}")
+        config = self.mesh_compression_experiment_config
 
         for dataset_name in self.dataset_names:
-            for label, config in self.pipeline_configurations:
+            for label, pipeline_config in self.pipeline_configurations:
                 dataset_name_and_label = f"{dataset_name}_{label}"
 
                 logging.info(f"Running Compression Comparison for {dataset_name_and_label}...")
 
                 dataset = HiveDataset(pjoin(self.output_path, dataset_name_and_label))
                 output_path = pjoin(self.compression_outputs_path, dataset_name_and_label)
-                os.makedirs(output_path, exist_ok=True)
-                storage_options = StorageOptions(dataset_path=pjoin(self.data_path, dataset_name_and_label),
+                uncompressed_mesh_output_folder = os.path.join(output_path, config.uncompressed_mesh_folder)
+                compressed_mesh_output_folder = os.path.join(output_path, config.compressed_mesh_folder)
+
+                if (os.path.isdir(uncompressed_mesh_output_folder) and os.path.isdir(compressed_mesh_output_folder) and
+                        not self.overwrite_ok):
+                    logging.info(f"Found cached data for {dataset_name_and_label}, skipping.")
+                    continue
+
+                storage_options = StorageOptions(dataset_path=dataset.base_path,
                                                  output_path=output_path,
-                                                 overwrite_ok=True)
-                config = config.copy()
-                config.num_frames = 1
-                pipeline = Pipeline(options=config, storage_options=storage_options,
+                                                 overwrite_ok=False)
+                pipeline = Pipeline(options=pipeline_config, storage_options=storage_options,
                                     static_mesh_options=self.mesh_options)
-                pipeline.run(dataset=dataset, compress=False)
 
-                mesh_folder = pipeline.mesh_path
-                compressed_mesh_folder = pjoin(output_path, 'mesh_compressed')
-                logging.info(f"Compressing mesh data...")
+                fg_mesh = pipeline.process_frame(dataset, index=0)
+                bg_mesh = pipeline.create_static_mesh(
+                    dataset,
+                    options=self.mesh_options,
+                    frame_set=dataset.select_key_frames(threshold=self.mesh_options.key_frame_threshold,
+                                                        frame_step=self.frame_step)
+                )
+                os.makedirs(uncompressed_mesh_output_folder, exist_ok=True)
+                os.makedirs(compressed_mesh_output_folder, exist_ok=True)
 
-                for filename in os.listdir(mesh_folder):
-                    if Path(filename).suffix == '.glb':
-                        compress_mesh(path_to_glb=pjoin(mesh_folder, filename), output_folder=compressed_mesh_folder)
-                    else:
-                        shutil.copy(pjoin(mesh_folder, filename), pjoin(compressed_mesh_folder, filename))
+                for layer, mesh in ((config.fg_mesh_name, fg_mesh), (config.bg_mesh_name, bg_mesh)):
+                    if mesh.is_empty:
+                        logging.info(f"Mesh for {layer} is empty, skipping.")
+                        continue
+
+                    # noinspection PyUnresolvedReferences
+                    if isinstance(mesh.visual, trimesh.visual.TextureVisuals):
+                        # Use vertex colours instead of textures since they seem to get lost for some reason?
+                        mesh.visual = mesh.visual.to_color()
+
+                    uncompressed_mesh_path = os.path.join(output_path, config.uncompressed_mesh_folder,
+                                                          f"{layer}{config.uncompressed_mesh_extension}")
+                    compressed_mesh_path = os.path.join(output_path, config.compressed_mesh_folder,
+                                                        f"{layer}{config.compressed_mesh_extension}")
+                    logging.info(f"Exporting {layer} mesh to {uncompressed_mesh_path} and {compressed_mesh_path}...")
+
+                    mesh.export(uncompressed_mesh_path)
+
+                    with open(compressed_mesh_path, 'wb') as f:
+                        # noinspection PyUnresolvedReferences
+                        f.write(trimesh.exchange.ply.export_draco(mesh))
+
+        self._render_compressed_mesh_comparison()
+
+    def _render_compressed_mesh_comparison(self):
+        config = self.mesh_compression_experiment_config
+
+        def load_draco(path: str) -> trimesh.Trimesh:
+            with open(path, 'rb') as f:
+                # noinspection PyUnresolvedReferences
+                mesh_data = trimesh.exchange.ply.load_draco(f)
+
+            return trimesh.Trimesh(**mesh_data)
+
+        lpips_fn = LPIPS(net='alex')
+        results: Dict[str, Dict[str, Dict[str, float]]] = dict()
+        compression_configs = ((config.uncompressed_mesh_folder, config.uncompressed_mesh_extension, trimesh.load),
+                               (config.compressed_mesh_folder, config.compressed_mesh_extension, load_draco))
+
+        with virtual_display():
+            for dataset_name in self.dataset_names:
+                results[dataset_name] = {}
+
+                for label in self.labels:
+                    dataset_name_and_label = f"{dataset_name}_{label}"
+                    logging.info(f"Running Compression Comparison for {dataset_name_and_label}...")
+
+                    image_pair = []
+
+                    for folder, ext, load_fn in compression_configs:
+                        screen_capture_path = os.path.join(self.compression_outputs_path, dataset_name_and_label,
+                                                           f"{folder}.png")
+
+                        # if os.path.isfile(screen_capture_path) and not self.overwrite_ok:
+                        #     logging.info(f"Found cached result at {screen_capture_path}, skipping {folder}...")
+                        #     image_pair.append(cv2.imread(screen_capture_path))
+                        #     continue
+
+                        mesh_folder = os.path.join(self.compression_outputs_path, dataset_name_and_label, folder)
+                        fg_mesh_path = os.path.join(mesh_folder, f"{config.fg_mesh_name}{ext}")
+                        bg_mesh_path = os.path.join(mesh_folder, f"{config.bg_mesh_name}{ext}")
+
+                        if os.path.isfile(fg_mesh_path):
+                            fg_mesh = load_fn(fg_mesh_path)
+                        else:
+                            fg_mesh = trimesh.Trimesh()
+
+                        bg_mesh = load_fn(bg_mesh_path)
+
+                        scene = trimesh.Scene()
+                        scene.add_geometry(fg_mesh)
+                        scene.add_geometry(bg_mesh)
+                        # This rotation corrects for the rotation applied for viewing in the web-based renderer.
+                        rotation_matrix = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+                        scene.apply_transform(rotation_matrix)
+                        scene.camera_transform = scene.camera.look_at(bg_mesh.vertices)
+
+                        screen_capture = scene.save_image(resolution=(640, 480))
+
+                        with open(screen_capture_path, 'wb') as f:
+                            f.write(screen_capture)
+
+                        image_pair.append(cv2.imread(screen_capture_path))
+
+                    logging.info(f"Calculating image similarity for {dataset_name_and_label}...")
+                    ssim, psnr, lpips = compare_images(image_pair[0], image_pair[1], lpips_fn=lpips_fn)
+                    results[dataset_name][label] = {
+                        'ssim': ssim,
+                        'psnr': psnr,
+                        'lpips': lpips
+                    }
+                    logging.info(results[dataset_name][label])
+
+        with open(self.compression_results_path, 'w') as f:
+            json.dump(results, f)
+
+    def export_compression_results(self):
+        with open(self.compression_results_path, 'r') as f:
+            results = json.load(f)
+
+        latex_lines = [
+            r"\begin{tabular}{llrrr}",
+            r"\toprule",
+            r"Dataset & Config & SSIM & PSNR & LPIPS \\",
+            r"\midrule"
+        ]
+
+        metrics = 'ssim', 'psnr', 'lpips'
+
+        averages = {
+            label: {
+                metric_name: {
+                    'sum': 0.0,
+                    'count': 0,
+                }
+                for metric_name in metrics
+            }
+            for label in self.labels
+        }
+
+        for dataset_name in results:
+            latex_lines.append(rf"\multirow{{3}}{{*}}{{{Latex.format_dataset_name(dataset_name)}}}")
+
+            for label in results[dataset_name]:
+                ssim, psnr, lpips = results[dataset_name][label].values()
+                latex_lines.append(rf"& {label} & {ssim:.2f} & {psnr:.2f} & {lpips:.2f} \\")
+
+                for metric_name in metrics:
+                    averages[label][metric_name]['sum'] += results[dataset_name][label][metric_name]
+                    averages[label][metric_name]['count'] += 1
+
+            latex_lines.append(r"\midrule")
+
+        average_all = {metric_name: 0.0 for metric_name in metrics}
+        latex_lines.append(rf"\multirow{{4}}{{*}}{{Mean}} ")
+
+        for label in averages:
+            parts = [label]
+
+            for metric_name in metrics:
+                mean = averages[label][metric_name]['sum'] / averages[label][metric_name]['count']
+                parts.append(f"{mean:.2f}")
+                average_all[metric_name] += mean / len(averages)
+
+            latex_lines.append(rf" & {' & '.join(parts)} \\")
+
+        latex_lines.append(
+            rf" & All & {average_all['ssim']:.2f} & {average_all['psnr']:.2f} & {average_all['lpips']:.2f} \\")
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        latex_code = '\n'.join(latex_lines)
+        latex_path = os.path.join(self.latex_path, "compression_image_comparison.tex")
+
+        with open(latex_path, "w") as f:
+            f.write(latex_code)
+
+        logging.info(f"Exported compression image similarity experiment results to {latex_path}.")
 
 
 if __name__ == '__main__':
@@ -1074,3 +1202,4 @@ if __name__ == '__main__':
     experiments.export_bundle_fusion_results()
     experiments.export_latex_preamble()
     experiments.run_compression_experiments()
+    experiments.export_compression_results()

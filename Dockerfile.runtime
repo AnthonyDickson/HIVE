@@ -13,6 +13,8 @@ RUN apt update && \
     libatlas-base-dev libsuitesparse-dev libeigen3-dev  \
     # BundleFusion
     libncurses5-dev libncursesw5-dev \
+    # Headless rendering with Trimesh \
+    libgl1-mesa-glx libgl1-mesa-dri xvfb xauth ca-certificates freeglut3-dev \
     # For downloading the weights for Lama inpainting \
     curl && \
     apt -y autoremove && \
@@ -92,6 +94,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY scripts/download_weights.py download_weights.py
 RUN python3 download_weights.py && \
     rm download_weights.py
+
+# Set environment variables for headless rendering w/ Trimesh.
+ENV XVFB_WHD="1920x1080x24"\
+    DISPLAY=":99" \
+    LIBGL_ALWAYS_SOFTWARE="1" \
+    GALLIUM_DRIVER="llvmpipe"
 
 WORKDIR /app
 CMD ["python3"]
