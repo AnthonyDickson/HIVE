@@ -30,8 +30,13 @@ from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import cv2
 import numpy as np
+import torch
 import trimesh
+import yaml
+from PIL import Image
 from lpips import LPIPS
+from omegaconf import OmegaConf
+from torch.utils.data.dataloader import default_collate
 
 from hive.fusion import tsdf_fusion, bundle_fusion
 from hive.geometric import Trajectory
@@ -41,6 +46,9 @@ from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions,
 from hive.pipeline import Pipeline
 from hive.utils import setup_logger, tqdm_imap, set_key_path
 from scripts.compare_image_pair import compare_images
+from third_party.lama.saicinpainting.evaluation.data import pad_img_to_modulo
+from third_party.lama.saicinpainting.evaluation.utils import move_to_device
+from third_party.lama.saicinpainting.training.trainers import load_checkpoint
 
 
 def run_trajectory_comparisons(dataset, pred_trajectory: Trajectory, gt_trajectory: Trajectory, dataset_name: str,
@@ -236,6 +244,129 @@ class MeshCompressionExperimentConfig:
     bg_mesh_name = 'bg'
 
 
+class InpaintingExperiment:
+    """Code for experiments where inpainted frame data are compared against the original frame data."""
+
+    @classmethod
+    def get_crop_regions(cls, rgb_frame, binary_mask, subdivisions=8):
+        height, width = rgb_frame.shape[:2]
+        segment_height = height // subdivisions
+        segment_width = width // subdivisions
+
+        for col in range(1, subdivisions - 1):
+            for row in range(1, subdivisions - 1):
+                col_start = col * segment_width
+                col_end = col_start + segment_width
+                row_start = row * segment_height
+                row_end = row_start + segment_height
+
+                region_mask = np.zeros((height, width), dtype=bool)
+                region_mask[row_start:row_end, col_start:col_end] = True
+
+                if np.any(region_mask & binary_mask):
+                    logging.debug(f"Skipping region {col}-{row} due to overlap with segmentation mask...")
+                    continue
+
+                yield region_mask
+
+    @classmethod
+    def load_inpainting_model(cls):
+        lama_weights_path = pjoin(os.environ["WEIGHTS_PATH"], 'big-lama')
+        device = torch.device('cuda')
+
+        train_config_path = os.path.join(lama_weights_path, 'config.yaml')
+        with open(train_config_path, 'r') as f:
+            train_config = OmegaConf.create(yaml.safe_load(f))
+
+        train_config.training_model.predict_only = True
+        train_config.visualizer.kind = 'noop'
+
+        checkpoint_path = os.path.join(lama_weights_path,
+                                       'models',
+                                       'best.ckpt')
+        model = load_checkpoint(train_config, checkpoint_path, strict=False, map_location='cpu')
+        model.freeze()
+        model.to(device)
+
+        return model
+
+    @classmethod
+    def inpaint_rgb(cls, model, image, mask, pad_out_to_modulo=8):
+        # Lama (and in general, PyTorch) expect image data to be in NCHW format. Here we first convert to CHW.
+        image = np.transpose(image, (2, 0, 1))
+        mask = np.broadcast_to(mask, (1, *mask.shape))
+        # Lama, in particular, requires images to be normalized to the interval [0, 1] and stored as floats.
+        image = (image / np.iinfo(image.dtype).max).astype(np.float32)
+        mask = mask.astype(np.float32)
+
+        frame_data = dict()
+        frame_data['unpad_to_size'] = image.shape[1:]
+        frame_data['image'] = pad_img_to_modulo(image, pad_out_to_modulo)
+        frame_data['mask'] = pad_img_to_modulo(mask, pad_out_to_modulo)
+
+        batch = default_collate([frame_data])
+
+        with torch.no_grad():
+            batch = move_to_device(batch, model.device)
+            batch = model(batch)
+            inpainted_frame = batch['inpainted'][0].permute(1, 2, 0).detach().cpu().numpy()
+            unpad_to_size = batch.get('unpad_to_size', None)
+
+            if unpad_to_size is not None:
+                orig_height, orig_width = unpad_to_size
+                inpainted_frame = inpainted_frame[:orig_height, :orig_width]
+
+        inpainted_frame = np.clip(inpainted_frame * 255, 0, 255).astype('uint8')
+
+        return inpainted_frame
+
+    @classmethod
+    def inpaint_depth(cls, depth_map, mask, depth_scale):
+        depth_map_uint16 = (depth_map / depth_scale).astype(np.uint16)
+        inpainted_depth = cv2.inpaint(depth_map_uint16, mask.astype(np.uint8), 30, cv2.INPAINT_TELEA)
+        inpainted_depth[inpainted_depth < 0.0] = 0.0
+
+        return inpainted_depth * depth_scale
+
+    @classmethod
+    def compare_rgb(cls, ref_image, est_image, mask, lpips_fn=None):
+        v, u = mask.nonzero()
+        crop_region_height = v.max() - v.min() + 1
+        crop_region_width = u.max() - u.min() + 1
+        rgb_raw_img_comp = ref_image[mask].reshape((crop_region_height, crop_region_width, 3))
+        rgb_inpainted_img_comp = est_image[mask].reshape((crop_region_height, crop_region_width, 3))
+
+        return compare_images(rgb_raw_img_comp, rgb_inpainted_img_comp, lpips_fn=lpips_fn)
+
+    @classmethod
+    def compare_depth(cls, ref_depth, est_depth, mask):
+        valid_pixels_mask = (ref_depth > 0) & (est_depth > 0) & mask
+        masked_ref_depth = ref_depth[valid_pixels_mask]
+        masked_est_depth = est_depth[valid_pixels_mask]
+
+        residuals = masked_ref_depth - masked_est_depth
+        rmse = np.sqrt(np.mean(np.square(residuals)))
+        abs_rel = np.mean(np.abs(residuals) / masked_ref_depth)
+        max_ratio = np.maximum(masked_ref_depth / masked_est_depth, masked_est_depth / masked_ref_depth)
+        delta_1 = np.mean(max_ratio <= 1.25)
+
+        return {
+            'rmse': float(rmse),
+            'abs_rel': float(abs_rel),
+            'delta_1': float(delta_1)
+        }
+
+    @classmethod
+    def depth_to_img(cls, depth_map):
+        depth_map_normalized = depth_map / depth_map.max()
+
+        return (255 * depth_map_normalized).astype(np.uint8)
+
+    @classmethod
+    def mask_to_img(cls, mask):
+        # Assume that the mask contains zeros and ones.
+        return mask.astype(np.uint8) * 255
+
 # TODO: Pull out each experiment type into own class.
 # TODO: Add experiments for view reconstruction from Novel View Synthesis datasets. Record cam00 (reference view)
 #  metrics separately from the rest.
@@ -285,7 +416,7 @@ class Experiments:
         self.pipeline_configurations = [
             (self.gt_label, self.gt_options),
             (self.cm_label, self.cm_options),
-            (self.dpt_label, self.dpt_options),
+            # (self.dpt_label, self.dpt_options),
             (self.est_label, self.est_options),
         ]
 
@@ -295,10 +426,11 @@ class Experiments:
         self.latex_path = pjoin(self.output_path, 'latex')
         self.trajectory_outputs_path = pjoin(self.output_path, 'trajectory')
         self.compression_outputs_path = pjoin(self.output_path, 'compression')
+        self.inpainting_outputs_path = pjoin(self.output_path, 'inpainting')
         self.tmp_path = pjoin(self.output_path, 'tmp')
 
         for path in (self.summaries_path, self.latex_path, self.tmp_path, self.compression_outputs_path,
-                     self.trajectory_outputs_path):
+                     self.trajectory_outputs_path, self.inpainting_outputs_path):
             os.makedirs(path, exist_ok=True)
 
         self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
@@ -306,6 +438,7 @@ class Experiments:
         self.kid_running_results_path = pjoin(self.summaries_path, 'kid_running.json')
         self.bundle_fusion_results_path = pjoin(self.summaries_path, 'bundle_fusion.json')
         self.compression_results_path = pjoin(self.summaries_path, 'compression.json')
+        self.inpainting_results_path = pjoin(self.summaries_path, 'inpainting.json')
 
         self.colmap_options = COLMAPOptions(quality='medium')
         self.webxr_options = WebXROptions(webxr_path=self.tmp_path)
@@ -1161,6 +1294,82 @@ class Experiments:
 
         logging.info(f"Exported compression image similarity experiment results to {latex_path}.")
 
+    def run_inpainting_experiments(self):
+        logging.info("Running Inpainting Comparisons...")
+
+        logging.debug(f"Loading inpainting model...")
+        model = InpaintingExperiment.load_inpainting_model()
+        lpips_fn = LPIPS(net='alex')
+        results = dict()
+
+        for dataset_name in self.dataset_names:
+            results[dataset_name] = dict()
+
+            for label in self.labels:
+                dataset_name_and_label = f"{dataset_name}_{label}"
+                logging.info(f"Running Inpainting Comparison for {dataset_name_and_label}...")
+
+                dataset_path = pjoin(self.output_path, dataset_name_and_label)
+                logging.debug(f"Loading dataset from {dataset_path}...")
+                dataset = HiveDataset(dataset_path)
+                rgb_raw = dataset.rgb_dataset[0]
+                depth_raw = dataset.depth_dataset[0]
+                mask = dataset.mask_dataset[0] > 0
+
+                output_path = pjoin(self.inpainting_outputs_path, dataset_name_and_label)
+                logging.debug(f"Copying reference frame data to {output_path}...")
+                os.makedirs(output_path, exist_ok=True)
+
+                Image.fromarray(rgb_raw).save(os.path.join(output_path, 'rgb.png'))
+                Image.fromarray(InpaintingExperiment.depth_to_img(depth_raw)).save(
+                    os.path.join(output_path, 'depth.png'))
+                Image.fromarray(InpaintingExperiment.mask_to_img(mask), mode='L').save(os.path.join(output_path, 'mask.png'))
+
+                logging.debug(f"Looping over crop regions...")
+                crop_regions = InpaintingExperiment.get_crop_regions(rgb_frame=rgb_raw, binary_mask=mask)
+                results[dataset_name][label] = []
+
+                # TODO: Also include before & after comparison of rendered meshes?
+
+                for crop_index, crop_mask in enumerate(crop_regions):
+                    logging.debug(f"Processing crop region {crop_index}...")
+                    rgb_inpainted = InpaintingExperiment.inpaint_rgb(model=model, image=rgb_raw, mask=crop_mask)
+                    depth_inpainted = InpaintingExperiment.inpaint_depth(depth_raw, crop_mask,
+                                                                         depth_scale=dataset.depth_scaling_factor)
+
+                    filename_suffix = HiveDataset.index_to_filename(crop_index, file_extension='png')
+                    Image.fromarray(InpaintingExperiment.mask_to_img(crop_mask)).save(
+                        os.path.join(output_path, f"mask_crop_{filename_suffix}"))
+                    Image.fromarray(rgb_inpainted).save(os.path.join(output_path, f"rgb_inpainted_{filename_suffix}"))
+                    Image.fromarray(InpaintingExperiment.depth_to_img(depth_inpainted)).save(
+                        os.path.join(output_path, f"depth_inpainted_{filename_suffix}"))
+
+                    ssim, psnr, lpips = InpaintingExperiment.compare_rgb(rgb_raw, rgb_inpainted, crop_mask,
+                                                                         lpips_fn=lpips_fn)
+                    depth_metrics = InpaintingExperiment.compare_depth(depth_raw, depth_inpainted, crop_mask)
+
+                    crop_results = {
+                        'image_similarity': {
+                            'ssim': ssim,
+                            'psnr': psnr,
+                            'lpips': lpips
+                        },
+                        'depth_metrics': depth_metrics
+                    }
+                    results[dataset_name][label].append(crop_results)
+
+                    crop_results_path = os.path.join(
+                        output_path, f"results_{HiveDataset.index_to_filename(crop_index, file_extension='json')}"
+                    )
+
+                    with open(crop_results_path, 'w') as f:
+                        json.dump(crop_results, f)
+
+        logging.info(f"Saving inpainting comparison results to {self.inpainting_results_path}...")
+
+        with open(self.inpainting_results_path, 'w') as f:
+            json.dump(results, f)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1203,3 +1412,4 @@ if __name__ == '__main__':
     experiments.export_latex_preamble()
     experiments.run_compression_experiments()
     experiments.export_compression_results()
+    experiments.run_inpainting_experiments()
