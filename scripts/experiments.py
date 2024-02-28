@@ -367,6 +367,7 @@ class InpaintingExperiment:
         # Assume that the mask contains zeros and ones.
         return mask.astype(np.uint8) * 255
 
+
 # TODO: Pull out each experiment type into own class.
 # TODO: Add experiments for view reconstruction from Novel View Synthesis datasets. Record cam00 (reference view)
 #  metrics separately from the rest.
@@ -1305,7 +1306,7 @@ class Experiments:
         for dataset_name in self.dataset_names:
             results[dataset_name] = dict()
 
-            for label in self.labels:
+            for label in (self.gt_label, self.est_label):
                 dataset_name_and_label = f"{dataset_name}_{label}"
                 logging.info(f"Running Inpainting Comparison for {dataset_name_and_label}...")
 
@@ -1370,6 +1371,119 @@ class Experiments:
         with open(self.inpainting_results_path, 'w') as f:
             json.dump(results, f)
 
+    def export_inpainting_results(self):
+        with open(self.inpainting_results_path, 'r') as f:
+            inpainting_results = json.load(f)
+
+        ssim_key = 'ssim'
+        psnr_key = 'psnr'
+        lpips_key = 'lpips'
+        rmse_key = 'rmse'
+        abs_rel_key = 'abs_rel'
+        delta_1_key = 'delta_1'
+
+        class Average:
+            def __init__(self):
+                self.total = 0.0
+                self.count = 0
+
+            def update(self, value):
+                if np.isnan(value):
+                    return
+
+                self.total += value
+                self.count += 1
+
+            @property
+            def mean(self):
+                return self.total / self.count
+
+        averages = {
+            dataset_name: {
+                label: {
+                    ssim_key: Average(),
+                    psnr_key: Average(),
+                    lpips_key: Average(),
+                    rmse_key: Average(),
+                    abs_rel_key: Average(),
+                    delta_1_key: Average()
+                }
+                for label in (self.gt_label, self.est_label)
+            }
+            for dataset_name in dataset_names
+        }
+
+        average_by_label = {
+            label: {
+                ssim_key: Average(),
+                psnr_key: Average(),
+                lpips_key: Average(),
+                rmse_key: Average(),
+                abs_rel_key: Average(),
+                delta_1_key: Average()
+            }
+            for label in (self.gt_label, self.est_label)
+        }
+
+        for dataset_name in inpainting_results:
+            for label in (self.gt_label, self.est_label):
+                for row in inpainting_results[dataset_name][label]:
+                    image_similarity = row['image_similarity']
+                    depth_metrics = row['depth_metrics']
+
+                    averages[dataset_name][label][ssim_key].update(image_similarity[ssim_key])
+                    averages[dataset_name][label][psnr_key].update(image_similarity[psnr_key])
+                    averages[dataset_name][label][lpips_key].update(image_similarity[lpips_key])
+                    averages[dataset_name][label][rmse_key].update(depth_metrics[rmse_key])
+                    averages[dataset_name][label][abs_rel_key].update(depth_metrics[abs_rel_key])
+                    averages[dataset_name][label][delta_1_key].update(depth_metrics[delta_1_key])
+
+                    average_by_label[label][ssim_key].update(image_similarity[ssim_key])
+                    average_by_label[label][psnr_key].update(image_similarity[psnr_key])
+                    average_by_label[label][lpips_key].update(image_similarity[lpips_key])
+                    average_by_label[label][rmse_key].update(depth_metrics[rmse_key])
+                    average_by_label[label][abs_rel_key].update(depth_metrics[abs_rel_key])
+                    average_by_label[label][delta_1_key].update(depth_metrics[delta_1_key])
+
+        latex_lines = [
+            r"\begin{tabular}{llrrrrrr}",
+            r"\toprule",
+            r" & & \multicolumn{3}{c}{Image Similarity} & \multicolumn{3}{c}{Depth Metrics} \\",
+            r"\cmidrule(lr){3-5} \cmidrule(lr){6-8}",
+            r"Dataset & Config & SSIM $\uparrow$ & PSNR $\uparrow$ & LPIPS $\downarrow$ & "
+            r"RMSE $\downarrow$ & absRel $\downarrow$ & $\delta^1$ $\uparrow$ \\",
+            r"\midrule"
+        ]
+
+        for dataset_name in averages:
+            latex_lines.append(rf"\multirow{{2}}{{*}}{{{Latex.format_dataset_name(dataset_name)}}}")
+
+            for label in averages[dataset_name]:
+                data = averages[dataset_name][label]
+                latex_lines.append(rf" & {label.upper()} & {data[ssim_key].mean:.2f} & {data[psnr_key].mean:.2f} & "
+                                   rf"{data[lpips_key].mean:.2f} & {data[rmse_key].mean:.2f} & "
+                                   rf"{data[abs_rel_key].mean:.2f} & {data[delta_1_key].mean:.2f} \\")
+
+            latex_lines.append(r"\midrule")
+
+        latex_lines.append(rf"\multirow{{2}}{{*}}{{Mean}}")
+
+        for label in average_by_label:
+            data = average_by_label[label]
+            latex_lines.append(rf" & {label.upper()} & {data[ssim_key].mean:.2f} & {data[psnr_key].mean:.2f} & "
+                               rf"{data[lpips_key].mean:.2f} & {data[rmse_key].mean:.2f} & "
+                               rf"{data[abs_rel_key].mean:.2f} & {data[delta_1_key].mean:.2f} \\")
+
+        latex_lines.append(r"\bottomrule")
+        latex_lines.append(r"\end{tabular}")
+
+        latex_path = os.path.join(self.latex_path, 'inpainting.tex')
+
+        with open(latex_path, 'w') as f:
+            f.write('\n'.join(latex_lines))
+
+        logging.info(f"Exported inpainting latex table to {latex_path}.")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1413,3 +1527,4 @@ if __name__ == '__main__':
     experiments.run_compression_experiments()
     experiments.export_compression_results()
     experiments.run_inpainting_experiments()
+    experiments.export_inpainting_results()
