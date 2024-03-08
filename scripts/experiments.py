@@ -402,7 +402,7 @@ class KinectSyncTable:
         self.depth_data = KinectSyncTableNode(kinect_data['depth'])
 
 
-class KinectCalibration:
+class KinectCalibrationNode:
     def __init__(self, data: dict):
         self.K_depth = np.asarray(data['K_depth'], dtype=np.float32)
         self.M_depth = np.asarray(data['M_depth'], dtype=np.float32)
@@ -420,6 +420,17 @@ class KinectCalibration:
         self.depth_time_offset = int(data['depth_time_offset'])
         self.M_world2sensor = np.asarray(data['M_world2sensor'], dtype=np.int8)
         self.domeCenter = np.asarray(data['domeCenter'], dtype=np.float32)
+
+
+class KinectCalibration:
+    def __init__(self, data: dict):
+        self.calibDataSource = data['calibDataSource']
+        self.panopticCalibDataSource = data['panopticCalibDataSource']
+        self.sensors = {i + 1: KinectCalibrationNode(sensor_data) for i, sensor_data in enumerate(data['sensors'])}
+        self.M_world2vga = data['M_world2vga']
+
+    def __getitem__(self, kinect_node: int) -> KinectCalibrationNode:
+        return self.sensors[kinect_node]
 
 
 class CMUPanopticDataset:
@@ -458,6 +469,7 @@ class CMUPanopticDataset:
         self.sync_table = self.load_sync_table()
         self.kinect_sync_table = self.load_kinect_sync_table()
         self.camera_calibration = self.load_camera_calibration()
+        self.kinect_calibration = self.load_kinect_calibration()
 
     def load_sync_table(self):
         path = os.path.join(self.base_path, self.sync_tables_filename_formatter(self.dataset_name))
@@ -476,12 +488,21 @@ class CMUPanopticDataset:
         return KinectSyncTable(kinect_sync_table_data)
 
     def load_camera_calibration(self):
+        calibration_path = self.calibration_filename_formatter(self.dataset_name)
+
+        with open(calibration_path, 'r') as f:
+            camera_calibration = json.load(f)
+
+        # TODO: Create wrapper class for panoptic camera calibration.
+        return camera_calibration
+
+    def load_kinect_calibration(self):
         calibration_path = self.kinect_calibration_filename_formatter(self.dataset_name)
 
         with open(calibration_path, 'r') as f:
             camera_calibration = json.load(f)
 
-        return camera_calibration
+        return KinectCalibration(camera_calibration)
 
     def get_camera_calibration(self, kinect_node: int) -> dict:
         return self.camera_calibration[kinect_node]
@@ -577,6 +598,39 @@ class CMUPanopticDataset:
         depth_frame = self.get_depth_map(index=frame_index, kinect_node=kinect_node)
 
         return color_frame, depth_frame
+
+    def kinect_to_world_coordinates(self, kinect_node: int):
+        """
+        Get the transformation matrix that transforms 3D coordinates from the local Kinect node space to world space.
+        :param kinect_node: The index of the Kinect node (one-based).
+        :return: A homogeneous 4x4 transformation matrix.
+        """
+        image_node_name = self.image_node_formatter(kinect_node)
+
+        for camera_calibration in self.camera_calibration['cameras']:
+            if camera_calibration['name'] == image_node_name:
+                panoptic_calibration = camera_calibration
+                break
+        else:
+            raise ValueError(f"Could not find calibration for camera node {image_node_name}.")
+
+        kinect_calibration = self.kinect_calibration[kinect_node]
+
+        M = np.hstack((panoptic_calibration['R'], panoptic_calibration['t']))
+        T_world_to_kinect = np.eye(4, dtype=np.float32)
+        T_world_to_kinect[:3, :] = M
+        T_kinect_color_to_panoptic_world = np.linalg.inv(T_world_to_kinect)
+
+        scale_factor = 100  # cm to meter
+        scale_kinoptic_to_panoptic = np.eye(4)
+        scale_kinoptic_to_panoptic[0:2, 0:2] = scale_factor * scale_kinoptic_to_panoptic[0:2, 0:2]
+
+        T_kinect_color_to_kinect_local = kinect_calibration.M_color
+        T_kinect_local_to_kinect_color = np.linalg.inv(T_kinect_color_to_kinect_local)
+
+        T_kinect_local_to_panoptic_world = T_kinect_color_to_panoptic_world * scale_kinoptic_to_panoptic * T_kinect_local_to_kinect_color
+
+        return T_kinect_local_to_panoptic_world
 
 
 # TODO: Pull out each experiment type into own class.
