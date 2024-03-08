@@ -16,32 +16,33 @@
 
 import abc
 import contextlib
-import cv2
 import datetime
-import imageio
 import json
 import logging
-import numpy as np
 import os
 import struct
 import subprocess
+from os.path import join as pjoin
+from pathlib import Path
+from typing import Union, Tuple, Optional, Callable, IO, List
+
+import cv2
+import imageio
+import numpy as np
 import torch
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
-from os.path import join as pjoin
-from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
-from typing import Union, Tuple, Optional, Callable, IO, List
 
+from hive.custom_types import File
 from hive.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
 from hive.image_processing import dilate_mask, calculate_target_resolution
 from hive.options import COLMAPOptions, MaskDilationOptions
-from hive.custom_types import File
 from hive.utils import tqdm_imap, check_domain, Domain
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
@@ -258,21 +259,21 @@ class COLMAPProcessor:
     @property
     def probably_has_results(self) -> bool:
         recon_result_path = pjoin(self.sparse_path, '0')
-        min_files_for_recon = 4
+        min_files_for_recon = 3
 
         return os.path.isdir(self.sparse_path) and len(os.listdir(self.sparse_path)) > 0 and \
             (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
 
-    def run(self):
+    def run(self, use_masks=True):
         os.makedirs(self.workspace_path, exist_ok=True)
         os.makedirs(self.mask_path, exist_ok=True)
 
-        if len(os.listdir(self.mask_path)) == 0:
+        if len(os.listdir(self.mask_path)) == 0 and use_masks:
             logging.info(f"Could not find masks in folder: {self.mask_path}.")
             logging.info(f"Creating masks for COLMAP...")
             rgb_loader = TorchDataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
             create_masks(rgb_loader, self.mask_path, for_colmap=True)
-        else:
+        elif use_masks:
             logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
         logging.info("Running COLMAP for real this time, this may take a while...")
@@ -287,11 +288,12 @@ class COLMAPProcessor:
         if (return_code := p.wait()) != 0:
             raise RuntimeError(f"COLMAP exited with code {return_code}.")
 
-    def get_command(self, return_as_string=False):
+    def get_command(self, use_masks=True, return_as_string=False):
         """
         Build the command for running COLMAP .
         Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
 
+        :param use_masks: Whether to mask out dynamic elements (e.g., people) in the video.
         :param return_as_string: Whether to return the command as a single string, or as an array.
         :return: The COLMAP command.
         """
@@ -309,7 +311,7 @@ class COLMAPProcessor:
                    '--dense', 1 if options.dense else 0,
                    '--quality', options.quality]
 
-        if self.mask_path is not None:
+        if use_masks and self.mask_path is not None:
             assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
             command += ['--mask_path', self.mask_path]
 
@@ -318,7 +320,8 @@ class COLMAPProcessor:
         return ' '.join(command) if return_as_string else command
 
     def _load_model(self):
-        models = sorted(os.listdir(self.sparse_path))
+        models = filter(lambda item: os.path.isdir(os.path.join(self.sparse_path, item)), os.listdir(self.sparse_path))
+        models = sorted(list(models))
         num_models = len(models)
 
         if num_models == 1:
@@ -860,7 +863,6 @@ class HiveDataset(Dataset):
 
     required_folders = [rgb_folder, depth_folder, mask_folder]
 
-    # Dataset adaptors are expected to convert depth maps to mm.
     # This scaling factor converts the mm depth values to meters.
     depth_scaling_factor = 1. / 1000.
 

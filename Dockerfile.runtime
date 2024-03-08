@@ -2,7 +2,7 @@ FROM nvidia/cuda:11.8.0-devel-ubuntu20.04
 
 RUN apt update && \
     DEBIAN_FRONTEND="noninteractive" apt install -y --no-install-recommends \
-    python3.8 python3.8-dev python3-pip git wget unzip make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
+    python3.8 python3.8-dev python3-pip git wget zip unzip make cmake ninja-build gcc g++ libgl1-mesa-dev libglib2.0-0 \
     # COLMAP Dependencies
     build-essential libboost-program-options-dev libboost-filesystem-dev libboost-graph-dev libboost-system-dev \
     libboost-test-dev libeigen3-dev libflann-dev libfreeimage-dev libmetis-dev libgoogle-glog-dev libgflags-dev \
@@ -66,7 +66,7 @@ ENV BUNDLE_FUSION_BIN=${BUNDLE_FUSION_PATH}/build/bundle_fusion_example
 
 RUN git clone https://github.com/AnthonyDickson/BundleFusion_Ubuntu_Pangolin.git ${BUNDLE_FUSION_PATH} && \
     cd ${BUNDLE_FUSION_PATH} && \
-    git checkout 2b9c1df && \
+    git checkout b771cf9 && \
     mkdir build && \
     cd build && \
     cmake -DVISUALIZATION=OFF .. && \
@@ -81,7 +81,7 @@ RUN wget https://github.com/intel-isl/DPT/releases/download/1_0/dpt_hybrid_nyu-2
 
 # Download weights for lama inpainting.
 RUN cd ${WEIGHTS_PATH} && \
-   curl -LJO https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip &&  \
+    curl -LJO https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip &&  \
     unzip big-lama.zip && \
     rm big-lama.zip
 
