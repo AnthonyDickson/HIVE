@@ -16,3 +16,6 @@
 [submodule "third_party/lama"]
 	path = third_party/lama
 	url = https://github.com/AnthonyDickson/lama.git
+[submodule "third_party/panoptic_toolbox"]
+	path = third_party/panoptic_toolbox
+	url = https://github.com/CMU-Perceptual-Computing-Lab/panoptic-toolbox.git
