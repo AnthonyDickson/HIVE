@@ -433,6 +433,28 @@ class KinectCalibration:
         return self.sensors[kinect_node]
 
 
+class PanopticCamera:
+    def __init__(self, data: dict):
+        self.name = str(data['name'])
+        self.type = str(data['type'])
+        self.resolution = (int(data['resolution'][1]), int(data['resolution'][0]))  # height, width
+        self.panel = int(data['panel'])
+        self.node = int(data['node'])
+        self.K = np.asarray(data['K'], dtype=np.float32)
+        self.dist_coefficient = np.asarray(data['distCoef'], dtype=np.float32)
+        self.R = np.asarray(data['R'], dtype=np.float32)
+        self.t = np.asarray(data['t'], dtype=np.float32)
+
+
+class PanopticCalibration:
+    def __init__(self, data: dict):
+        self.calib_data_source = data['calibDataSource']
+        self.cameras = {camera_data['name']: PanopticCamera(camera_data) for camera_data in data['cameras'].values()}
+
+    def __getitem__(self, node_name: str) -> PanopticCamera:
+        return self.cameras[node_name]
+
+
 class CMUPanopticDataset:
     """
     Loader for CMU Panoptic Dataset http://domedb.perception.cs.cmu.edu/index.html.
@@ -493,8 +515,7 @@ class CMUPanopticDataset:
         with open(calibration_path, 'r') as f:
             camera_calibration = json.load(f)
 
-        # TODO: Create wrapper class for panoptic camera calibration.
-        return camera_calibration
+        return PanopticCalibration(camera_calibration)
 
     def load_kinect_calibration(self):
         calibration_path = self.kinect_calibration_filename_formatter(self.dataset_name)
@@ -503,9 +524,6 @@ class CMUPanopticDataset:
             camera_calibration = json.load(f)
 
         return KinectCalibration(camera_calibration)
-
-    def get_camera_calibration(self, kinect_node: int) -> dict:
-        return self.camera_calibration[kinect_node]
 
     def get_image_path(self, kinect_node: int, index: int) -> str:
         """
@@ -606,17 +624,10 @@ class CMUPanopticDataset:
         :return: A homogeneous 4x4 transformation matrix.
         """
         image_node_name = self.image_node_formatter(kinect_node)
-
-        for camera_calibration in self.camera_calibration['cameras']:
-            if camera_calibration['name'] == image_node_name:
-                panoptic_calibration = camera_calibration
-                break
-        else:
-            raise ValueError(f"Could not find calibration for camera node {image_node_name}.")
-
+        panoptic_calibration = self.camera_calibration[image_node_name]
         kinect_calibration = self.kinect_calibration[kinect_node]
 
-        M = np.hstack((panoptic_calibration['R'], panoptic_calibration['t']))
+        M = np.hstack((panoptic_calibration.R, panoptic_calibration.t))
         T_world_to_kinect = np.eye(4, dtype=np.float32)
         T_world_to_kinect[:3, :] = M
         T_kinect_color_to_panoptic_world = np.linalg.inv(T_world_to_kinect)
