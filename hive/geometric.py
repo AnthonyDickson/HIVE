@@ -138,7 +138,7 @@ def point_cloud_from_rgbd(rgb, depth, mask, K, R=np.eye(3), t=np.zeros((3, 1))):
     :param R: The (3, 3) rotation matrix.
     :param t: The (3, 1) translation vector.
 
-    :return: the (N, 3) point cloud.
+    :return: the (N, 3) point cloud and the (N, 4) RGBA for each vertex.
     """
     valid_pixels = mask & (depth > 0.0)
     V, U = valid_pixels.nonzero()
