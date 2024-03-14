@@ -231,6 +231,9 @@ class CMUPanopticDataset:
         flat_depth_map = np.frombuffer(byte_data, dtype=self.depth_data_type)
         depth_map = flat_depth_map.reshape((self.depth_frame_height, self.depth_frame_width))
 
+        # Depth maps are horizontally flipped when loaded, need to flip to match RGB frame.
+        depth_map = cv2.flip(depth_map, flipCode=1)
+
         return depth_map * self.depth_to_meters
 
     def get_synced_frame_data(self, frame_index: int, kinect_node: int) -> Tuple[np.ndarray, np.ndarray]:
