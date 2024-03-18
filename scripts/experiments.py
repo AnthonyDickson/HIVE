@@ -374,11 +374,35 @@ class PanopticDatasetExperiment:
     def create_ply(cls, dataset: CMUPanopticDataset, kinect_node: int, frame_index: int = 0):
         calibration = dataset.kinect_calibration[kinect_node]
         rgb, depth = dataset.get_synced_frame_data(frame_index=frame_index, kinect_node=kinect_node)
+
+        scale_y = rgb.shape[0] / depth.shape[0]
+        scale_x = rgb.shape[1] / depth.shape[1]
+        K_depth = calibration.K_depth.copy()
+        K_depth[0, 0] *= scale_x
+        K_depth[1, 1] *= scale_y
+        K_depth[0, 2] *= scale_x
+        K_depth[1, 2] *= scale_y
+
         depth = cv2.resize(depth, dsize=tuple(reversed(rgb.shape[:2])), interpolation=cv2.INTER_NEAREST)
 
-        vertices, colours = point_cloud_from_rgbd(rgb, depth, mask=np.ones(rgb.shape[:2], dtype=bool),
-                                                  K=calibration.K_color)
-        ply = trimesh.PointCloud(vertices=vertices, colors=colours)
+        vertices, colors = point_cloud_from_rgbd(rgb, depth, mask=np.ones(rgb.shape[:2], dtype=bool),
+                                                 K=K_depth)
+
+        R = calibration.M_color[:3, :3]
+        t = calibration.M_color[:3, 3:]
+        K = calibration.K_color
+        points_camera_space = (K @ (R @ vertices.T + t)).T
+        points_image_space = points_camera_space[:, :2] / points_camera_space[:, 2:]
+        points_image_coordinates = np.round(points_image_space).astype(np.uint32)
+        valid_pixels = ((points_image_coordinates >= 0) & (points_image_coordinates[:, :1] < calibration.color_width)
+                        & (points_image_coordinates[:, 1:] < calibration.color_height))
+
+        valid_points = np.all(valid_pixels, axis=1)
+        vertices_final = vertices[valid_points]
+        points_image_coordinates_final = points_image_coordinates[valid_points]
+        colors_final = rgb[::-1, ::-1, :][points_image_coordinates_final[:, 1], points_image_coordinates_final[:, 0], :]
+
+        ply = trimesh.PointCloud(vertices=vertices_final, colors=colors_final)
 
         return ply
 
@@ -1546,6 +1570,6 @@ if __name__ == '__main__':
     experiments.export_inpainting_results()
 
     dataset = CMUPanopticDataset(base_path=os.path.join(args.data_path, '170221_haggling_m3'))
-    ply = PanopticDatasetExperiment.create_ply(dataset, kinect_node=1, frame_index=105)
+    ply = PanopticDatasetExperiment.create_ply(dataset, kinect_node=1, frame_index=347)
     ply_path = os.path.join(args.output_path, 'haggling.ply')
     ply.export(ply_path)
