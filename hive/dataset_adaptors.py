@@ -1422,7 +1422,10 @@ class LLFFAdaptor(VideoAdaptorBase):
         return camera_matrices, pose_vectors
 
     def get_camera_matrix(self) -> np.ndarray:
-        return self.intrinsics_by_camera[self.camera_feed].matrix
+        camera_matrix = self.intrinsics_by_camera[self.camera_feed]
+        camera_matrix = camera_matrix.scale(target_size=(self.target_height, self.target_width))
+
+        return camera_matrix.matrix
 
     def get_pose(self, index: int) -> np.ndarray:
         return self.pose_data_by_camera[self.camera_feed]

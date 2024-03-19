@@ -39,6 +39,7 @@ from omegaconf import OmegaConf
 from torch.utils.data.dataloader import default_collate
 
 from hive.dataset import CMUPanopticDataset
+from hive.dataset_adaptors import LLFFAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
 from hive.geometric import Trajectory, point_cloud_from_rgbd
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata
@@ -405,6 +406,33 @@ class PanopticDatasetExperiment:
         ply = trimesh.PointCloud(vertices=vertices_final, colors=colors_final)
 
         return ply
+
+
+class LLFFExperiment:
+    @classmethod
+    def test(cls):
+        dataset_path = os.path.join('data', 'coffee_martini')
+        output_path = os.path.join('outputs', 'coffee_martini')
+        dataset_adaptor = LLFFAdaptor(base_path=dataset_path,
+                                      output_path=output_path,
+                                      num_frames=300,
+                                      frame_step=15,
+                                      colmap_options=COLMAPOptions(quality='medium'),
+                                      resize_to=(480, 640),
+                                      camera_feed=0)
+        dataset = dataset_adaptor.convert(estimate_pose=False,
+                                          estimate_depth=True,
+                                          inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
+                                          static_camera=False,
+                                          no_cache=False)
+        pipeline = Pipeline(options=PipelineOptions(num_frames=300, frame_step=15),
+                            storage_options=StorageOptions(dataset_path=dataset_path, output_path=output_path))
+
+        fg_mesh = pipeline.process_frame(dataset, index=0)
+        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+        fg_mesh.export(os.path.join(output_path, 'fg.ply'))
+        bg_mesh.export(os.path.join(output_path, 'bg.ply'))
+
 
 
 # TODO: Pull out each experiment type into own class.
@@ -1569,7 +1597,22 @@ if __name__ == '__main__':
     experiments.run_inpainting_experiments()
     experiments.export_inpainting_results()
 
-    dataset = CMUPanopticDataset(base_path=os.path.join(args.data_path, '170221_haggling_m3'))
-    ply = PanopticDatasetExperiment.create_ply(dataset, kinect_node=1, frame_index=347)
-    ply_path = os.path.join(args.output_path, 'haggling.ply')
-    ply.export(ply_path)
+    dataset_path = os.path.join('data', 'coffee_martini')
+    output_path = os.path.join('outputs', 'coffee_martini')
+    dataset_adaptor = LLFFAdaptor(base_path=dataset_path,
+                                  output_path=output_path,
+                                  num_frames=300,
+                                  frame_step=15,
+                                  colmap_options=COLMAPOptions(quality='medium'),
+                                  resize_to=(480, 640),
+                                  camera_feed=0)
+    dataset = dataset_adaptor.convert(estimate_pose=False,
+                                      estimate_depth=True,
+                                      inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
+                                      static_camera=False,
+                                      no_cache=False)
+    pipeline = Pipeline(options=PipelineOptions(num_frames=300, frame_step=15),
+                        storage_options=StorageOptions(dataset_path=dataset_path, output_path=output_path))
+
+    LLFFExperiment.test()
+
