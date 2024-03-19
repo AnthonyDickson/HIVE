@@ -25,6 +25,7 @@ import statistics
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
+from io import BytesIO
 from os.path import join as pjoin
 from typing import Tuple, Dict, Optional, List, Union, Callable
 
@@ -41,7 +42,7 @@ from torch.utils.data.dataloader import default_collate
 from hive.dataset import CMUPanopticDataset
 from hive.dataset_adaptors import LLFFAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
-from hive.geometric import Trajectory, point_cloud_from_rgbd
+from hive.geometric import Trajectory, point_cloud_from_rgbd, pose_vec2mat
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata
 from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
     WebXROptions
@@ -409,6 +410,7 @@ class PanopticDatasetExperiment:
 
 
 class LLFFExperiment:
+
     @classmethod
     def test(cls):
         dataset_path = os.path.join('data', 'coffee_martini')
@@ -433,6 +435,99 @@ class LLFFExperiment:
         fg_mesh.export(os.path.join(output_path, 'fg.ply'))
         bg_mesh.export(os.path.join(output_path, 'bg.ply'))
 
+    @classmethod
+    def compare_renders(cls, dataset_path: str, converted_dataset_path: str, results_path: str, frame_index: int = 0,
+                        camera_a: Optional[int] = None, camera_b: Optional[int] = None):
+        logging.info(f"Running experiment for {dataset_path}...")
+
+        logging.debug(f"Creating mesh data...")
+        # TODO: Get config from `Experiments` object.
+        frame_width = 640
+        frame_height = 480
+        num_frames = 300
+        frame_step = 15
+
+        dataset_adaptor = LLFFAdaptor(base_path=dataset_path,
+                                      output_path=converted_dataset_path,
+                                      num_frames=num_frames,
+                                      frame_step=frame_step,
+                                      colmap_options=COLMAPOptions(quality='medium'),
+                                      resize_to=(frame_height, frame_width),
+                                      camera_feed=0)
+        dataset = dataset_adaptor.convert(estimate_pose=False,
+                                          estimate_depth=True,
+                                          inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
+                                          static_camera=False,
+                                          no_cache=False)
+        pipeline = Pipeline(options=PipelineOptions(num_frames=num_frames, frame_step=frame_step),
+                            storage_options=StorageOptions(dataset_path=dataset_path,
+                                                           output_path=converted_dataset_path))
+
+        fg_mesh = pipeline.process_frame(dataset, index=frame_index)
+        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        logging.debug(f"Gathering frame data and camera parameters...")
+        camera_a = camera_a or dataset_adaptor.video_indices[0]
+        camera_b = camera_b or dataset_adaptor.video_indices[1]
+
+        ref_frame = dataset_adaptor.get_frame(index=frame_index, camera_feed=camera_a)
+        alt_frame = dataset_adaptor.get_frame(index=frame_index, camera_feed=camera_b)
+
+        ref_camera_matrix = dataset_adaptor.get_camera_matrix(camera_feed=camera_a)
+        alt_camera_matrix = dataset_adaptor.get_camera_matrix(camera_feed=camera_b)
+
+        # TODO: Fix mesh for alt_pose is not visible.
+        ref_pose = dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_a)
+        alt_pose = dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_b)
+        ref_pose = pose_vec2mat(ref_pose)
+        alt_pose = pose_vec2mat(alt_pose)
+
+        data = (
+            (f"cam{camera_a:02d}_ref", ref_frame, ref_camera_matrix, ref_pose),
+            (f"cam{camera_b:02d}_alt", alt_frame, alt_camera_matrix, alt_pose),
+        )
+
+        lpips_fn = LPIPS(net='alex')
+
+        with virtual_display():
+            # Have to import here AFTER the virtual display been created, otherwise the import throws an error.
+            from pyglet.gl import gl
+
+            for label, frame, camera_matrix, pose in data:
+                logging.info(f"Running comparison for {label}...")
+
+                # This rotation corrects for the rotation applied for viewing in the web-based renderer.
+                rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+
+                scene_camera = trimesh.scene.Camera(name=label, resolution=(frame_width, frame_height),
+                                                    focal=(camera_matrix[0, 0], camera_matrix[1, 1]))
+                scene = trimesh.Scene(camera=scene_camera, camera_transform=rotation @ pose)
+                # scene = trimesh.Scene()
+                scene.add_geometry(fg_mesh)
+                scene.add_geometry(bg_mesh)
+
+                # TODO: Disable lighting, the below seems to have no effect? Maybe it is rendering the vertices weird? Try convert vertex colors to face colors?
+                gl.glDisable(gl.GL_LIGHTING)
+
+                screen_capture_bytes = scene.save_image(resolution=(frame_width, frame_height))
+                screen_capture = Image.open(BytesIO(screen_capture_bytes)).convert(mode='RGB')
+
+                ssim, psnr, lpips = compare_images(frame, np.asarray(screen_capture), lpips_fn=lpips_fn)
+                metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
+
+                frame_path = os.path.join(results_path, f"{label}.png")
+                screen_capture_path = os.path.join(results_path, f"{label}_render.png")
+                metrics_path = os.path.join(results_path, f"{label}_comparison.json")
+
+                Image.fromarray(frame).save(frame_path)
+                logging.debug(f"Wrote frame data to {frame_path}.")
+
+                screen_capture.save(screen_capture_path)
+                logging.debug(f"Wrote screen capture to {screen_capture_path}.")
+
+                with open(metrics_path, 'w') as f:
+                    json.dump(metrics, f)
+                    logging.debug(f"Wrote metrics to {metrics_path}.")
 
 
 # TODO: Pull out each experiment type into own class.
@@ -441,8 +536,8 @@ class LLFFExperiment:
 class Experiments:
     def __init__(self, data_path: str, output_path: str, overwrite_ok: bool, dataset_names: List[str],
                  num_frames: int, frame_step: int, log_file: str):
-        self.data_path = data_path
-        self.output_path = output_path
+        self.data_path = data_path  # Where the datasets are stored.
+        self.output_path = output_path  # Where to write all the results.
         self.overwrite_ok = overwrite_ok
 
         self.dataset_names = dataset_names
@@ -1552,6 +1647,27 @@ class Experiments:
 
         logging.info(f"Exported inpainting latex table to {latex_path}.")
 
+    def run_llff_experiments(self, dataset_name: str = 'coffee_martini'):
+        dataset_path = os.path.join(self.data_path, dataset_name)
+        converted_dataset_path = os.path.join(self.output_path, dataset_name)
+        results_path = os.path.join(self.output_path, 'llff', dataset_name)
+
+        if not os.path.isdir(dataset_path):
+            raise FileNotFoundError(f"Could not find dataset at {dataset_path}.")
+
+        os.makedirs(results_path, exist_ok=True)
+
+        # TODO: If overwrite_ok, set no_cache to True in call to `.compare_renders(...)`.
+        # TODO: If overwrite_ok is False, do not allow the results to be overwritten (just skip call?).
+        LLFFExperiment.compare_renders(dataset_path=dataset_path,
+                                       converted_dataset_path=converted_dataset_path,
+                                       results_path=results_path,
+                                       frame_index=0)
+
+    def export_llff_results(self):
+        # TODO: Summarise results and save as JSON in summaries
+        # TODO: Export summary as latex table
+        raise NotImplementedError
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1614,5 +1730,5 @@ if __name__ == '__main__':
     pipeline = Pipeline(options=PipelineOptions(num_frames=300, frame_step=15),
                         storage_options=StorageOptions(dataset_path=dataset_path, output_path=output_path))
 
-    LLFFExperiment.test()
+    experiments.run_llff_experiments()
 
