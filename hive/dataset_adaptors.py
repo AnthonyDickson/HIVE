@@ -890,7 +890,7 @@ class VideoAdaptorBase(DatasetAdaptor, ABC):
             self.source_height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         if isinstance(resize_to, tuple):
-            resize_width, resize_height = resize_to
+            resize_height, resize_width = resize_to
             self.target_height, self.target_width = \
                 calculate_target_resolution((self.source_height, self.source_width),
                                             (resize_height, resize_width))
