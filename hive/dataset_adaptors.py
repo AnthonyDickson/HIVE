@@ -1365,6 +1365,7 @@ class LLFFAdaptor(VideoAdaptorBase):
             raise FileNotFoundError(f"Dataset should have at least one video file, but found zero videos.")
 
         self.video_indices = [int(filename[3:5]) for filename in self.video_filenames]
+
         if camera_feed not in self.video_indices:
             raise ValueError(f"Cannot use camera feed #{camera_feed}, valid camera feeds: {self.video_indices}.")
 
@@ -1399,10 +1400,6 @@ class LLFFAdaptor(VideoAdaptorBase):
         poses_w2c = np.linalg.inv(poses_homogenous)
         poses_centered = poses_homogenous[0] @ poses_w2c
         pose_vectors = {video_indices[i]: pose_mat2vec(pose) for i, pose in enumerate(poses_centered)}
-        # TODO: The pose data/intrinsics above does not seem to be correct, the scene is rotated about 45 on all axes
-        #  and is stretched out. Check issues in https://github.com/Fyusion/LLFF and https://github.com/bmild/nerf for
-        #  possible solutions.
-        #  Note that this dataset produces the expected results when using the `--static_camera` flag.
 
         def convert_to_camera_matrix(intrinsic):
             height, width, focal_length = intrinsic
@@ -1421,21 +1418,46 @@ class LLFFAdaptor(VideoAdaptorBase):
 
         return camera_matrices, pose_vectors
 
-    def get_camera_matrix(self) -> np.ndarray:
-        camera_matrix = self.intrinsics_by_camera[self.camera_feed]
+    def get_camera_matrix(self, camera_feed: Optional[int] = None) -> np.ndarray:
+        if camera_feed is None:
+            camera_feed = self.camera_feed
+
+        camera_matrix = self.intrinsics_by_camera[camera_feed]
         camera_matrix = camera_matrix.scale(target_size=(self.target_height, self.target_width))
 
         return camera_matrix.matrix
 
-    def get_pose(self, index: int) -> np.ndarray:
-        return self.pose_data_by_camera[self.camera_feed]
+    def get_pose(self, index: int, camera_feed: Optional[int] = None) -> np.ndarray:
+        if camera_feed is None:
+            camera_feed = self.camera_feed
 
-    def get_camera_trajectory(self) -> Trajectory:
-        pose = self.get_pose(0)
+        return self.pose_data_by_camera[camera_feed]
+
+    def get_camera_trajectory(self, camera_feed: Optional[int] = None) -> Trajectory:
+        if camera_feed is None:
+            camera_feed = self.camera_feed
+
+        pose = self.get_pose(0, camera_feed=camera_feed)
         num_frames = self.num_frames
         pose_data = np.repeat(pose.reshape((1, -1)), num_frames, axis=0)
 
         return Trajectory(pose_data)
+
+    def get_frame(self, index: int, camera_feed: Optional[int] = None) -> np.ndarray:
+        if camera_feed is None:
+            camera_feed = self.camera_feed
+
+        with self.open_video(os.path.join(self.base_path, self.video_filenames[camera_feed])) as video:
+            video.set(cv2.CAP_PROP_POS_FRAMES, index)
+            has_frame, frame = video.read()
+
+            if not has_frame:
+                raise IndexError(f"No frame data available for index {index:d}.")
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, dsize=(self.target_width, self.target_height), interpolation=cv2.INTER_CUBIC)
+
+        return frame
 
 
 def create_folder(*args, exist_ok=False):
