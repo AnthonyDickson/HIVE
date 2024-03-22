@@ -262,8 +262,8 @@ class Pipeline:
 
             frame_set = dataset.select_key_frames(threshold=self.background_mesh_options.key_frame_threshold)
 
-            static_mesh = self._create_static_mesh(dataset, num_frames=self.num_frames,
-                                                   options=self.background_mesh_options, frame_set=frame_set)
+            static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
+                                                  options=self.background_mesh_options, frame_set=frame_set)
 
             # Convert colour to sRGB since that is what the renderer expects.
             # This is only needed for the TSDF Fusion meshes since they use vertex colours, for which THREE does not
