@@ -1337,8 +1337,11 @@ class StrayScannerAdaptor(VideoAdaptorBase):
 
 
 class LLFFAdaptor(VideoAdaptorBase):
-    """Datasets in the multi-camera video formats of github.com/Fyusion/LLFF."""
-    # TODO: Allow access to other camera feeds
+    """
+    Datasets in the multi-camera video formats of Neural 3D Video Synthesis from Multi-View Video
+    (https://github.com/facebookresearch/Neural_3D_Video), and in particular the pose format of
+    github.com/Fyusion/LLFF.
+    """
 
     pose_filename = "poses_bounds.npy"
     required_files = [pose_filename]

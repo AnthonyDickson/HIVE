@@ -45,6 +45,7 @@ packaging==23.1
 scikit-learn==0.24.2
 # For headless rendering with trimesh
 pyglet==1.5.27
+pyrender==0.1.45
 # Needs to be this version in order to run the FlowNet2 install.sh script.
 # Later versions will error on CUDA version mismatch instead of warn.
 setuptools==59.5.0

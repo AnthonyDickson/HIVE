@@ -279,6 +279,15 @@ Within each dataset folder, there should be the following 5 items:
    where: `qx`, `qy`, `qz` and `qw` form a quaternion; and `tx`, `ty` and `tz` form a translation vector.
    There must be one line per frame in the input video sequence.
    Absolute pose values are expected (i.e. all relative to world origin) that transform points in world coordinates to camera space.
+   
+   Pose data is stored in the same coordinate frame as COLMAP: x (right), -y (down), -z (forwards, camera looking down +z). 
+   To convert to a right-handed coordinate system, you will need to multiply by following homogeneous transform:
+    ```
+    1  0  0  0
+    0 -1  0  0
+    0  0 -1  0
+    0  0  0  1
+    ```
 4. The colour (RGB) frames are PNG files in a folder with names that preserve the frames' natural ordering, e.g.:
    ```text
    rgb

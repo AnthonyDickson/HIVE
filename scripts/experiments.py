@@ -31,6 +31,7 @@ from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import cv2
 import numpy as np
+import pyrender
 import torch
 import trimesh
 import yaml
@@ -483,47 +484,50 @@ class LLFFExperiment:
         alt_pose = pose_vec2mat(alt_pose)
 
         data = (
-            (f"cam{camera_a:02d}_ref", ref_frame, ref_camera_matrix, ref_pose),
-            (f"cam{camera_b:02d}_alt", alt_frame, alt_camera_matrix, alt_pose),
+            (f"cam{camera_a:02d}", ref_frame, ref_camera_matrix, ref_pose),
+            (f"cam{camera_b:02d}", alt_frame, alt_camera_matrix, alt_pose),
         )
 
+        # TODO: Try various transformations to get pose data loaded correctly.
         lpips_fn = LPIPS(net='alex')
 
         with virtual_display():
-            # Have to import here AFTER the virtual display been created, otherwise the import throws an error.
-            from pyglet.gl import gl
-
             for label, frame, camera_matrix, pose in data:
-                logging.info(f"Running comparison for {label}...")
+                logging.info(f"Running comparison for {label} in {results_path}...")
 
                 # This rotation corrects for the rotation applied for viewing in the web-based renderer.
-                rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+                # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+                rotation = np.eye(4)
+                rotation[:3, :3] = np.diag([1, -1, -1])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
+                pose_norm = rotation @ pose
 
-                scene_camera = trimesh.scene.Camera(name=label, resolution=(frame_width, frame_height),
-                                                    focal=(camera_matrix[0, 0], camera_matrix[1, 1]))
-                scene = trimesh.Scene(camera=scene_camera, camera_transform=rotation @ pose)
-                # scene = trimesh.Scene()
-                scene.add_geometry(fg_mesh)
-                scene.add_geometry(bg_mesh)
-
-                # TODO: Disable lighting, the below seems to have no effect? Maybe it is rendering the vertices weird? Try convert vertex colors to face colors?
-                gl.glDisable(gl.GL_LIGHTING)
-
-                screen_capture_bytes = scene.save_image(resolution=(frame_width, frame_height))
-                screen_capture = Image.open(BytesIO(screen_capture_bytes)).convert(mode='RGB')
-
-                ssim, psnr, lpips = compare_images(frame, np.asarray(screen_capture), lpips_fn=lpips_fn)
-                metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
+                camera = pyrender.PerspectiveCamera(yfov=2.0 * np.arctan(frame_height / (2.0 * camera_matrix[1, 1])),
+                                                    aspectRatio=frame_width / frame_height)
+                scene = pyrender.Scene()
+                scene.add(pyrender.Mesh.from_trimesh(fg_mesh))
+                scene.add(pyrender.Mesh.from_trimesh(bg_mesh))
+                scene.add(camera, pose=pose_norm)
+                renderer = pyrender.OffscreenRenderer(frame_width, frame_height)
+                color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
+                color = Image.fromarray(color)
+                depth = Image.fromarray((depth / depth.max() * 255).astype(np.uint8))
 
                 frame_path = os.path.join(results_path, f"{label}.png")
-                screen_capture_path = os.path.join(results_path, f"{label}_render.png")
-                metrics_path = os.path.join(results_path, f"{label}_comparison.json")
-
                 Image.fromarray(frame).save(frame_path)
                 logging.debug(f"Wrote frame data to {frame_path}.")
 
-                screen_capture.save(screen_capture_path)
-                logging.debug(f"Wrote screen capture to {screen_capture_path}.")
+                screen_capture_path = os.path.join(results_path, f"{label}_render.jpg")
+                color.save(screen_capture_path)
+                logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
+
+                screen_capture_path = os.path.join(results_path, f"{label}_render.png")
+                depth.save(screen_capture_path)
+                logging.debug(f"Wrote screen capture (depth) to {screen_capture_path}.")
+
+                ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
+                metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
+
+                metrics_path = os.path.join(results_path, f"{label}_comparison.json")
 
                 with open(metrics_path, 'w') as f:
                     json.dump(metrics, f)
@@ -1690,8 +1694,7 @@ if __name__ == '__main__':
     dataset_names = ['rgbd_dataset_freiburg3_walking_xyz',
                      'rgbd_dataset_freiburg3_sitting_xyz',
                      'garden',
-                     'small_tree',
-                     'edwardsBay']
+                     'small_tree']
 
     experiments = Experiments(output_path=args.output_path, data_path=args.data_path,
                               overwrite_ok=args.overwrite_ok,
@@ -1712,23 +1715,6 @@ if __name__ == '__main__':
     experiments.export_compression_results()
     experiments.run_inpainting_experiments()
     experiments.export_inpainting_results()
-
-    dataset_path = os.path.join('data', 'coffee_martini')
-    output_path = os.path.join('outputs', 'coffee_martini')
-    dataset_adaptor = LLFFAdaptor(base_path=dataset_path,
-                                  output_path=output_path,
-                                  num_frames=300,
-                                  frame_step=15,
-                                  colmap_options=COLMAPOptions(quality='medium'),
-                                  resize_to=(480, 640),
-                                  camera_feed=0)
-    dataset = dataset_adaptor.convert(estimate_pose=False,
-                                      estimate_depth=True,
-                                      inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
-                                      static_camera=False,
-                                      no_cache=False)
-    pipeline = Pipeline(options=PipelineOptions(num_frames=300, frame_step=15),
-                        storage_options=StorageOptions(dataset_path=dataset_path, output_path=output_path))
 
     experiments.run_llff_experiments()
 
