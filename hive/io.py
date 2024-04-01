@@ -318,7 +318,8 @@ class COLMAPProcessor:
         return ' '.join(command) if return_as_string else command
 
     def _load_model(self):
-        models = sorted(os.listdir(self.sparse_path))
+        models = filter(lambda item: os.path.isdir(os.path.join(self.sparse_path, item)), os.listdir(self.sparse_path))
+        models = sorted(list(models))
         num_models = len(models)
 
         if num_models == 1:
