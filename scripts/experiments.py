@@ -23,6 +23,8 @@ import shlex
 import shutil
 import statistics
 import subprocess
+import urllib.request
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from os.path import join as pjoin
@@ -436,9 +438,64 @@ class LLFFExperiment:
         bg_mesh.export(os.path.join(output_path, 'bg.ply'))
 
     @classmethod
-    def compare_renders(cls, dataset_path: str, converted_dataset_path: str, results_path: str, frame_index: int = 0,
-                        camera_a: Optional[int] = None, camera_b: Optional[int] = None):
-        logging.info(f"Running experiment for {dataset_path}...")
+    def fetch_dataset(cls, data_folder: str, dataset_name: str):
+        dataset_path = os.path.join(data_folder, dataset_name)
+
+        if not os.path.isdir(dataset_path):
+            try:
+                logging.info(f"Downloading {dataset_name}...")
+                zip_filename = f"{dataset_name}.zip"
+                zip_path = os.path.join(data_folder, zip_filename)
+
+                if dataset_name == "flame_salmon_1":
+                    zip_part_filenames = [
+                        "flame_salmon_1_split.z01",
+                        "flame_salmon_1_split.z02",
+                        "flame_salmon_1_split.z03",
+                        "flame_salmon_1_split.zip",
+                    ]
+                    logging.debug(f"Downloading zip parts {zip_part_filenames}...")
+
+                    for zip_part_filename in zip_part_filenames:
+                        zip_part_path = os.path.join(data_folder, zip_part_filename)
+
+                        if os.path.isfile(zip_part_path):
+                            continue
+
+                        url = f"https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{zip_part_filename}"
+                        logging.debug(f"Downloading zip part from {url}...")
+                        urllib.request.urlretrieve(url, zip_part_path)
+
+                    logging.debug(f"Joining zip parts...")
+                    command = f"zip -F {os.path.join(data_folder, 'flame_salmon_1_split.zip')} --out {zip_path}"
+                    subprocess.run(shlex.split(command))
+
+                    logging.debug(f"Deleting zip parts...")
+                    for zip_part_filename in zip_part_filenames:
+                        os.remove(os.path.join(data_folder, zip_part_filename))
+                else:
+                    url = f"https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{zip_filename}"
+                    urllib.request.urlretrieve(url, zip_path)
+
+                logging.debug(f"Extracting zip file...")
+
+                with zipfile.ZipFile(zip_path, 'r') as file:
+                    file.extractall(data_folder)
+
+                logging.info(f"Downloaded dataset {dataset_name} and extracted to {dataset_path}.")
+            except Exception:
+                raise FileNotFoundError(f"Could not find dataset at {dataset_path} or automatically download it.")
+
+    @classmethod
+    def compare_renders(cls, data_folder: str, dataset_name: str, output_folder: str, results_folder: str,
+                        frame_index: int = 0,
+                        no_cache: bool = False):
+        logging.info(f"Running experiment for {dataset_name}...")
+
+        dataset_path = os.path.join(data_folder, dataset_name)
+        converted_dataset_path = os.path.join(output_folder, dataset_name)
+
+        cls.fetch_dataset(data_folder=data_folder, dataset_name=dataset_name)
 
         logging.debug(f"Creating mesh data...")
         # TODO: Get config from `Experiments` object.
@@ -458,7 +515,7 @@ class LLFFExperiment:
                                           estimate_depth=True,
                                           inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
                                           static_camera=False,
-                                          no_cache=False)
+                                          no_cache=no_cache)
         pipeline = Pipeline(options=PipelineOptions(num_frames=num_frames, frame_step=frame_step),
                             storage_options=StorageOptions(dataset_path=dataset_path,
                                                            output_path=converted_dataset_path))
@@ -467,61 +524,61 @@ class LLFFExperiment:
         bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
         logging.debug(f"Gathering frame data and camera parameters...")
-        camera_matrix, poses = dataset_adaptor.get_scaled_colmap_pose_data(dataset.depth_dataset.transform)
+        camera_matrix, poses = dataset_adaptor.get_scaled_colmap_pose_data(dataset.depth_dataset.transform,
+                                                                           no_cache=no_cache)
 
-        # TODO: Try various transformations to get pose data loaded correctly.
         lpips_fn = LPIPS(net='alex')
 
-        with virtual_display():
-            first_pose = pose_vec2mat(poses[0])
-            first_pose_inv = np.linalg.inv(first_pose)
+        first_pose = pose_vec2mat(poses[0])
+        first_pose_inv = np.linalg.inv(first_pose)
 
-            for camera_feed in dataset_adaptor.video_indices:
-                label = f"cam{camera_feed:02d}"
-                logging.info(f"Running comparison for {label} in {results_path}...")
+        for camera_feed in dataset_adaptor.video_indices:
+            label = f"cam{camera_feed:02d}"
+            logging.info(f"Running comparison for {label} in {results_folder}...")
 
-                cm_pose = poses[camera_feed]
-                pose = first_pose_inv @ pose_vec2mat(cm_pose)
-                # This rotation corrects for the rotation applied for viewing in the web-based renderer.
-                # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
-                rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
-                pose_norm = rotation @ pose
+            cm_pose = poses[camera_feed]
+            pose = first_pose_inv @ pose_vec2mat(cm_pose)
+            # This rotation corrects for the rotation applied for viewing in the web-based renderer.
+            # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+            rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
+            pose_norm = rotation @ pose
 
-                camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
-                scene = pyrender.Scene()
-                scene.add(pyrender.Mesh.from_trimesh(fg_mesh))
-                scene.add(pyrender.Mesh.from_trimesh(bg_mesh))
-                scene.add(camera, pose=np.linalg.inv(pose_norm))
-                renderer = pyrender.OffscreenRenderer(camera_matrix.width, camera_matrix.height)
+            camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
+            scene = pyrender.Scene()
+            scene.add(pyrender.Mesh.from_trimesh(fg_mesh))
+            scene.add(pyrender.Mesh.from_trimesh(bg_mesh))
+            scene.add(camera, pose=np.linalg.inv(pose_norm))
+            renderer = pyrender.OffscreenRenderer(camera_matrix.width, camera_matrix.height)
 
-                color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
-                color = Image.fromarray(color)
-                depth_max = depth.max()
-                normalised_depth = (depth / depth_max) if depth_max > 0. else depth
-                depth = Image.fromarray((normalised_depth * 255).astype(np.uint8))
+            color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
+            renderer.delete()
+            color = Image.fromarray(color)
+            depth_max = depth.max()
+            normalised_depth = (depth / depth_max) if depth_max > 0. else depth
+            depth = Image.fromarray((normalised_depth * 255).astype(np.uint8))
 
-                screen_capture_path = os.path.join(results_path, f"{label}_render.jpg")
-                color.save(screen_capture_path)
-                logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
+            screen_capture_path = os.path.join(results_folder, f"{label}_render.jpg")
+            color.save(screen_capture_path)
+            logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
 
-                screen_capture_path = os.path.join(results_path, f"{label}_render.png")
-                depth.save(screen_capture_path)
-                logging.debug(f"Wrote screen capture (depth) to {screen_capture_path}.")
+            screen_capture_path = os.path.join(results_folder, f"{label}_render.png")
+            depth.save(screen_capture_path)
+            logging.debug(f"Wrote screen capture (depth) to {screen_capture_path}.")
 
-                frame = dataset_adaptor.get_frame(index=0, camera_feed=camera_feed)
+            frame = dataset_adaptor.get_frame(index=0, camera_feed=camera_feed)
 
-                frame_path = os.path.join(results_path, f"{label}.png")
-                Image.fromarray(frame).save(frame_path)
-                logging.debug(f"Wrote frame data to {frame_path}.")
+            frame_path = os.path.join(results_folder, f"{label}.png")
+            Image.fromarray(frame).save(frame_path)
+            logging.debug(f"Wrote frame data to {frame_path}.")
 
-                ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
-                metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
+            ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
+            metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
 
-                metrics_path = os.path.join(results_path, f"{label}.json")
+            metrics_path = os.path.join(results_folder, f"{label}.json")
 
-                with open(metrics_path, 'w') as f:
-                    json.dump(metrics, f)
-                    logging.debug(f"Wrote metrics to {metrics_path}.")
+            with open(metrics_path, 'w') as f:
+                json.dump(metrics, f)
+                logging.debug(f"Wrote metrics to {metrics_path}.")
 
 
 # TODO: Pull out each experiment type into own class.
@@ -1331,59 +1388,58 @@ class Experiments:
         compression_configs = ((config.uncompressed_mesh_folder, config.uncompressed_mesh_extension, trimesh.load),
                                (config.compressed_mesh_folder, config.compressed_mesh_extension, load_draco))
 
-        with virtual_display():
-            for dataset_name in self.dataset_names:
-                results[dataset_name] = {}
+        for dataset_name in self.dataset_names:
+            results[dataset_name] = {}
 
-                for label in self.labels:
-                    dataset_name_and_label = f"{dataset_name}_{label}"
-                    logging.info(f"Running Compression Comparison for {dataset_name_and_label}...")
+            for label in self.labels:
+                dataset_name_and_label = f"{dataset_name}_{label}"
+                logging.info(f"Running Compression Comparison for {dataset_name_and_label}...")
 
-                    image_pair = []
+                image_pair = []
 
-                    for folder, ext, load_fn in compression_configs:
-                        screen_capture_path = os.path.join(self.compression_outputs_path, dataset_name_and_label,
-                                                           f"{folder}.png")
+                for folder, ext, load_fn in compression_configs:
+                    screen_capture_path = os.path.join(self.compression_outputs_path, dataset_name_and_label,
+                                                       f"{folder}.png")
 
-                        # if os.path.isfile(screen_capture_path) and not self.overwrite_ok:
-                        #     logging.info(f"Found cached result at {screen_capture_path}, skipping {folder}...")
-                        #     image_pair.append(cv2.imread(screen_capture_path))
-                        #     continue
-
-                        mesh_folder = os.path.join(self.compression_outputs_path, dataset_name_and_label, folder)
-                        fg_mesh_path = os.path.join(mesh_folder, f"{config.fg_mesh_name}{ext}")
-                        bg_mesh_path = os.path.join(mesh_folder, f"{config.bg_mesh_name}{ext}")
-
-                        if os.path.isfile(fg_mesh_path):
-                            fg_mesh = load_fn(fg_mesh_path)
-                        else:
-                            fg_mesh = trimesh.Trimesh()
-
-                        bg_mesh = load_fn(bg_mesh_path)
-
-                        scene = trimesh.Scene()
-                        scene.add_geometry(fg_mesh)
-                        scene.add_geometry(bg_mesh)
-                        # This rotation corrects for the rotation applied for viewing in the web-based renderer.
-                        rotation_matrix = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
-                        scene.apply_transform(rotation_matrix)
-                        scene.camera_transform = scene.camera.look_at(bg_mesh.vertices)
-
-                        screen_capture = scene.save_image(resolution=(640, 480))
-
-                        with open(screen_capture_path, 'wb') as f:
-                            f.write(screen_capture)
-
+                    if os.path.isfile(screen_capture_path) and not self.overwrite_ok:
+                        logging.info(f"Found cached result at {screen_capture_path}, skipping {folder}...")
                         image_pair.append(cv2.imread(screen_capture_path))
+                        continue
 
-                    logging.info(f"Calculating image similarity for {dataset_name_and_label}...")
-                    ssim, psnr, lpips = compare_images(image_pair[0], image_pair[1], lpips_fn=lpips_fn)
-                    results[dataset_name][label] = {
-                        'ssim': ssim,
-                        'psnr': psnr,
-                        'lpips': lpips
-                    }
-                    logging.info(results[dataset_name][label])
+                    mesh_folder = os.path.join(self.compression_outputs_path, dataset_name_and_label, folder)
+                    fg_mesh_path = os.path.join(mesh_folder, f"{config.fg_mesh_name}{ext}")
+                    bg_mesh_path = os.path.join(mesh_folder, f"{config.bg_mesh_name}{ext}")
+
+                    if os.path.isfile(fg_mesh_path):
+                        fg_mesh = load_fn(fg_mesh_path)
+                    else:
+                        fg_mesh = trimesh.Trimesh()
+
+                    bg_mesh = load_fn(bg_mesh_path)
+
+                    scene = trimesh.Scene()
+                    scene.add_geometry(fg_mesh)
+                    scene.add_geometry(bg_mesh)
+                    # This rotation corrects for the rotation applied for viewing in the web-based renderer.
+                    rotation_matrix = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+                    scene.apply_transform(rotation_matrix)
+                    scene.camera_transform = scene.camera.look_at(bg_mesh.vertices)
+
+                    screen_capture = scene.save_image(resolution=(640, 480))
+
+                    with open(screen_capture_path, 'wb') as f:
+                        f.write(screen_capture)
+
+                    image_pair.append(cv2.imread(screen_capture_path))
+
+                logging.info(f"Calculating image similarity for {dataset_name_and_label}...")
+                ssim, psnr, lpips = compare_images(image_pair[0], image_pair[1], lpips_fn=lpips_fn)
+                results[dataset_name][label] = {
+                    'ssim': ssim,
+                    'psnr': psnr,
+                    'lpips': lpips
+                }
+                logging.info(results[dataset_name][label])
 
         with open(self.compression_results_path, 'w') as f:
             json.dump(results, f)
@@ -1641,22 +1697,22 @@ class Experiments:
 
         logging.info(f"Exported inpainting latex table to {latex_path}.")
 
-    def run_llff_experiments(self, dataset_name: str = 'coffee_martini'):
-        dataset_path = os.path.join(self.data_path, dataset_name)
-        converted_dataset_path = os.path.join(self.output_path, dataset_name)
-        results_path = os.path.join(self.output_path, 'llff', dataset_name)
+    def run_llff_experiments(self, dataset_names: List[str]):
+        for dataset_name in dataset_names:
+            results_path = os.path.join(self.output_path, 'llff', dataset_name)
 
-        if not os.path.isdir(dataset_path):
-            raise FileNotFoundError(f"Could not find dataset at {dataset_path}.")
+            if not self.overwrite_ok and os.path.isdir(results_path) and len(os.listdir(results_path)) > 0:
+                logging.info(f"Cached results found for {dataset_name} in {results_path}, skipping...")
+                continue
 
-        os.makedirs(results_path, exist_ok=True)
+            os.makedirs(results_path, exist_ok=True)
 
-        # TODO: If overwrite_ok, set no_cache to True in call to `.compare_renders(...)`.
-        # TODO: If overwrite_ok is False, do not allow the results to be overwritten (just skip call?).
-        LLFFExperiment.compare_renders(dataset_path=dataset_path,
-                                       converted_dataset_path=converted_dataset_path,
-                                       results_path=results_path,
-                                       frame_index=0)
+            LLFFExperiment.compare_renders(data_folder=self.data_path,
+                                           dataset_name=dataset_name,
+                                           output_folder=self.output_path,
+                                           results_folder=results_path,
+                                           frame_index=0,
+                                           no_cache=self.overwrite_ok)
 
     def export_llff_results(self):
         # TODO: Summarise results and save as JSON in summaries
@@ -1686,6 +1742,14 @@ if __name__ == '__main__':
                      'rgbd_dataset_freiburg3_sitting_xyz',
                      'garden',
                      'small_tree']
+    llff_dataset_names = [
+        'coffee_martini',
+        'cook_spinach',
+        'cut_roasted_beef',
+        'flame_steak',
+        'sear_steak',
+        'flame_salmon_1'
+    ]
 
     experiments = Experiments(output_path=args.output_path, data_path=args.data_path,
                               overwrite_ok=args.overwrite_ok,
@@ -1694,17 +1758,18 @@ if __name__ == '__main__':
                               frame_step=15,
                               log_file=log_file)
 
-    experiments.run_kid_running_experiments(filename='kid_running.mp4')
-    experiments.run_pipeline_experiments()
-    experiments.export_pipeline_results()
-    experiments.run_trajectory_experiments()
-    experiments.export_trajectory_results()
-    experiments.run_bundlefusion_experiments()
-    experiments.export_bundle_fusion_results()
-    experiments.export_latex_preamble()
-    experiments.run_compression_experiments()
-    experiments.export_compression_results()
-    experiments.run_inpainting_experiments()
-    experiments.export_inpainting_results()
+    with virtual_display():
+        experiments.run_kid_running_experiments(filename='kid_running.mp4')
+        experiments.run_pipeline_experiments()
+        experiments.export_pipeline_results()
+        experiments.run_trajectory_experiments()
+        experiments.export_trajectory_results()
+        experiments.run_bundlefusion_experiments()
+        experiments.export_bundle_fusion_results()
+        experiments.export_latex_preamble()
+        experiments.run_compression_experiments()
+        experiments.export_compression_results()
+        experiments.run_inpainting_experiments()
+        experiments.export_inpainting_results()
 
-    experiments.run_llff_experiments()
+        experiments.run_llff_experiments(llff_dataset_names)

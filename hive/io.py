@@ -263,16 +263,16 @@ class COLMAPProcessor:
         return os.path.isdir(self.sparse_path) and len(os.listdir(self.sparse_path)) > 0 and \
             (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)
 
-    def run(self):
+    def run(self, use_masks=True):
         os.makedirs(self.workspace_path, exist_ok=True)
         os.makedirs(self.mask_path, exist_ok=True)
 
-        if len(os.listdir(self.mask_path)) == 0:
+        if len(os.listdir(self.mask_path)) == 0 and use_masks:
             logging.info(f"Could not find masks in folder: {self.mask_path}.")
             logging.info(f"Creating masks for COLMAP...")
             rgb_loader = TorchDataLoader(ImageFolderDataset(self.image_path), batch_size=8, shuffle=False)
             create_masks(rgb_loader, self.mask_path, for_colmap=True)
-        else:
+        elif use_masks:
             logging.info(f"Found {len(os.listdir(self.mask_path))} masks in {self.mask_path}.")
 
         logging.info("Running COLMAP for real this time, this may take a while...")
@@ -287,11 +287,12 @@ class COLMAPProcessor:
         if (return_code := p.wait()) != 0:
             raise RuntimeError(f"COLMAP exited with code {return_code}.")
 
-    def get_command(self, return_as_string=False):
+    def get_command(self, use_masks=True, return_as_string=False):
         """
         Build the command for running COLMAP .
         Also validates the paths in the options and raises an exception if any of the specified paths are invalid.
 
+        :param use_masks: Whether to mask out dynamic elements (e.g., people) in the video.
         :param return_as_string: Whether to return the command as a single string, or as an array.
         :return: The COLMAP command.
         """
@@ -309,7 +310,7 @@ class COLMAPProcessor:
                    '--dense', 1 if options.dense else 0,
                    '--quality', options.quality]
 
-        if self.mask_path is not None:
+        if use_masks and self.mask_path is not None:
             assert os.path.isdir(self.mask_path), f"Could not open mask folder: {self.mask_path}."
             command += ['--mask_path', self.mask_path]
 

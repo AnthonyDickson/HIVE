@@ -496,7 +496,7 @@ class Pipeline:
         This is similar to the `._create_scene(...)` method, but it does not include profiling code.
         It is mainly intended to be used outside the main pipeline in experiments.
 
-        :param dataset: A RGB-D dataset.
+        :param dataset: An RGB-D dataset.
         :param index: The index for the frame to use.
         :param background_only: Whether to include only the background (i.e., ignore foreground elements).
         :param include_background: Whether to include the background in the mesh. If `False`, only dynamic foreground
@@ -576,7 +576,6 @@ class Pipeline:
                 logging.debug(f"Skipping object #{object_id} in frame {index + 1} "
                               f"due to insufficient number of faces ({len(faces)}).")
                 continue
-
 
             vertices, faces = self._cleanup_with_connected_components(
                 vertices, faces, is_object,

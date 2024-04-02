@@ -35,6 +35,7 @@ import cv2
 import imageio
 import numpy as np
 import torch
+from PIL import Image
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -1476,7 +1477,7 @@ class LLFFAdaptor(VideoAdaptorBase):
 
         return frame
 
-    def get_scaled_colmap_pose_data(self, depth_transform: Callable[[np.ndarray], None]) \
+    def get_scaled_colmap_pose_data(self, depth_transform: Callable[[np.ndarray], None], no_cache=False) \
             -> Tuple[CameraMatrix, Trajectory]:
         """
         Run COLMAP and scale the pose data with estimated depth maps.
@@ -1487,28 +1488,40 @@ class LLFFAdaptor(VideoAdaptorBase):
         Therefore, we must run COLMAP ourselves.
 
         :param depth_transform: The transform function to converts raw estimated depth maps into the expected format.
+        :param no_cache: Whether to overwrite existing cached data (COLMAP, estimated depth maps).
         :return: The scaled camera parameters (intrinsic and extrinsic).
         """
+        # TODO: Use this function to get camera parameters for the data adaptor.
         per_camera_frames_path = os.path.join(self.base_path, 'frames')
         per_camera_estimated_depth_path = os.path.join(self.base_path, 'depth')
+        os.makedirs(per_camera_estimated_depth_path, exist_ok=True)
+        os.makedirs(per_camera_frames_path, exist_ok=True)
+        logging.debug(f"Extracting first frame from videos to {per_camera_frames_path}...")
+
+        if no_cache or len(os.listdir(per_camera_frames_path)) != len(self.video_filenames):
+            for camera_feed in self.video_indices:
+                frame = self.get_frame(index=0, camera_feed=camera_feed)
+                frame_filename = HiveDataset.index_to_filename(camera_feed, '.jpg')
+                Image.fromarray(frame).save(os.path.join(per_camera_frames_path, frame_filename))
 
         cm = COLMAPProcessor(per_camera_frames_path,
                              os.path.join(self.base_path, 'workspace'),
                              COLMAPOptions())
 
-        if not cm.probably_has_results:
-            cm.run()
+        if not cm.probably_has_results or no_cache:
+            cm.run(use_masks=False)
 
         cm_intrinsic, cm_extrinsic = cm.load_camera_params()
         camera_matrix = CameraMatrix.from_matrix(cm_intrinsic,
-                                                 size=(self.source_height, self.source_width))
-        camera_matrix = camera_matrix.scale((self.target_height, self.target_width))
+                                                 size=(self.target_height, self.target_width))
 
         cm_depth_maps = cm.get_sparse_depth_maps(cm_intrinsic, cm_extrinsic)
         cm_depth_maps = cm_depth_maps[np.any(cm_depth_maps > 0, axis=(1, 2))]
 
         if (not os.path.isdir(per_camera_estimated_depth_path) or
-                not len(os.listdir(per_camera_estimated_depth_path)) == len(cm_depth_maps)):
+            not len(os.listdir(per_camera_estimated_depth_path)) == len(cm_depth_maps)) \
+                or no_cache:
+            logging.debug(f"Estimating depth maps for initial camera frames...")
             shutil.rmtree(per_camera_estimated_depth_path)
             estimate_depth_dpt(ImageFolderDataset(per_camera_frames_path), output_path=per_camera_estimated_depth_path)
 
