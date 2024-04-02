@@ -508,9 +508,9 @@ class DatasetAdaptor(Dataset, ABC):
         def inpaint_with_cv2(input_path, output_path, image_filename):
             mask_filename = f"{Path(image_filename).stem}.png"
             mask = cv2.imread(pjoin(inpainted_mask_path, mask_filename), cv2.IMREAD_GRAYSCALE)
-            image = cv2.imread(pjoin(input_path, image_filename), cv2.IMREAD_UNCHANGED)
+            image = cv2.imread(str(pjoin(input_path, image_filename)), cv2.IMREAD_UNCHANGED)
             inpainted_image = cv2.inpaint(image, mask, 30, cv2.INPAINT_TELEA)
-            cv2.imwrite(pjoin(output_path, image_filename), inpainted_image)
+            cv2.imwrite(str(pjoin(output_path, image_filename)), inpainted_image)
 
         def inpaint_rgb_with_cv2(image_filename):
             inpaint_with_cv2(input_path=rgb_path, output_path=inpainted_rgb_path, image_filename=image_filename)
@@ -1541,7 +1541,7 @@ def create_folder(*args, exist_ok=False):
 
     os.makedirs(path, exist_ok=exist_ok)
 
-    return path
+    return str(path)
 
 
 def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybrid_nyu.pt', optimize=True):
