@@ -258,7 +258,7 @@ class COLMAPProcessor:
     @property
     def probably_has_results(self) -> bool:
         recon_result_path = pjoin(self.sparse_path, '0')
-        min_files_for_recon = 4
+        min_files_for_recon = 3
 
         return os.path.isdir(self.sparse_path) and len(os.listdir(self.sparse_path)) > 0 and \
             (os.path.isdir(recon_result_path) and len(os.listdir(recon_result_path)) >= min_files_for_recon)

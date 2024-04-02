@@ -29,7 +29,7 @@ import subprocess
 from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Union, Tuple, List, Dict
+from typing import Optional, Union, Tuple, List, Dict, Callable
 
 import cv2
 import imageio
@@ -40,13 +40,13 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 
+from hive.custom_types import Size, File
 from hive.geometric import Trajectory, CameraMatrix, pose_mat2vec
 from hive.image_processing import calculate_target_resolution
 from hive.io import Dataset, DatasetMetadata, HiveDataset, COLMAPProcessor, ImageFolderDataset, \
     create_masks, VideoMetadata, InvalidDatasetFormatError
 from hive.options import COLMAPOptions, BackgroundMeshOptions, StorageOptions, PipelineOptions, InpaintingMode
 from hive.sensor import KinectSensor
-from hive.custom_types import Size, File
 from hive.utils import tqdm_imap, timed_block
 from third_party.dpt import dpt
 from third_party.lama.bin.predict import predict as lama_predict
@@ -1368,6 +1368,7 @@ class LLFFAdaptor(VideoAdaptorBase):
             raise FileNotFoundError(f"Dataset should have at least one video file, but found zero videos.")
 
         self.video_indices = [int(filename[3:5]) for filename in self.video_filenames]
+        self.video_index_to_zero_index = {video_index: i for i, video_index in enumerate(self.video_indices)}
 
         if camera_feed not in self.video_indices:
             raise ValueError(f"Cannot use camera feed #{camera_feed}, valid camera feeds: {self.video_indices}.")
@@ -1394,6 +1395,18 @@ class LLFFAdaptor(VideoAdaptorBase):
         # Intrinsic is a Nx3 matrix where the rows are the intrinsics by camera, and the columns are the height, width
         # and focal length.
         poses, intrinsics = poses_intrinsics[:, :, :4], poses_intrinsics[:, :, 4]
+        # LLFF uses the [-y,x,z] ("down, right forwards") coordinate system.
+        # We want the [x, y, z] coordinate system, so we must negate the first row of the pose and swap it with the second row.
+        # poses[:, 0, :] *= -1
+        # poses[:, [0, 1], :] = poses[:, [1, 0], :]
+
+        # This is what is used in the LLFF paper to convert from COLMAP to LLFF coordinate frame.
+        # TODO: Try reverse the following operation.
+        # must switch to [-u, r, -t] from [r, -u, t]
+        # poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
+        # must switch to [r, -u, t] from [-u, r, -t]
+        # poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
+        # TODO: Is there a scale factor for the poses? Does the scale of the translation match the depth?
 
         poses_homogenous = np.zeros((len(pose_data), 4, 4))
         poses_homogenous[:, :3, :] = poses
@@ -1450,7 +1463,8 @@ class LLFFAdaptor(VideoAdaptorBase):
         if camera_feed is None:
             camera_feed = self.camera_feed
 
-        with self.open_video(os.path.join(self.base_path, self.video_filenames[camera_feed])) as video:
+        with self.open_video(os.path.join(self.base_path,
+                                          self.video_filenames[self.video_index_to_zero_index[camera_feed]])) as video:
             video.set(cv2.CAP_PROP_POS_FRAMES, index)
             has_frame, frame = video.read()
 
@@ -1461,6 +1475,52 @@ class LLFFAdaptor(VideoAdaptorBase):
         frame = cv2.resize(frame, dsize=(self.target_width, self.target_height), interpolation=cv2.INTER_CUBIC)
 
         return frame
+
+    def get_scaled_colmap_pose_data(self, depth_transform: Callable[[np.ndarray], None]) \
+            -> Tuple[CameraMatrix, Trajectory]:
+        """
+        Run COLMAP and scale the pose data with estimated depth maps.
+
+        LLFF datasets use COLMAP pose data, so we cannot use them directly in HIVE since HIVE assumes metric scale
+        and the COLMAP poses are subject to an unknown scale.
+        The LLFF datasets do not include the 3D point data, so we are unable to calculate the scaling factor directly.
+        Therefore, we must run COLMAP ourselves.
+
+        :param depth_transform: The transform function to converts raw estimated depth maps into the expected format.
+        :return: The scaled camera parameters (intrinsic and extrinsic).
+        """
+        per_camera_frames_path = os.path.join(self.base_path, 'frames')
+        per_camera_estimated_depth_path = os.path.join(self.base_path, 'depth')
+
+        cm = COLMAPProcessor(per_camera_frames_path,
+                             os.path.join(self.base_path, 'workspace'),
+                             COLMAPOptions())
+
+        if not cm.probably_has_results:
+            cm.run()
+
+        cm_intrinsic, cm_extrinsic = cm.load_camera_params()
+        camera_matrix = CameraMatrix.from_matrix(cm_intrinsic,
+                                                 size=(self.source_height, self.source_width))
+        camera_matrix = camera_matrix.scale((self.target_height, self.target_width))
+
+        cm_depth_maps = cm.get_sparse_depth_maps(cm_intrinsic, cm_extrinsic)
+        cm_depth_maps = cm_depth_maps[np.any(cm_depth_maps > 0, axis=(1, 2))]
+
+        if (not os.path.isdir(per_camera_estimated_depth_path) or
+                not len(os.listdir(per_camera_estimated_depth_path)) == len(cm_depth_maps)):
+            shutil.rmtree(per_camera_estimated_depth_path)
+            estimate_depth_dpt(ImageFolderDataset(per_camera_frames_path), output_path=per_camera_estimated_depth_path)
+
+        est_depth_dataset = ImageFolderDataset(per_camera_estimated_depth_path, transform=depth_transform)
+
+        est_depth = np.array(est_depth_dataset)
+        nonzero_mask = (cm_depth_maps > 0.) & (est_depth > 0.)
+        scaling_factor = np.median(est_depth[nonzero_mask] / cm_depth_maps[nonzero_mask])
+
+        scaled_poses = scaling_factor * cm_extrinsic
+
+        return camera_matrix, scaled_poses
 
 
 def create_folder(*args, exist_ok=False):

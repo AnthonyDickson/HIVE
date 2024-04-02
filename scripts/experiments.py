@@ -25,7 +25,6 @@ import statistics
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
-from io import BytesIO
 from os.path import join as pjoin
 from typing import Tuple, Dict, Optional, List, Union, Callable
 
@@ -468,53 +467,38 @@ class LLFFExperiment:
         bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
         logging.debug(f"Gathering frame data and camera parameters...")
-        camera_a = camera_a or dataset_adaptor.video_indices[0]
-        camera_b = camera_b or dataset_adaptor.video_indices[1]
-
-        ref_frame = dataset_adaptor.get_frame(index=frame_index, camera_feed=camera_a)
-        alt_frame = dataset_adaptor.get_frame(index=frame_index, camera_feed=camera_b)
-
-        ref_camera_matrix = dataset_adaptor.get_camera_matrix(camera_feed=camera_a)
-        alt_camera_matrix = dataset_adaptor.get_camera_matrix(camera_feed=camera_b)
-
-        # TODO: Fix mesh for alt_pose is not visible.
-        ref_pose = dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_a)
-        alt_pose = dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_b)
-        ref_pose = pose_vec2mat(ref_pose)
-        alt_pose = pose_vec2mat(alt_pose)
-
-        data = (
-            (f"cam{camera_a:02d}", ref_frame, ref_camera_matrix, ref_pose),
-            (f"cam{camera_b:02d}", alt_frame, alt_camera_matrix, alt_pose),
-        )
+        camera_matrix, poses = dataset_adaptor.get_scaled_colmap_pose_data(dataset.depth_dataset.transform)
 
         # TODO: Try various transformations to get pose data loaded correctly.
         lpips_fn = LPIPS(net='alex')
 
         with virtual_display():
-            for label, frame, camera_matrix, pose in data:
+            first_pose = pose_vec2mat(poses[0])
+            first_pose_inv = np.linalg.inv(first_pose)
+
+            for camera_feed in dataset_adaptor.video_indices:
+                label = f"cam{camera_feed:02d}"
                 logging.info(f"Running comparison for {label} in {results_path}...")
 
+                cm_pose = poses[camera_feed]
+                pose = first_pose_inv @ pose_vec2mat(cm_pose)
                 # This rotation corrects for the rotation applied for viewing in the web-based renderer.
                 # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
-                rotation = np.eye(4)
-                rotation[:3, :3] = np.diag([1, -1, -1])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
+                rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
                 pose_norm = rotation @ pose
 
-                camera = pyrender.PerspectiveCamera(yfov=2.0 * np.arctan(frame_height / (2.0 * camera_matrix[1, 1])),
-                                                    aspectRatio=frame_width / frame_height)
+                camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
                 scene = pyrender.Scene()
                 scene.add(pyrender.Mesh.from_trimesh(fg_mesh))
                 scene.add(pyrender.Mesh.from_trimesh(bg_mesh))
-                scene.add(camera, pose=pose_norm)
-                renderer = pyrender.OffscreenRenderer(frame_width, frame_height)
+                scene.add(camera, pose=np.linalg.inv(pose_norm))
+                renderer = pyrender.OffscreenRenderer(camera_matrix.width, camera_matrix.height)
+
                 color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
                 color = Image.fromarray(color)
-                depth = Image.fromarray((depth / depth.max() * 255).astype(np.uint8))
-
-                frame_path = os.path.join(results_path, f"{label}.png")
-                Image.fromarray(frame).save(frame_path)
-                logging.debug(f"Wrote frame data to {frame_path}.")
+                depth_max = depth.max()
+                normalised_depth = (depth / depth_max) if depth_max > 0. else depth
+                depth = Image.fromarray((normalised_depth * 255).astype(np.uint8))
 
                 screen_capture_path = os.path.join(results_path, f"{label}_render.jpg")
                 color.save(screen_capture_path)
@@ -524,10 +508,16 @@ class LLFFExperiment:
                 depth.save(screen_capture_path)
                 logging.debug(f"Wrote screen capture (depth) to {screen_capture_path}.")
 
+                frame = dataset_adaptor.get_frame(index=0, camera_feed=camera_feed)
+
+                frame_path = os.path.join(results_path, f"{label}.png")
+                Image.fromarray(frame).save(frame_path)
+                logging.debug(f"Wrote frame data to {frame_path}.")
+
                 ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
                 metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
 
-                metrics_path = os.path.join(results_path, f"{label}_comparison.json")
+                metrics_path = os.path.join(results_path, f"{label}.json")
 
                 with open(metrics_path, 'w') as f:
                     json.dump(metrics, f)
@@ -1673,6 +1663,7 @@ class Experiments:
         # TODO: Export summary as latex table
         raise NotImplementedError
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_path', help='The path to save the experiment outputs and results to.',
@@ -1717,4 +1708,3 @@ if __name__ == '__main__':
     experiments.export_inpainting_results()
 
     experiments.run_llff_experiments()
-

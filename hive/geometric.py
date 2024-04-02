@@ -429,6 +429,17 @@ class Trajectory:
         """
         return torch.from_numpy(self.values).to(torch.float32)
 
+    def scale_trajectory(self, scale_factor: float) -> 'Trajectory':
+        """
+        Scale the translation vectors by a scaling factor.
+        :param scale_factor: A floating point number.
+        :return: A trajectory.
+        """
+        scaled_values = self.values.copy()
+        scaled_values[:, -3:] *= scale_factor
+
+        return Trajectory(scaled_values)
+
     def calculate_ate(self, other: 'Trajectory') -> np.ndarray:
         """
         Calculate ATE (Absolute Trajectory Error) between this trajectory and another.
@@ -654,6 +665,14 @@ class CameraMatrix:
     height: int
 
     @property
+    def fov_y(self) -> float:
+        return 2.0 * np.arctan(self.height / (2.0 * self.fy))
+
+    @property
+    def aspect_ratio(self) -> float:
+        return self.width / self.height
+
+    @property
     def matrix(self) -> np.ndarray:
         """Get the 3x3 camera matrix as a NumPy array."""
         return np.array([
@@ -678,7 +697,7 @@ class CameraMatrix:
 
     def scale(self, target_size: Size) -> 'CameraMatrix':
         """
-        Get the camera matrix for the Kinect Sensor.
+        Scale the camera matrix for a given resolution.
 
         :param target_size: The (height, width) to rescale the camera parameters to.
         :return: The scaled camera matrix.
@@ -694,4 +713,24 @@ class CameraMatrix:
             cy=self.cy * scale_y,
             width=target_width,
             height=target_height
+        )
+
+    @classmethod
+    def from_matrix(cls, matrix: np.ndarray, size: Size) -> 'CameraMatrix':
+        """
+        Create a CameraMatrix object from a 3x3 matrix and resolution.
+        :param matrix: A 3x3 camera intrinsic matrix.
+        :param size: The (height, width) of the camera view (image resolution).
+        :return: A CameraMatrix object.
+        """
+        validate_shape(matrix, 'matrix', (3, 3))
+        height, width = size
+
+        return CameraMatrix(
+            fx=matrix[0, 0],
+            fy=matrix[1, 1],
+            cx=matrix[0, 2],
+            cy=matrix[1, 2],
+            width=width,
+            height=height,
         )
