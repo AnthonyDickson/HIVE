@@ -412,31 +412,6 @@ class PanopticDatasetExperiment:
 
 
 class LLFFExperiment:
-
-    @classmethod
-    def test(cls):
-        dataset_path = os.path.join('data', 'coffee_martini')
-        output_path = os.path.join('outputs', 'coffee_martini')
-        dataset_adaptor = LLFFAdaptor(base_path=dataset_path,
-                                      output_path=output_path,
-                                      num_frames=300,
-                                      frame_step=15,
-                                      colmap_options=COLMAPOptions(quality='medium'),
-                                      resize_to=(480, 640),
-                                      camera_feed=0)
-        dataset = dataset_adaptor.convert(estimate_pose=False,
-                                          estimate_depth=True,
-                                          inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
-                                          static_camera=False,
-                                          no_cache=False)
-        pipeline = Pipeline(options=PipelineOptions(num_frames=300, frame_step=15),
-                            storage_options=StorageOptions(dataset_path=dataset_path, output_path=output_path))
-
-        fg_mesh = pipeline.process_frame(dataset, index=0)
-        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
-        fg_mesh.export(os.path.join(output_path, 'fg.ply'))
-        bg_mesh.export(os.path.join(output_path, 'bg.ply'))
-
     @classmethod
     def fetch_dataset(cls, data_folder: str, dataset_name: str):
         dataset_path = os.path.join(data_folder, dataset_name)
@@ -447,7 +422,7 @@ class LLFFExperiment:
                 zip_filename = f"{dataset_name}.zip"
                 zip_path = os.path.join(data_folder, zip_filename)
 
-                if dataset_name == "flame_salmon_1":
+                if dataset_name == "flame_salmon_1" and not os.path.isfile(zip_path):
                     zip_part_filenames = [
                         "flame_salmon_1_split.z01",
                         "flame_salmon_1_split.z02",
@@ -473,7 +448,7 @@ class LLFFExperiment:
                     logging.debug(f"Deleting zip parts...")
                     for zip_part_filename in zip_part_filenames:
                         os.remove(os.path.join(data_folder, zip_part_filename))
-                else:
+                elif not os.path.isfile(zip_path):
                     url = f"https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{zip_filename}"
                     urllib.request.urlretrieve(url, zip_path)
 
@@ -510,7 +485,8 @@ class LLFFExperiment:
                                       frame_step=frame_step,
                                       colmap_options=COLMAPOptions(quality='medium'),
                                       resize_to=(frame_height, frame_width),
-                                      camera_feed=0)
+                                      camera_feed=0,
+                                      overwrite_colmap_data=no_cache)
         dataset = dataset_adaptor.convert(estimate_pose=False,
                                           estimate_depth=True,
                                           inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth,
@@ -524,24 +500,18 @@ class LLFFExperiment:
         bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
         logging.debug(f"Gathering frame data and camera parameters...")
-        camera_matrix, poses = dataset_adaptor.get_scaled_colmap_pose_data(dataset.depth_dataset.transform,
-                                                                           no_cache=no_cache)
+        camera_matrix = dataset_adaptor.camera_matrix
 
         lpips_fn = LPIPS(net='alex')
-
-        first_pose = pose_vec2mat(poses[0])
-        first_pose_inv = np.linalg.inv(first_pose)
 
         for camera_feed in dataset_adaptor.video_indices:
             label = f"cam{camera_feed:02d}"
             logging.info(f"Running comparison for {label} in {results_folder}...")
 
-            cm_pose = poses[camera_feed]
-            pose = first_pose_inv @ pose_vec2mat(cm_pose)
             # This rotation corrects for the rotation applied for viewing in the web-based renderer.
             # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
             rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
-            pose_norm = rotation @ pose
+            pose_norm = rotation @ pose_vec2mat(dataset_adaptor.get_pose(index=0, camera_feed=camera_feed))
 
             camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
             scene = pyrender.Scene()
@@ -1709,7 +1679,7 @@ class Experiments:
 
             LLFFExperiment.compare_renders(data_folder=self.data_path,
                                            dataset_name=dataset_name,
-                                           output_folder=self.output_path,
+                                           output_folder=os.path.join(self.output_path, 'converted_dataset'),
                                            results_folder=results_path,
                                            frame_index=0,
                                            no_cache=self.overwrite_ok)
@@ -1742,7 +1712,8 @@ if __name__ == '__main__':
                      'rgbd_dataset_freiburg3_sitting_xyz',
                      'garden',
                      'small_tree']
-    llff_dataset_names = [
+
+    n3dv_dataset_names = [
         'coffee_martini',
         'cook_spinach',
         'cut_roasted_beef',
@@ -1772,4 +1743,4 @@ if __name__ == '__main__':
         experiments.run_inpainting_experiments()
         experiments.export_inpainting_results()
 
-        experiments.run_llff_experiments(llff_dataset_names)
+        experiments.run_llff_experiments(n3dv_dataset_names)

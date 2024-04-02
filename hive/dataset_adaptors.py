@@ -29,7 +29,7 @@ import subprocess
 from abc import ABC
 from os.path import join as pjoin
 from pathlib import Path
-from typing import Optional, Union, Tuple, List, Dict, Callable
+from typing import Optional, Union, Tuple, List, Dict
 
 import cv2
 import imageio
@@ -203,7 +203,7 @@ class DatasetAdaptor(Dataset, ABC):
         logging.info(f"Converting input dataset at {self.base_path} and "
                      f"writing converted dataset to {self.output_path}.")
 
-        output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders()
+        output_image_folder, output_depth_folder, output_mask_folder = self._setup_folders(exist_ok=not no_cache)
 
         with timed_block(log_msg="Creating metadata for dataset.", profiling=profiling,
                          key_path=['timing', 'load_dataset', 'create_metadata']):
@@ -300,22 +300,22 @@ class DatasetAdaptor(Dataset, ABC):
 
         return None
 
-    def _setup_folders(self) -> Tuple[str, str, str]:
+    def _setup_folders(self, exist_ok=False) -> Tuple[str, str, str]:
         """
         Create the output folders.
 
         :return: The paths to the: image folder, depth map folder and instance segmentation masks folder.
         """
-        if os.path.isdir(self.output_path):
+        if not exist_ok and os.path.isdir(self.output_path):
             raise RuntimeError(f"The output path {self.output_path} already exists! "
                                f"Possible fix: Change the output path or specify the flag `--no_cache` to delete the "
                                f"output path if it already exists.")
 
-        os.makedirs(self.output_path)
+        os.makedirs(self.output_path, exist_ok=exist_ok)
 
-        image_folder = create_folder(self.output_path, HiveDataset.rgb_folder)
-        depth_folder = create_folder(self.output_path, HiveDataset.depth_folder)
-        mask_folder = create_folder(self.output_path, HiveDataset.mask_folder)
+        image_folder = create_folder(self.output_path, HiveDataset.rgb_folder, exist_ok=exist_ok)
+        depth_folder = create_folder(self.output_path, HiveDataset.depth_folder, exist_ok=exist_ok)
+        mask_folder = create_folder(self.output_path, HiveDataset.mask_folder, exist_ok=exist_ok)
 
         return image_folder, depth_folder, mask_folder
 
@@ -398,8 +398,7 @@ class DatasetAdaptor(Dataset, ABC):
 
         return camera_matrix, camera_poses_scaled.normalise()
 
-    @staticmethod
-    def _get_scaled_colmap_camera_params(colmap_processor: COLMAPProcessor,
+    def _get_scaled_colmap_camera_params(self, colmap_processor: COLMAPProcessor,
                                          output_depth_folder: str,
                                          metadata: DatasetMetadata,
                                          frames_subset: List[int]) -> Tuple[np.ndarray, Trajectory]:
@@ -1349,7 +1348,8 @@ class LLFFAdaptor(VideoAdaptorBase):
     required_folders = []
 
     def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
-                 resize_to: Optional[Union[int, Size]] = None, camera_feed: int = 0):
+                 resize_to: Optional[Union[int, Size]] = None, camera_feed: int = 0,
+                 overwrite_colmap_data: bool = True):
         """
         :param base_path: The path to the dataset.
         :param output_path: The path to write the new dataset to.
@@ -1361,6 +1361,7 @@ class LLFFAdaptor(VideoAdaptorBase):
             If an int is given, the longest side will be scaled to this value and the shorter side will have its new
             length automatically calculated.
         :param camera_feed: Which camera feed to use.
+        :param overwrite_colmap_data: Whether cached multicam COLMAP data should be discarded if it already exists.
         """
         contents = os.listdir(base_path)
         self.video_filenames = list(filter(lambda filename: Path(filename).suffix == '.mp4', contents))
@@ -1381,68 +1382,11 @@ class LLFFAdaptor(VideoAdaptorBase):
         super().__init__(base_path=base_path, output_path=output_path, num_frames=num_frames, frame_step=frame_step,
                          colmap_options=colmap_options, video_path=video_path, resize_to=resize_to)
 
-        self.intrinsics_by_camera, self.pose_data_by_camera = self._load_camera_parameters(self.video_indices)
-
-    def _load_camera_parameters(self, video_indices: List[int]) \
-            -> Tuple[Dict[int, CameraMatrix], Dict[int, np.ndarray]]:
-        pose_path = os.path.join(self.base_path, self.pose_filename)
-        pose_data = np.load(pose_path)
-
-        # Each line is the flattened 3x5 pose and intrinsics matrix with the depth bounds (near, 0.01% percentile,
-        # far, 99.9% percentile) appended.
-        poses_intrinsics, bounds = pose_data[:, :-2], pose_data[:, -2:]
-        poses_intrinsics = poses_intrinsics.reshape((-1, 3, 5))
-        # Pose is the 3x4 concatenated 3x3 rotation matrix and the 3x1 translation column vector.
-        # Intrinsic is a Nx3 matrix where the rows are the intrinsics by camera, and the columns are the height, width
-        # and focal length.
-        poses, intrinsics = poses_intrinsics[:, :, :4], poses_intrinsics[:, :, 4]
-        # LLFF uses the [-y,x,z] ("down, right forwards") coordinate system.
-        # We want the [x, y, z] coordinate system, so we must negate the first row of the pose and swap it with the second row.
-        # poses[:, 0, :] *= -1
-        # poses[:, [0, 1], :] = poses[:, [1, 0], :]
-
-        # This is what is used in the LLFF paper to convert from COLMAP to LLFF coordinate frame.
-        # TODO: Try reverse the following operation.
-        # must switch to [-u, r, -t] from [r, -u, t]
-        # poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
-        # must switch to [r, -u, t] from [-u, r, -t]
-        # poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
-        # TODO: Is there a scale factor for the poses? Does the scale of the translation match the depth?
-
-        poses_homogenous = np.zeros((len(pose_data), 4, 4))
-        poses_homogenous[:, :3, :] = poses
-        # This sets the bottom right element to one to complete the diagonal, otherwise you cannot take the inverse.
-        poses_homogenous[:, 3, 3] = 1.0
-        # Take inverse since poses are cam-to-world, but the math expects world-to-cam.
-        poses_w2c = np.linalg.inv(poses_homogenous)
-        poses_centered = poses_homogenous[0] @ poses_w2c
-        pose_vectors = {video_indices[i]: pose_mat2vec(pose) for i, pose in enumerate(poses_centered)}
-
-        def convert_to_camera_matrix(intrinsic):
-            height, width, focal_length = intrinsic
-
-            return CameraMatrix(
-                fx=focal_length,
-                fy=focal_length,
-                cx=width / 2,
-                cy=height / 2,
-                width=int(width),
-                height=int(height)
-            )
-
-        camera_matrices = {video_indices[i]: convert_to_camera_matrix(intrinsic)
-                           for i, intrinsic in enumerate(intrinsics)}
-
-        return camera_matrices, pose_vectors
+        self.camera_matrix, self.pose_data_by_camera = self._get_scaled_colmap_pose_data(
+            overwrite_ok=overwrite_colmap_data)
 
     def get_camera_matrix(self, camera_feed: Optional[int] = None) -> np.ndarray:
-        if camera_feed is None:
-            camera_feed = self.camera_feed
-
-        camera_matrix = self.intrinsics_by_camera[camera_feed]
-        camera_matrix = camera_matrix.scale(target_size=(self.target_height, self.target_width))
-
-        return camera_matrix.matrix
+        return self.camera_matrix.matrix
 
     def get_pose(self, index: int, camera_feed: Optional[int] = None) -> np.ndarray:
         if camera_feed is None:
@@ -1477,8 +1421,13 @@ class LLFFAdaptor(VideoAdaptorBase):
 
         return frame
 
-    def get_scaled_colmap_pose_data(self, depth_transform: Callable[[np.ndarray], None], no_cache=False) \
-            -> Tuple[CameraMatrix, Trajectory]:
+    def _get_scaled_colmap_camera_params(self, colmap_processor: COLMAPProcessor,
+                                         output_depth_folder: str,
+                                         metadata: DatasetMetadata,
+                                         frames_subset: List[int]) -> Tuple[np.ndarray, Trajectory]:
+        return self.camera_matrix.matrix, self.get_camera_trajectory(self.camera_feed)
+
+    def _get_scaled_colmap_pose_data(self, overwrite_ok: bool) -> Tuple[CameraMatrix, Dict[int, np.ndarray]]:
         """
         Run COLMAP and scale the pose data with estimated depth maps.
 
@@ -1487,43 +1436,52 @@ class LLFFAdaptor(VideoAdaptorBase):
         The LLFF datasets do not include the 3D point data, so we are unable to calculate the scaling factor directly.
         Therefore, we must run COLMAP ourselves.
 
-        :param depth_transform: The transform function to converts raw estimated depth maps into the expected format.
-        :param no_cache: Whether to overwrite existing cached data (COLMAP, estimated depth maps).
+        :param overwrite_ok: Whether to overwrite existing cached data (COLMAP, estimated depth maps).
         :return: The scaled camera parameters (intrinsic and extrinsic).
         """
-        # TODO: Use this function to get camera parameters for the data adaptor.
-        per_camera_frames_path = os.path.join(self.base_path, 'frames')
-        per_camera_estimated_depth_path = os.path.join(self.base_path, 'depth')
+        logging.info(f"Estimating camera parameters from multiple cameras with COLMAP...")
+        output_folder = os.path.join(self.output_path, 'multicam_colmap')
+        per_camera_frames_path = os.path.join(output_folder, 'frames')
+        per_camera_estimated_depth_path = os.path.join(output_folder, 'depth')
         os.makedirs(per_camera_estimated_depth_path, exist_ok=True)
         os.makedirs(per_camera_frames_path, exist_ok=True)
         logging.debug(f"Extracting first frame from videos to {per_camera_frames_path}...")
 
-        if no_cache or len(os.listdir(per_camera_frames_path)) != len(self.video_filenames):
+        if overwrite_ok or len(os.listdir(per_camera_frames_path)) != len(self.video_filenames):
             for camera_feed in self.video_indices:
                 frame = self.get_frame(index=0, camera_feed=camera_feed)
                 frame_filename = HiveDataset.index_to_filename(camera_feed, '.jpg')
                 Image.fromarray(frame).save(os.path.join(per_camera_frames_path, frame_filename))
 
         cm = COLMAPProcessor(per_camera_frames_path,
-                             os.path.join(self.base_path, 'workspace'),
-                             COLMAPOptions())
+                             os.path.join(output_folder, 'workspace'),
+                             self.colmap_options)
 
-        if not cm.probably_has_results or no_cache:
+        if not cm.probably_has_results or overwrite_ok:
             cm.run(use_masks=False)
 
         cm_intrinsic, cm_extrinsic = cm.load_camera_params()
         camera_matrix = CameraMatrix.from_matrix(cm_intrinsic,
                                                  size=(self.target_height, self.target_width))
-
         cm_depth_maps = cm.get_sparse_depth_maps(cm_intrinsic, cm_extrinsic)
-        cm_depth_maps = cm_depth_maps[np.any(cm_depth_maps > 0, axis=(1, 2))]
+        # COLMAPProcessor interpolates poses for indices without a corresponding image (in our case, camera feeds that
+        # were removed due to being out of sync). We do not want poses or depth maps for non-existent camera feeds,
+        # so we filter them out.
+        cm_extrinsic = Trajectory(cm_extrinsic[self.video_indices])
+        cm_depth_maps = cm_depth_maps[self.video_indices]
 
         if (not os.path.isdir(per_camera_estimated_depth_path) or
             not len(os.listdir(per_camera_estimated_depth_path)) == len(cm_depth_maps)) \
-                or no_cache:
+                or overwrite_ok:
             logging.debug(f"Estimating depth maps for initial camera frames...")
             shutil.rmtree(per_camera_estimated_depth_path)
             estimate_depth_dpt(ImageFolderDataset(per_camera_frames_path), output_path=per_camera_estimated_depth_path)
+
+        def depth_transform(depth_map):
+            depth_map = depth_map.astype(np.float32) * HiveDataset.depth_scaling_factor
+            depth_map[depth_map > 10.] = 0.0
+
+            return depth_map
 
         est_depth_dataset = ImageFolderDataset(per_camera_estimated_depth_path, transform=depth_transform)
 
@@ -1531,9 +1489,15 @@ class LLFFAdaptor(VideoAdaptorBase):
         nonzero_mask = (cm_depth_maps > 0.) & (est_depth > 0.)
         scaling_factor = np.median(est_depth[nonzero_mask] / cm_depth_maps[nonzero_mask])
 
-        scaled_poses = scaling_factor * cm_extrinsic
+        scaled_poses = cm_extrinsic.scale_trajectory(scaling_factor)
+        scaled_poses = scaled_poses.normalise()
 
-        return camera_matrix, scaled_poses
+        pose_map = dict()
+
+        for zero_index, camera_feed in enumerate(self.video_indices):
+            pose_map[camera_feed] = scaled_poses[zero_index]
+
+        return camera_matrix, pose_map
 
 
 def create_folder(*args, exist_ok=False):

@@ -16,32 +16,33 @@
 
 import abc
 import contextlib
-import cv2
 import datetime
-import imageio
 import json
 import logging
-import numpy as np
 import os
 import struct
 import subprocess
+from os.path import join as pjoin
+from pathlib import Path
+from typing import Union, Tuple, Optional, Callable, IO, List
+
+import cv2
+import imageio
+import numpy as np
 import torch
 from PIL import Image
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultPredictor
-from os.path import join as pjoin
-from pathlib import Path
 from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset as TorchDataset
 from tqdm import tqdm
-from typing import Union, Tuple, Optional, Callable, IO, List
 
+from hive.custom_types import File
 from hive.geometric import Trajectory, get_pose_components, world2image, pose_vec2mat, point_cloud_from_depth
 from hive.image_processing import dilate_mask, calculate_target_resolution
 from hive.options import COLMAPOptions, MaskDilationOptions
-from hive.custom_types import File
 from hive.utils import tqdm_imap, check_domain, Domain
 from third_party.colmap.scripts.python.read_dense import read_array as load_colmap_depth_map
 from third_party.colmap.scripts.python.read_write_model import Image as COLMAPImage
@@ -862,7 +863,6 @@ class HiveDataset(Dataset):
 
     required_folders = [rgb_folder, depth_folder, mask_folder]
 
-    # Dataset adaptors are expected to convert depth maps to mm.
     # This scaling factor converts the mm depth values to meters.
     depth_scaling_factor = 1. / 1000.
 

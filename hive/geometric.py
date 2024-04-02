@@ -376,6 +376,7 @@ class Trajectory:
         """
         matrix_trajectory = self.to_homogenous_transforms()
         matrix_trajectory = np.linalg.inv(matrix_trajectory[0]) @ matrix_trajectory
+        matrix_trajectory[0] = np.eye(4, dtype=matrix_trajectory.dtype)
         vector_trajectory = self.from_homogenous_transforms(matrix_trajectory)
 
         return vector_trajectory
