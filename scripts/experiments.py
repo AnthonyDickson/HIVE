@@ -500,6 +500,73 @@ class LLFFExperiment:
             except Exception:
                 raise FileNotFoundError(f"Could not find dataset at {dataset_path} or automatically download it.")
 
+    @dataclass
+    class Config:
+        name: str
+        camera_matrix: CameraMatrix
+        fg_mesh: trimesh.Trimesh
+        bg_mesh: trimesh.Trimesh
+
+    @classmethod
+    def _get_multicam_config(cls, dataset_adaptor: LLFFAdaptor, dataset: HiveDataset, pipeline: Pipeline,
+                             frame_index: int) -> Config:
+        camera_matrix = dataset_adaptor.camera_matrix
+
+        fg_mesh = pipeline.process_frame(dataset, index=frame_index)
+        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        return cls.Config("multicam", camera_matrix, fg_mesh, bg_mesh)
+
+    @classmethod
+    def _get_kinect_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int) -> Config:
+        kinect_camera_matrix = KinectSensor.get_camera_matrix()
+
+        with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
+            fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index)
+            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        return cls.Config("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
+
+    @classmethod
+    def _get_no_inpainting_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int) -> Config:
+        kinect_camera_matrix = KinectSensor.get_camera_matrix()
+
+        with disable_inpainted_data(dataset), temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
+            fg_mesh_no_inpainted = pipeline.process_frame(dataset, index=frame_index)
+            bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        return cls.Config("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted)
+
+    @classmethod
+    def _get_draco_config(cls, output_folder: str, kinect_config: Config) -> Config:
+        def save_draco(mesh: trimesh.Trimesh, path: str) -> str:
+            # noinspection PyUnresolvedReferences
+            if isinstance(mesh.visual, trimesh.visual.TextureVisuals):
+                # Use vertex colours instead of textures since they seem to get lost for some reason?
+                mesh.visual = mesh.visual.to_color()
+
+            with open(path, 'wb') as f:
+                # noinspection PyUnresolvedReferences
+                f.write(trimesh.exchange.ply.export_draco(mesh))
+
+            return path
+
+        def load_draco(path: str) -> trimesh.Trimesh:
+            with open(path, 'rb') as f:
+                # noinspection PyUnresolvedReferences
+                mesh_data = trimesh.exchange.ply.load_draco(f)
+
+            return trimesh.Trimesh(**mesh_data)
+
+        temp_mesh_path = os.path.join(output_folder, 'temp.drc')
+
+        fg_mesh_draco = load_draco(save_draco(kinect_config.fg_mesh, temp_mesh_path))
+        bg_mesh_draco = load_draco(save_draco(kinect_config.bg_mesh, temp_mesh_path))
+
+        os.remove(temp_mesh_path)
+
+        return cls.Config("draco", kinect_config.camera_matrix, fg_mesh_draco, bg_mesh_draco)
+
     @classmethod
     def compare_renders(cls, data_folder: str, dataset_name: str, output_folder: str, results_folder: str,
                         frame_index: int, lpips_fn: LPIPS,
@@ -535,52 +602,13 @@ class LLFFExperiment:
                             storage_options=StorageOptions(dataset_path=dataset_path,
                                                            output_path=converted_dataset_path))
 
-        camera_matrix = dataset_adaptor.camera_matrix
-
-        fg_mesh = pipeline.process_frame(dataset, index=frame_index)
-        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
-
-        kinect_camera_matrix = KinectSensor.get_camera_matrix()
-
-        with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
-            fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index)
-            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
-
-        with disable_inpainted_data(dataset), temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
-            fg_mesh_no_inpainted = pipeline.process_frame(dataset, index=frame_index)
-            bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
-
-        def save_draco(mesh: trimesh.Trimesh, path: str) -> str:
-            # noinspection PyUnresolvedReferences
-            if isinstance(mesh.visual, trimesh.visual.TextureVisuals):
-                # Use vertex colours instead of textures since they seem to get lost for some reason?
-                mesh.visual = mesh.visual.to_color()
-
-            with open(path, 'wb') as f:
-                # noinspection PyUnresolvedReferences
-                f.write(trimesh.exchange.ply.export_draco(mesh))
-
-            return path
-
-        def load_draco(path: str) -> trimesh.Trimesh:
-            with open(path, 'rb') as f:
-                # noinspection PyUnresolvedReferences
-                mesh_data = trimesh.exchange.ply.load_draco(f)
-
-            return trimesh.Trimesh(**mesh_data)
-
-        temp_mesh_path = os.path.join(output_folder, 'temp.drc')
-
-        fg_mesh_draco = load_draco(save_draco(fg_mesh_kinect, temp_mesh_path))
-        bg_mesh_draco = load_draco(save_draco(bg_mesh_kinect, temp_mesh_path))
-
-        os.remove(temp_mesh_path)
+        kinect_config = cls._get_kinect_config(dataset, pipeline, frame_index)
 
         configurations = (
-            ("multicam", camera_matrix, fg_mesh, bg_mesh),
-            ("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect),
-            ("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted),
-            ("draco", kinect_camera_matrix, fg_mesh_draco, bg_mesh_draco),
+            cls._get_multicam_config(dataset_adaptor, dataset, pipeline, frame_index),
+            kinect_config,
+            cls._get_no_inpainting_config(dataset, pipeline, frame_index),
+            cls._get_draco_config(output_folder, kinect_config),
         )
 
         logging.debug(f"Gathering frame data and camera parameters...")
@@ -596,13 +624,14 @@ class LLFFExperiment:
             Image.fromarray(frame).save(frame_path)
             logging.debug(f"Wrote frame data to {frame_path}.")
 
-            for config, intrinsic, *meshes in configurations:
-                logging.info(f"{config} config...")
-                color = cls.render_mesh(intrinsic, dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_feed),
-                                        *meshes)
+            for config in configurations:
+                logging.info(f"{config.name} config...")
+                color = cls.render_mesh(config.camera_matrix,
+                                        dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_feed),
+                                        config.fg_mesh, config.bg_mesh)
                 color_np = np.asarray(color)
 
-                screen_capture_path = os.path.join(results_folder, f"{label}_{config}.jpg")
+                screen_capture_path = os.path.join(results_folder, f"{label}_{config.name}.jpg")
                 color.save(screen_capture_path)
                 logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
 
@@ -612,7 +641,7 @@ class LLFFExperiment:
                 masked_frame[color_np == [255, 255, 255]] = 255
                 ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
 
-                metrics.append({'camera_feed': camera_feed, 'config': config,
+                metrics.append({'camera_feed': camera_feed, 'config': config.name,
                                 'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
                                 'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
 
