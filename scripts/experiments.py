@@ -507,6 +507,20 @@ class LLFFExperiment:
         fg_mesh: trimesh.Trimesh
         bg_mesh: trimesh.Trimesh
 
+    @dataclass
+    class RenderResult:
+        camera_feed: int
+        config: str
+        ssim: float
+        psnr: float
+        lpips: float
+        ssim_masked: float
+        psnr_masked: float
+        lpips_masked: float
+
+        def to_json(self) -> dict:
+            return self.__dict__
+
     @classmethod
     def _get_multicam_config(cls, dataset_adaptor: LLFFAdaptor, dataset: HiveDataset, pipeline: Pipeline,
                              frame_index: int) -> Config:
@@ -612,7 +626,7 @@ class LLFFExperiment:
         )
 
         logging.debug(f"Gathering frame data and camera parameters...")
-        metrics = []
+        results = []
 
         for camera_feed in dataset_adaptor.video_indices:
             label = f"cam{camera_feed:02d}"
@@ -641,14 +655,13 @@ class LLFFExperiment:
                 masked_frame[color_np == [255, 255, 255]] = 255
                 ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
 
-                metrics.append({'camera_feed': camera_feed, 'config': config.name,
-                                'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
-                                'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
+                results.append(cls.RenderResult(camera_feed, config.name, ssim, psnr, lpips, ssim_masked, psnr_masked,
+                                                lpips_masked))
 
         metrics_path = os.path.join(results_folder, f"metrics.json")
 
         with open(metrics_path, 'w') as f:
-            json.dump(metrics, f)
+            json.dump([result.to_json() for result in results], f)
             logging.debug(f"Wrote metrics to {metrics_path}.")
 
     @classmethod
