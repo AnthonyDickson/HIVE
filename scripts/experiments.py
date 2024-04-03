@@ -32,6 +32,7 @@ from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import cv2
 import numpy as np
+import pandas as pd
 import pyrender
 import torch
 import trimesh
@@ -41,10 +42,9 @@ from lpips import LPIPS
 from omegaconf import OmegaConf
 from torch.utils.data.dataloader import default_collate
 
-from hive.dataset import CMUPanopticDataset
 from hive.dataset_adaptors import LLFFAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
-from hive.geometric import Trajectory, point_cloud_from_rgbd, pose_vec2mat, CameraMatrix
+from hive.geometric import Trajectory, pose_vec2mat, CameraMatrix
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata
 from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
     WebXROptions
@@ -413,6 +413,8 @@ class InpaintingExperiment:
 
 
 class LLFFExperiment:
+    dataset_results_filename = 'metrics.json'
+
     @classmethod
     def fetch_dataset(cls, data_folder: str, dataset_name: str):
         dataset_path = os.path.join(data_folder, dataset_name)
@@ -471,6 +473,7 @@ class LLFFExperiment:
 
     @dataclass
     class RenderResult:
+        dataset: str
         camera_feed: int
         config: str
         ssim: float
@@ -482,6 +485,16 @@ class LLFFExperiment:
 
         def to_json(self) -> dict:
             return self.__dict__
+
+        def to_structured_np_array(self):
+            return np.array(
+                [(self.dataset, self.camera_feed, self.config,
+                  self.ssim, self.psnr, self.lpips,
+                  self.ssim_masked, self.psnr_masked, self.lpips_masked)],
+                dtype=[('dataset', 'U16'), ('camera_feed', int), ('config', 'U16'),
+                       ('ssim', float), ('psnr', float), ('lpips', float),
+                       ('ssim_masked', float), ('psnr_masked', float), ('lpips_masked', float)]
+            )
 
     @classmethod
     def _get_multicam_config(cls, dataset_adaptor: LLFFAdaptor, dataset: HiveDataset, pipeline: Pipeline,
@@ -617,10 +630,11 @@ class LLFFExperiment:
                 masked_frame[color_np == [255, 255, 255]] = 255
                 ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
 
-                results.append(cls.RenderResult(camera_feed, config.name, ssim, psnr, lpips, ssim_masked, psnr_masked,
-                                                lpips_masked))
+                results.append(cls.RenderResult(dataset_name, camera_feed, config.name,
+                                                ssim, psnr, lpips,
+                                                ssim_masked, psnr_masked, lpips_masked))
 
-        metrics_path = os.path.join(results_folder, f"metrics.json")
+        metrics_path = os.path.join(results_folder, cls.dataset_results_filename)
 
         with open(metrics_path, 'w') as f:
             json.dump([result.to_json() for result in results], f)
@@ -647,6 +661,47 @@ class LLFFExperiment:
         renderer.delete()
 
         return color
+
+    @classmethod
+    def gather_results(cls, output_folder: str):
+        dataset_names = list(filter(lambda item: os.path.isdir(os.path.join(output_folder, item)),
+                                    os.listdir(output_folder)))
+
+        results_list: List[np.ndarray] = []
+
+        for dataset_name in dataset_names:
+            dataset_path = os.path.join(output_folder, dataset_name)
+            results_path = os.path.join(dataset_path, cls.dataset_results_filename)
+
+            with open(results_path, 'r') as f:
+                json_data = json.load(f)
+
+            results_list += [cls.RenderResult(**json_row).to_structured_np_array() for json_row in json_data]
+
+        import numpy.lib.recfunctions as rfn
+
+        return rfn.stack_arrays(results_list)
+
+    @classmethod
+    def export_latex(cls, results_records: np.ndarray, summary_path: str, latex_path: str):
+        df = pd.DataFrame.from_records(results_records)
+
+        summary_path = os.path.join(summary_path, 'llff.json')
+        logging.info(f"Exporting summary to {summary_path}...")
+        df.to_json(summary_path, orient='records')
+
+        df['camera_feed'] = np.where(df['camera_feed'] == 0, '00', '01-20')
+        df = df.drop(['dataset'], axis='columns').groupby(by=['config', 'camera_feed']).mean()
+        df_not_masked = df.drop(['ssim_masked', 'psnr_masked', 'lpips_masked'], axis='columns')
+        df_masked = df.drop(['ssim', 'psnr', 'lpips'], axis='columns')
+
+        not_masked_latex_path = os.path.join(latex_path, 'llff.tex')
+        masked_latex_path = os.path.join(latex_path, 'llff_masked.tex')
+
+        logging.info(f"Exporting latex to {not_masked_latex_path}...")
+        df_not_masked.to_latex(not_masked_latex_path, float_format="%.2f")
+        logging.info(f"Exporting latex to {masked_latex_path}...")
+        df_masked.to_latex(masked_latex_path, float_format="%.2f")
 
 
 # TODO: Pull out each experiment type into own class.
@@ -1766,11 +1821,11 @@ class Experiments:
         logging.info(f"Exported inpainting latex table to {latex_path}.")
 
     def run_llff_experiments(self, dataset_names: List[str]):
-
+        llff_folder = os.path.join(self.output_path, 'llff')
         lpips_fn = LPIPS(net='alex')
 
         for dataset_name in dataset_names:
-            results_path = os.path.join(self.output_path, 'llff', dataset_name)
+            results_path = os.path.join(llff_folder, dataset_name)
 
             if not self.overwrite_ok and os.path.isdir(results_path) and len(os.listdir(results_path)) > 0:
                 logging.info(f"Cached results found for {dataset_name} in {results_path}, skipping...")
@@ -1786,10 +1841,8 @@ class Experiments:
                                            lpips_fn=lpips_fn,
                                            no_cache=self.overwrite_ok)
 
-    def export_llff_results(self):
-        # TODO: Summarise results and save as JSON in summaries
-        # TODO: Export summary as latex table
-        raise NotImplementedError
+        results_records = LLFFExperiment.gather_results(output_folder=llff_folder)
+        LLFFExperiment.export_latex(results_records, summary_path=self.summaries_path, latex_path=self.latex_path)
 
 
 if __name__ == '__main__':
