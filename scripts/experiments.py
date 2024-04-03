@@ -550,10 +550,37 @@ class LLFFExperiment:
             fg_mesh_no_inpainted = pipeline.process_frame(dataset, index=frame_index)
             bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
+        def save_draco(mesh: trimesh.Trimesh, path: str) -> str:
+            # noinspection PyUnresolvedReferences
+            if isinstance(mesh.visual, trimesh.visual.TextureVisuals):
+                # Use vertex colours instead of textures since they seem to get lost for some reason?
+                mesh.visual = mesh.visual.to_color()
+
+            with open(path, 'wb') as f:
+                # noinspection PyUnresolvedReferences
+                f.write(trimesh.exchange.ply.export_draco(mesh))
+
+            return path
+
+        def load_draco(path: str) -> trimesh.Trimesh:
+            with open(path, 'rb') as f:
+                # noinspection PyUnresolvedReferences
+                mesh_data = trimesh.exchange.ply.load_draco(f)
+
+            return trimesh.Trimesh(**mesh_data)
+
+        temp_mesh_path = os.path.join(output_folder, 'temp.drc')
+
+        fg_mesh_draco = load_draco(save_draco(fg_mesh_kinect, temp_mesh_path))
+        bg_mesh_draco = load_draco(save_draco(bg_mesh_kinect, temp_mesh_path))
+
+        os.remove(temp_mesh_path)
+
         configurations = (
             ("multicam", camera_matrix, fg_mesh, bg_mesh),
             ("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect),
             ("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted),
+            ("draco", kinect_camera_matrix, fg_mesh_draco, bg_mesh_draco),
         )
 
         logging.debug(f"Gathering frame data and camera parameters...")
