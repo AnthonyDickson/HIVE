@@ -44,11 +44,12 @@ from torch.utils.data.dataloader import default_collate
 from hive.dataset import CMUPanopticDataset
 from hive.dataset_adaptors import LLFFAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
-from hive.geometric import Trajectory, point_cloud_from_rgbd, pose_vec2mat
+from hive.geometric import Trajectory, point_cloud_from_rgbd, pose_vec2mat, CameraMatrix
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata
 from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
     WebXROptions
 from hive.pipeline import Pipeline
+from hive.sensor import KinectSensor
 from hive.utils import setup_logger, tqdm_imap, set_key_path
 from scripts.compare_image_pair import compare_images
 from third_party.lama.saicinpainting.evaluation.data import pad_img_to_modulo
@@ -177,6 +178,24 @@ def virtual_display():
         yield
     finally:
         virtual_display_process.terminate()
+
+
+@contextmanager
+def temporary_camera_matrix(dataset: HiveDataset, camera_matrix: np.ndarray):
+    """
+    Context manager that temporarily replaces the camera matrix of a dataset.
+
+    :param dataset: The dataset.
+    :param camera_matrix: The camera matrix to use.
+    """
+    camera_matrix_backup = dataset.camera_matrix.copy()
+
+    try:
+        dataset.camera_matrix = camera_matrix
+
+        yield
+    finally:
+        dataset.camera_matrix = camera_matrix_backup
 
 
 class Latex:
@@ -463,7 +482,7 @@ class LLFFExperiment:
 
     @classmethod
     def compare_renders(cls, data_folder: str, dataset_name: str, output_folder: str, results_folder: str,
-                        frame_index: int = 0,
+                        frame_index: int, lpips_fn: LPIPS,
                         no_cache: bool = False):
         logging.info(f"Running experiment for {dataset_name}...")
 
@@ -496,59 +515,75 @@ class LLFFExperiment:
                             storage_options=StorageOptions(dataset_path=dataset_path,
                                                            output_path=converted_dataset_path))
 
+        camera_matrix = dataset_adaptor.camera_matrix
+
         fg_mesh = pipeline.process_frame(dataset, index=frame_index)
         bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
-        logging.debug(f"Gathering frame data and camera parameters...")
-        camera_matrix = dataset_adaptor.camera_matrix
+        kinect_camera_matrix = KinectSensor.get_camera_matrix()
 
-        lpips_fn = LPIPS(net='alex')
+        with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
+            fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index)
+            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        mesh_data = (
+            ("monocular", camera_matrix, fg_mesh, bg_mesh),
+            ("multicam", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
+        )
+
+        logging.debug(f"Gathering frame data and camera parameters...")
+        metrics = []
 
         for camera_feed in dataset_adaptor.video_indices:
             label = f"cam{camera_feed:02d}"
             logging.info(f"Running comparison for {label} in {results_folder}...")
 
-            # This rotation corrects for the rotation applied for viewing in the web-based renderer.
-            # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
-            rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
-            pose_norm = rotation @ pose_vec2mat(dataset_adaptor.get_pose(index=0, camera_feed=camera_feed))
+            frame = dataset_adaptor.get_frame(index=frame_index, camera_feed=camera_feed)
 
-            camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
-            scene = pyrender.Scene()
-            scene.add(pyrender.Mesh.from_trimesh(fg_mesh))
-            scene.add(pyrender.Mesh.from_trimesh(bg_mesh))
-            scene.add(camera, pose=np.linalg.inv(pose_norm))
-            renderer = pyrender.OffscreenRenderer(camera_matrix.width, camera_matrix.height)
-
-            color, depth = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
-            renderer.delete()
-            color = Image.fromarray(color)
-            depth_max = depth.max()
-            normalised_depth = (depth / depth_max) if depth_max > 0. else depth
-            depth = Image.fromarray((normalised_depth * 255).astype(np.uint8))
-
-            screen_capture_path = os.path.join(results_folder, f"{label}_render.jpg")
-            color.save(screen_capture_path)
-            logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
-
-            screen_capture_path = os.path.join(results_folder, f"{label}_render.png")
-            depth.save(screen_capture_path)
-            logging.debug(f"Wrote screen capture (depth) to {screen_capture_path}.")
-
-            frame = dataset_adaptor.get_frame(index=0, camera_feed=camera_feed)
-
-            frame_path = os.path.join(results_folder, f"{label}.png")
+            frame_path = os.path.join(results_folder, f"{label}.jpg")
             Image.fromarray(frame).save(frame_path)
             logging.debug(f"Wrote frame data to {frame_path}.")
 
-            ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
-            metrics = {'ssim': ssim, 'psnr': psnr, 'lpips': lpips}
+            for pose_type, intrinsic, *meshes in mesh_data:
+                logging.info(f"{pose_type} pose data...")
+                color = cls.render_mesh(intrinsic, dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_feed),
+                                        *meshes)
 
-            metrics_path = os.path.join(results_folder, f"{label}.json")
+                screen_capture_path = os.path.join(results_folder, f"{label}_{pose_type}.jpg")
+                color.save(screen_capture_path)
+                logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
 
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f)
-                logging.debug(f"Wrote metrics to {metrics_path}.")
+                ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
+                metrics.append({'camera_feed': camera_feed, 'pose_type': pose_type,
+                                'ssim': ssim, 'psnr': psnr, 'lpips': lpips})
+
+        metrics_path = os.path.join(results_folder, f"metrics.json")
+
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f)
+            logging.debug(f"Wrote metrics to {metrics_path}.")
+
+    @classmethod
+    def render_mesh(cls, camera_matrix: CameraMatrix, camera_pose: np.ndarray, *meshes: trimesh.Trimesh):
+        # This rotation corrects for the rotation applied for viewing in the web-based renderer.
+        # rotation = trimesh.transformations.rotation_matrix(angle=math.pi, direction=[1, 0, 0])
+        rotation = np.diag([1., -1., -1., 1.])  # Converts from COLMAP [x -y, -z] to right-handed [x, y, z].
+        pose_norm = rotation @ pose_vec2mat(camera_pose)
+
+        camera = pyrender.PerspectiveCamera(yfov=camera_matrix.fov_y, aspectRatio=camera_matrix.aspect_ratio)
+        scene = pyrender.Scene()
+
+        for mesh in meshes:
+            scene.add(pyrender.Mesh.from_trimesh(mesh))
+
+        scene.add(camera, pose=np.linalg.inv(pose_norm))
+        renderer = pyrender.OffscreenRenderer(camera_matrix.width, camera_matrix.height)
+
+        color, _ = renderer.render(scene, flags=pyrender.constants.RenderFlags.FLAT)
+        color = Image.fromarray(color)
+        renderer.delete()
+
+        return color
 
 
 # TODO: Pull out each experiment type into own class.
@@ -1668,6 +1703,9 @@ class Experiments:
         logging.info(f"Exported inpainting latex table to {latex_path}.")
 
     def run_llff_experiments(self, dataset_names: List[str]):
+
+        lpips_fn = LPIPS(net='alex')
+
         for dataset_name in dataset_names:
             results_path = os.path.join(self.output_path, 'llff', dataset_name)
 
@@ -1682,6 +1720,7 @@ class Experiments:
                                            output_folder=os.path.join(self.output_path, 'converted_dataset'),
                                            results_folder=results_path,
                                            frame_index=0,
+                                           lpips_fn=lpips_fn,
                                            no_cache=self.overwrite_ok)
 
     def export_llff_results(self):
