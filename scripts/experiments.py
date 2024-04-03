@@ -198,6 +198,26 @@ def temporary_camera_matrix(dataset: HiveDataset, camera_matrix: np.ndarray):
         dataset.camera_matrix = camera_matrix_backup
 
 
+@contextmanager
+def disable_inpainted_data(dataset: HiveDataset):
+    """
+    Context manager that temporarily disables the inpainted data of a dataset.
+
+    :param dataset: The dataset.
+    """
+    inpainted_rgb_dataset_backup = dataset.inpainted_rgb_dataset
+    inpainted_depth_dataset_backup = dataset.inpainted_depth_dataset
+
+    try:
+        dataset.inpainted_rgb_dataset = None
+        dataset.inpainted_depth_dataset = None
+
+        yield
+    finally:
+        dataset.inpainted_rgb_dataset = inpainted_rgb_dataset_backup
+        dataset.inpainted_depth_dataset = inpainted_depth_dataset_backup
+
+
 class Latex:
 
     @staticmethod
@@ -526,9 +546,14 @@ class LLFFExperiment:
             fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index)
             bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
-        mesh_data = (
-            ("monocular", camera_matrix, fg_mesh, bg_mesh),
-            ("multicam", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
+        with disable_inpainted_data(dataset), temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
+            fg_mesh_no_inpainted = pipeline.process_frame(dataset, index=frame_index)
+            bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        configurations = (
+            ("multicam", camera_matrix, fg_mesh, bg_mesh),
+            ("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect),
+            ("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted),
         )
 
         logging.debug(f"Gathering frame data and camera parameters...")
@@ -544,13 +569,13 @@ class LLFFExperiment:
             Image.fromarray(frame).save(frame_path)
             logging.debug(f"Wrote frame data to {frame_path}.")
 
-            for pose_type, intrinsic, *meshes in mesh_data:
-                logging.info(f"{pose_type} pose data...")
+            for config, intrinsic, *meshes in configurations:
+                logging.info(f"{config} config...")
                 color = cls.render_mesh(intrinsic, dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_feed),
                                         *meshes)
                 color_np = np.asarray(color)
 
-                screen_capture_path = os.path.join(results_folder, f"{label}_{pose_type}.jpg")
+                screen_capture_path = os.path.join(results_folder, f"{label}_{config}.jpg")
                 color.save(screen_capture_path)
                 logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
 
@@ -560,7 +585,7 @@ class LLFFExperiment:
                 masked_frame[color_np == [255, 255, 255]] = 255
                 ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
 
-                metrics.append({'camera_feed': camera_feed, 'pose_type': pose_type,
+                metrics.append({'camera_feed': camera_feed, 'config': config,
                                 'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
                                 'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
 
