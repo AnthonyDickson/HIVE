@@ -548,14 +548,21 @@ class LLFFExperiment:
                 logging.info(f"{pose_type} pose data...")
                 color = cls.render_mesh(intrinsic, dataset_adaptor.get_pose(index=frame_index, camera_feed=camera_feed),
                                         *meshes)
+                color_np = np.asarray(color)
 
                 screen_capture_path = os.path.join(results_folder, f"{label}_{pose_type}.jpg")
                 color.save(screen_capture_path)
                 logging.debug(f"Wrote screen capture (color) to {screen_capture_path}.")
 
-                ssim, psnr, lpips = compare_images(frame, np.asarray(color), lpips_fn=lpips_fn)
+                ssim, psnr, lpips = compare_images(frame, color_np, lpips_fn=lpips_fn)
+
+                masked_frame = frame.copy()
+                masked_frame[color_np == [255, 255, 255]] = 255
+                ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
+
                 metrics.append({'camera_feed': camera_feed, 'pose_type': pose_type,
-                                'ssim': ssim, 'psnr': psnr, 'lpips': lpips})
+                                'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
+                                'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
 
         metrics_path = os.path.join(results_folder, f"metrics.json")
 
