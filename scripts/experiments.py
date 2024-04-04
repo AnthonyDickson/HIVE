@@ -778,6 +778,7 @@ class DynamicScenesExperiments:
     pp. 5712-5721. 2021. (https://github.com/gaochen315/DynamicNeRF).
     """
     url = "https://filebox.ece.vt.edu/~chengao/free-view-video/data.zip"
+    zip_filename = "data.zip"
 
     sequence_names = [
         'Balloon1',
@@ -788,6 +789,39 @@ class DynamicScenesExperiments:
         'Truck',
         'Umbrella',
     ]
+
+    @classmethod
+    def fetch_dataset(cls, data_folder: str, sequence_names: List[str]):
+        for sequence_name in sequence_names:
+            if not os.path.isdir(os.path.join(data_folder, sequence_name)):
+                break
+        else:
+            return
+
+        try:
+            logging.info(f"Downloading Dynamic Scenes Dataset from {cls.url}...")
+            zip_path = os.path.join(data_folder, cls.zip_filename)
+
+            if not os.path.isfile(zip_path):
+                urllib.request.urlretrieve(cls.url, zip_path)
+
+            logging.debug(f"Extracting zip file...")
+
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                archive.extractall(data_folder)
+
+            # data.zip has the first subdirectory 'data'
+            extracted_path = os.path.join(data_folder, 'data')
+
+            for sequence_name in os.listdir(extracted_path):
+                shutil.move(src=os.path.join(extracted_path, sequence_name),
+                            dst=os.path.join(data_folder, sequence_name))
+
+            os.rmdir(extracted_path)
+
+            logging.info(f"Downloaded dataset and extracted to {data_folder}.")
+        except Exception:
+            raise FileNotFoundError(f"Could not find dataset at {data_folder} or automatically download it.")
 
 
 class HyperNeRFExperiments:
@@ -1947,7 +1981,7 @@ class Experiments:
         LLFFExperiment.export_latex(results_records, summary_path=self.summaries_path, latex_path=self.latex_path)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_path', help='The path to save the experiment outputs and results to.',
                         required=True, type=str)
@@ -1991,4 +2025,8 @@ if __name__ == '__main__':
         experiments.run_inpainting_experiments()
         experiments.export_inpainting_results()
 
-        experiments.run_llff_experiments(LLFFExperiment.sequence_names)
+        DynamicScenesExperiments.fetch_dataset(experiments.data_path, DynamicScenesExperiments.sequence_names)
+
+
+if __name__ == '__main__':
+    main()
