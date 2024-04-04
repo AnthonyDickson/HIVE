@@ -413,7 +413,25 @@ class InpaintingExperiment:
 
 
 class LLFFExperiment:
+    """
+    Dataset from Li, Tianye, Mira Slavcheva, Michael Zollhoefer, Simon Green, Christoph Lassner, Changil Kim,
+    Tanner Schmidt et al. "Neural 3d video synthesis from multi-view video." In Proceedings of the IEEE/CVF Conference
+    on Computer Vision and Pattern Recognition, pp. 5521-5531. 2022.
+
+    Uses dataset format of Mildenhall, Ben, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari,
+    Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. "Local light field fusion: Practical view synthesis with prescriptive
+    sampling guidelines." ACM Transactions on Graphics (TOG) 38, no. 4 (2019): 1-14.
+    """
     dataset_results_filename = 'metrics.json'
+    url_format = "https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{}"
+    sequence_names = [
+        'coffee_martini',
+        'cook_spinach',
+        'cut_roasted_beef',
+        'flame_steak',
+        'sear_steak',
+        'flame_salmon_1'
+    ]
 
     @classmethod
     def fetch_dataset(cls, data_folder: str, dataset_name: str):
@@ -440,7 +458,7 @@ class LLFFExperiment:
                         if os.path.isfile(zip_part_path):
                             continue
 
-                        url = f"https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{zip_part_filename}"
+                        url = cls.url_format.format(zip_part_filename)
                         logging.debug(f"Downloading zip part from {url}...")
                         urllib.request.urlretrieve(url, zip_part_path)
 
@@ -452,7 +470,7 @@ class LLFFExperiment:
                     for zip_part_filename in zip_part_filenames:
                         os.remove(os.path.join(data_folder, zip_part_filename))
                 elif not os.path.isfile(zip_path):
-                    url = f"https://github.com/facebookresearch/Neural_3D_Video/releases/download/v1.0/{zip_filename}"
+                    url = cls.url_format.format(zip_filename)
                     urllib.request.urlretrieve(url, zip_path)
 
                 logging.debug(f"Extracting zip file...")
@@ -584,15 +602,15 @@ class LLFFExperiment:
         return cls.Config("compression", kinect_config.camera_matrix, fg_mesh_draco, bg_mesh_draco)
 
     @classmethod
-    def compare_renders(cls, data_folder: str, dataset_name: str, output_folder: str, results_folder: str,
+    def compare_renders(cls, data_folder: str, sequence_name: str, output_folder: str, results_folder: str,
                         frame_index: int, lpips_fn: LPIPS,
                         no_cache: bool = False):
-        logging.info(f"Running experiment for {dataset_name}...")
+        logging.info(f"Running experiment for {sequence_name}...")
 
-        dataset_path = os.path.join(data_folder, dataset_name)
-        converted_dataset_path = os.path.join(output_folder, dataset_name)
+        dataset_path = os.path.join(data_folder, sequence_name)
+        converted_dataset_path = os.path.join(output_folder, sequence_name)
 
-        cls.fetch_dataset(data_folder=data_folder, dataset_name=dataset_name)
+        cls.fetch_dataset(data_folder=data_folder, dataset_name=sequence_name)
 
         logging.debug(f"Creating mesh data...")
         # TODO: Get config from `Experiments` object.
@@ -659,7 +677,7 @@ class LLFFExperiment:
                 masked_frame[color_np == [255, 255, 255]] = 255
                 ssim_masked, psnr_masked, lpips_masked = compare_images(masked_frame, color_np, lpips_fn=lpips_fn)
 
-                results.append(cls.RenderResult(dataset_name, camera_feed, config.name,
+                results.append(cls.RenderResult(sequence_name, camera_feed, config.name,
                                                 ssim, psnr, lpips,
                                                 ssim_masked, psnr_masked, lpips_masked))
 
@@ -751,6 +769,41 @@ class LLFFExperiment:
 
         logging.info(f"Exporting latex to {latex_path}...")
         df_merged.to_latex(latex_path, float_format="%.2f")
+
+
+class DynamicScenesExperiments:
+    """
+    Dataset from Gao, Chen, Ayush Saraf, Johannes Kopf, and Jia-Bin Huang. "Dynamic view
+    synthesis from dynamic monocular video." In Proceedings of the IEEE/CVF International Conference on Computer Vision,
+    pp. 5712-5721. 2021. (https://github.com/gaochen315/DynamicNeRF).
+    """
+    url = "https://filebox.ece.vt.edu/~chengao/free-view-video/data.zip"
+
+    sequence_names = [
+        'Balloon1',
+        'Balloon2',
+        'Jumping',
+        'Playground',
+        'Skating',
+        'Truck',
+        'Umbrella',
+    ]
+
+
+class HyperNeRFExperiments:
+    """
+    Uses dataset from Park, Keunhong, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman,
+    Ricardo Martin-Brualla, and Steven M. Seitz. "Hypernerf: A higher-dimensional representation for topologically
+    varying neural radiance fields." arXiv preprint arXiv:2106.13228 (2021).
+    """
+    url_format = "https://github.com/google/hypernerf/releases/download/v0.1/{}.zip"
+
+    sequence_names = [
+        'vrig_3dprinter',
+        'vrig_broom',
+        'vrig_chicken',
+        'vrig_peel-banana',
+    ]
 
 
 # TODO: Pull out each experiment type into own class.
@@ -950,7 +1003,7 @@ class Experiments:
                 }
                 for label in self.labels
             }
-            for dataset_name in dataset_names
+            for dataset_name in self.dataset_names
         }
 
         file_statistics_by_layer = {
@@ -1795,7 +1848,7 @@ class Experiments:
                 }
                 for label in (self.gt_label, self.est_label)
             }
-            for dataset_name in dataset_names
+            for dataset_name in self.dataset_names
         }
 
         average_by_label = {
@@ -1869,21 +1922,21 @@ class Experiments:
 
         logging.info(f"Exported inpainting latex table to {latex_path}.")
 
-    def run_llff_experiments(self, dataset_names: List[str]):
+    def run_llff_experiments(self, sequence_names: List[str]):
         llff_folder = os.path.join(self.output_path, 'llff')
         lpips_fn = LPIPS(net='alex')
 
-        for dataset_name in dataset_names:
-            results_path = os.path.join(llff_folder, dataset_name)
+        for sequence_name in sequence_names:
+            results_path = os.path.join(llff_folder, sequence_name)
 
             if not self.overwrite_ok and os.path.isdir(results_path) and len(os.listdir(results_path)) > 0:
-                logging.info(f"Cached results found for {dataset_name} in {results_path}, skipping...")
+                logging.info(f"Cached results found for {sequence_name} in {results_path}, skipping...")
                 continue
 
             os.makedirs(results_path, exist_ok=True)
 
             LLFFExperiment.compare_renders(data_folder=self.data_path,
-                                           dataset_name=dataset_name,
+                                           sequence_name=sequence_name,
                                            output_folder=os.path.join(self.output_path, 'converted_dataset'),
                                            results_folder=results_path,
                                            frame_index=0,
@@ -1917,15 +1970,6 @@ if __name__ == '__main__':
                      'garden',
                      'small_tree']
 
-    n3dv_dataset_names = [
-        'coffee_martini',
-        'cook_spinach',
-        'cut_roasted_beef',
-        'flame_steak',
-        'sear_steak',
-        'flame_salmon_1'
-    ]
-
     experiments = Experiments(output_path=args.output_path, data_path=args.data_path,
                               overwrite_ok=args.overwrite_ok,
                               dataset_names=dataset_names,
@@ -1947,4 +1991,4 @@ if __name__ == '__main__':
         experiments.run_inpainting_experiments()
         experiments.export_inpainting_results()
 
-        experiments.run_llff_experiments(n3dv_dataset_names)
+        experiments.run_llff_experiments(LLFFExperiment.sequence_names)
