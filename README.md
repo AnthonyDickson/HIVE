@@ -201,7 +201,7 @@ This program accepts datasets in three formats:
 - RGB Video
 - The HIVE dataset format (see [HIVE Dataset Format](#hive-dataset-format))
 
-The above datasets are automatically converted to the VTM format.
+The above datasets are automatically converted to the HIVE dataset format.
 
 ## Output Format
 Each 3D video is saved to a folder with the glTF formatted mesh files and JSON metadata:
