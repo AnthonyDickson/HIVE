@@ -17,6 +17,8 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+from pathlib import Path
+
 import numpy as np
 import os
 import re
@@ -278,11 +280,6 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
     if num_frames == -1:
         num_frames = dataset.num_frames
 
-    if dataset.has_inpainted_frame_data:
-        # TODO: Make Bundle Fusion capable of using the inpainted frame data.
-        logging.warning("The dataset has inpainted frame data available, "
-                        "but Bundle Fusion is only set up to use the original frame data.")
-
     bundle_fusion_path = get_bundle_fusion_path()
 
     logging.info("Creating masked depth maps for BundleFusion...")
@@ -313,7 +310,7 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
     bundling_config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionBundlingConfig.txt')
     bundling_config.save(bundling_config_output_path)
     cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
-           dataset_path, dataset.masked_depth_folder]
+           dataset_path, Path(dataset.bg_rgb_dataset.base_dir).stem, dataset.masked_depth_folder]
     log_path = pjoin(bundle_fusion_output_path, 'log.txt')
     logging.info(f"Running BundleFusion with command '{' '.join(cmd)}'")
 

@@ -527,6 +527,25 @@ class LLFFExperiment:
         return cls.Config("cc_analysis", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
 
     @classmethod
+    def _get_bundlefusion_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int,
+                                 mesh_options=BackgroundMeshOptions(), num_frames=-1) -> Config:
+        kinect_camera_matrix = KinectSensor.get_camera_matrix()
+
+        with (temporary_camera_matrix(dataset, kinect_camera_matrix.matrix)):
+            fg_mesh = pipeline.process_frame(dataset, index=frame_index)
+
+            try:
+                bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=mesh_options,
+                                        num_frames=num_frames)
+                x_reflection = np.diag([-1., 1., 1., 1.])
+                bf_mesh.apply_transform(x_reflection)
+            except RuntimeError as e:
+                logging.warning(f"Encountered error while running BundleFusion: {e}\nUsing empty mesh.")
+                bf_mesh = trimesh.Trimesh()
+
+        return cls.Config("bundlefusion", kinect_camera_matrix, fg_mesh, bf_mesh)
+
+    @classmethod
     def _get_no_inpainting_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int) -> Config:
         kinect_camera_matrix = KinectSensor.get_camera_matrix()
 
@@ -606,6 +625,8 @@ class LLFFExperiment:
         configurations = (
             cls._get_multicam_config(dataset_adaptor, dataset, pipeline, frame_index),
             kinect_config,
+            # TODO: For BundleFusion config, apply automatic adjustment of voxel size a la TSDF Fusion.
+            cls._get_bundlefusion_config(dataset, pipeline, frame_index),
             cls._get_cc_analysis_config(dataset, pipeline, frame_index),
             cls._get_no_inpainting_config(dataset, pipeline, frame_index),
             cls._get_draco_config(output_folder, kinect_config),
@@ -662,6 +683,9 @@ class LLFFExperiment:
         scene = pyrender.Scene()
 
         for mesh in meshes:
+            if mesh.is_empty:  # This may happen for the bundlefusion config if BundleFusion fails.
+                continue
+
             scene.add(pyrender.Mesh.from_trimesh(mesh))
 
         scene.add(camera, pose=np.linalg.inv(pose_norm))
