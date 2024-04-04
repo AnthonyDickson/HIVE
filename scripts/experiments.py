@@ -517,6 +517,16 @@ class LLFFExperiment:
         return cls.Config("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
 
     @classmethod
+    def _get_cc_analysis_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int) -> Config:
+        kinect_camera_matrix = KinectSensor.get_camera_matrix()
+
+        with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
+            fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index, enable_cc_analysis=False)
+            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+
+        return cls.Config("cc_analysis", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
+
+    @classmethod
     def _get_no_inpainting_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int) -> Config:
         kinect_camera_matrix = KinectSensor.get_camera_matrix()
 
@@ -596,6 +606,7 @@ class LLFFExperiment:
         configurations = (
             cls._get_multicam_config(dataset_adaptor, dataset, pipeline, frame_index),
             kinect_config,
+            cls._get_cc_analysis_config(dataset, pipeline, frame_index),
             cls._get_no_inpainting_config(dataset, pipeline, frame_index),
             cls._get_draco_config(output_folder, kinect_config),
         )

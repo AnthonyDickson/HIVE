@@ -489,7 +489,8 @@ class Pipeline:
 
         return scene
 
-    def process_frame(self, dataset: HiveDataset, index: int, background_only=False, include_background=False) -> trimesh.Trimesh:
+    def process_frame(self, dataset: HiveDataset, index: int, background_only=False, include_background=False,
+                      enable_cc_analysis=True) -> trimesh.Trimesh:
         """
         Process a single frame from a dataset.
 
@@ -501,6 +502,7 @@ class Pipeline:
         :param background_only: Whether to include only the background (i.e., ignore foreground elements).
         :param include_background: Whether to include the background in the mesh. If `False`, only dynamic foreground
             elements are included.
+        :param enable_cc_analysis: Whether to filter out floaters with connected component analysis.
         :return: A textured triangle mesh.
         """
         if background_only:
@@ -577,10 +579,11 @@ class Pipeline:
                               f"due to insufficient number of faces ({len(faces)}).")
                 continue
 
-            vertices, faces = self._cleanup_with_connected_components(
-                vertices, faces, is_object,
-                min_components=self.filtering_options.min_num_components
-            )
+            if enable_cc_analysis:
+                vertices, faces = self._cleanup_with_connected_components(
+                    vertices, faces, is_object,
+                    min_components=self.filtering_options.min_num_components
+                )
 
             if is_object and self.options.billboard:
                 camera_space_points = rotation @ (vertices.T + translation)
