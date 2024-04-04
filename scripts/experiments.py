@@ -537,8 +537,6 @@ class LLFFExperiment:
             try:
                 bf_mesh = bundle_fusion(output_folder='bundle_fusion', dataset=dataset, options=mesh_options,
                                         num_frames=num_frames)
-                x_reflection = np.diag([-1., 1., 1., 1.])
-                bf_mesh.apply_transform(x_reflection)
             except RuntimeError as e:
                 logging.warning(f"Encountered error while running BundleFusion: {e}\nUsing empty mesh.")
                 bf_mesh = trimesh.Trimesh()
@@ -625,7 +623,6 @@ class LLFFExperiment:
         configurations = (
             cls._get_multicam_config(dataset_adaptor, dataset, pipeline, frame_index),
             kinect_config,
-            # TODO: For BundleFusion config, apply automatic adjustment of voxel size a la TSDF Fusion.
             cls._get_bundlefusion_config(dataset, pipeline, frame_index),
             cls._get_cc_analysis_config(dataset, pipeline, frame_index),
             cls._get_no_inpainting_config(dataset, pipeline, frame_index),

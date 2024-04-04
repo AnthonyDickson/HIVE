@@ -17,17 +17,16 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
-from pathlib import Path
-
-import numpy as np
 import os
 import re
 import subprocess
-import trimesh
 from collections import OrderedDict
 from os.path import join as pjoin
+from typing import Optional, List, Tuple
+
+import numpy as np
+import trimesh
 from tqdm import tqdm
-from typing import Optional, List
 
 from hive.image_processing import dilate_mask
 from hive.io import HiveDataset
@@ -35,31 +34,18 @@ from hive.options import BackgroundMeshOptions, MaskDilationOptions, MeshReconst
 from third_party.tsdf_fusion_python import fusion
 
 
-def tsdf_fusion(dataset: HiveDataset, options=BackgroundMeshOptions(), num_frames=-1,
-                frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+def adjust_voxel_size(dataset: HiveDataset, options: BackgroundMeshOptions, frame_set: List[int]) \
+        -> Tuple[float, np.ndarray]:
     """
-    Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
-     http://3dmatch.cs.princeton.edu).
+    Calculate the scene bounds and adjust voxel size to keep within specified budget.
 
-    :param dataset: The dataset to reconstruct the mesh from.
-    :param options: The configuration for the voxel volume and depth map mask dilation.
-    :param num_frames: (optional) Limits the number of frames used for the reconstruction.
-        If set to -1, all frames from the dataset will be used.
-    :param frame_set: (optional) Specify which frames to include in the reconstruction.
-    :return: The reconstructed textured triangle mesh.
+    :param dataset: An RGB-D Dataset with known camera parameters.
+    :param options: The options object that contains variables for the voxel size and max voxel count.
+    :param frame_set: The set of frames to calculate the scene bounds from.
+    :return: A 2-tuple containing the recommended voxel size and the scene bounds.
     """
-    if num_frames == -1:
-        num_frames = dataset.num_frames
-
-    if frame_set is None:
-        frame_set = range(num_frames)
-
     logging.info("Estimating voxel volume bounds...")
     vol_bnds = np.zeros((3, 2))
-
-    # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
-    # (this typically results in floating fragments in the static mesh.)
-    mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
 
     # Need to take inverse since poses are world-to-cam, but TSDFFusion appears to expect cam-to-world poses.
     camera_trajectory = dataset.camera_trajectory.inverse().to_homogenous_transforms()
@@ -87,12 +73,42 @@ def tsdf_fusion(dataset: HiveDataset, options=BackgroundMeshOptions(), num_frame
     else:
         voxel_size = options.sdf_voxel_size
 
+    return voxel_size, vol_bnds
+
+
+def tsdf_fusion(dataset: HiveDataset, options=BackgroundMeshOptions(), num_frames=-1,
+                frame_set: Optional[List[int]] = None) -> trimesh.Trimesh:
+    """
+    Run the TSDFFusion 3D reconstruction algorithm on a dataset (https://github.com/andyzeng/tsdf-fusion-python,
+     http://3dmatch.cs.princeton.edu).
+
+    :param dataset: The dataset to reconstruct the mesh from.
+    :param options: The configuration for the voxel volume and depth map mask dilation.
+    :param num_frames: (optional) Limits the number of frames used for the reconstruction.
+        If set to -1, all frames from the dataset will be used.
+    :param frame_set: (optional) Specify which frames to include in the reconstruction.
+    :return: The reconstructed textured triangle mesh.
+    """
+    if num_frames == -1:
+        num_frames = dataset.num_frames
+
+    if frame_set is None:
+        frame_set = range(num_frames)
+
+    # Dilate (increase size) of masks so that parts of the dynamic objects are not included in the final mesh
+    # (this typically results in floating fragments in the static mesh.)
+    mask_dilation_options = MaskDilationOptions(num_iterations=options.depth_mask_dilation_iterations)
+
+    voxel_size, volume_bounds = adjust_voxel_size(dataset=dataset, options=options, frame_set=frame_set)
     logging.info("Initializing voxel volume...")
-    tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=voxel_size)
+    tsdf_vol = fusion.TSDFVolume(volume_bounds, voxel_size=voxel_size)
 
     logging.info("Fusing frames...")
 
     has_inpainted_frame_data = dataset.has_inpainted_frame_data
+
+    # Need to take inverse since poses are world-to-cam, but TSDFFusion appears to expect cam-to-world poses.
+    camera_trajectory = dataset.camera_trajectory.inverse().to_homogenous_transforms()
 
     for i in tqdm(frame_set):
         color_image = dataset.bg_rgb_dataset[i]
@@ -280,6 +296,8 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
     if num_frames == -1:
         num_frames = dataset.num_frames
 
+    frame_set = list(range(num_frames))
+
     bundle_fusion_path = get_bundle_fusion_path()
 
     logging.info("Creating masked depth maps for BundleFusion...")
@@ -288,11 +306,14 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
     bundle_fusion_output_path = pjoin(dataset_path, output_folder)
     os.makedirs(bundle_fusion_output_path, exist_ok=True)
 
+    voxel_size, volume_bounds = adjust_voxel_size(dataset=dataset, options=options, frame_set=frame_set)
+    max_distance = np.ceil(np.max(volume_bounds[:, 1] - volume_bounds[:, 0]))
+
     logging.info("Configuring BundleFusion...")
     default_config_path = pjoin(bundle_fusion_path, 'zParametersDefault.txt')
     config = BundleFusionConfig.load(default_config_path)
-    config['s_SDFMaxIntegrationDistance'] = options.sdf_volume_size
-    config['s_SDFVoxelSize'] = options.sdf_voxel_size
+    config['s_SDFMaxIntegrationDistance'] = float(max_distance)
+    config['s_SDFVoxelSize'] = float(voxel_size)
     config['s_cameraIntrinsicFx'] = int(dataset.fx)
     config['s_cameraIntrinsicFy'] = int(dataset.fy)
     config['s_cameraIntrinsicCx'] = int(dataset.cx)
@@ -309,8 +330,16 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
     bundling_config['s_maxNumImages'] = (num_frames + submap_size) // submap_size
     bundling_config_output_path = pjoin(bundle_fusion_output_path, 'bundleFusionBundlingConfig.txt')
     bundling_config.save(bundling_config_output_path)
+
+    if dataset.has_inpainted_frame_data:
+        rgb_folder = dataset.inpainted_rgb_folder
+        depth_folder = dataset.inpainted_depth_folder
+    else:
+        rgb_folder = dataset.rgb_folder
+        depth_folder = dataset.masked_depth_folder
+
     cmd = [bundle_fusion_bin, config_output_path, bundling_config_output_path,
-           dataset_path, Path(dataset.bg_rgb_dataset.base_dir).stem, dataset.masked_depth_folder]
+           dataset_path, rgb_folder, depth_folder]
     log_path = pjoin(bundle_fusion_output_path, 'log.txt')
     logging.info(f"Running BundleFusion with command '{' '.join(cmd)}'")
 
@@ -332,5 +361,9 @@ def bundle_fusion(output_folder: str, dataset: HiveDataset,
 
     with open(mesh_path, 'rb') as mesh_file:
         mesh = trimesh.load(mesh_file, file_type='ply')
+
+    # For whatever reason, mesh data from BundleFusion is reflected along the x-axis, so we reflect it back to normal.
+    x_reflection = np.diag([-1., 1., 1., 1.])
+    mesh.apply_transform(x_reflection)
 
     return mesh
