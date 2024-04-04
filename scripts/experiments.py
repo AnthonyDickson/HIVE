@@ -524,7 +524,7 @@ class LLFFExperiment:
             fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index, enable_cc_analysis=False)
             bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
 
-        return cls.Config("cc_analysis", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
+        return cls.Config("no_cc_analysis", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
 
     @classmethod
     def _get_bundlefusion_config(cls, dataset: HiveDataset, pipeline: Pipeline, frame_index: int,
@@ -554,7 +554,7 @@ class LLFFExperiment:
         return cls.Config("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted)
 
     @classmethod
-    def _get_draco_config(cls, output_folder: str, kinect_config: Config) -> Config:
+    def _get_compression_config(cls, output_folder: str, kinect_config: Config) -> Config:
         def save_draco(mesh: trimesh.Trimesh, path: str) -> str:
             # noinspection PyUnresolvedReferences
             if isinstance(mesh.visual, trimesh.visual.TextureVisuals):
@@ -581,7 +581,7 @@ class LLFFExperiment:
 
         os.remove(temp_mesh_path)
 
-        return cls.Config("draco", kinect_config.camera_matrix, fg_mesh_draco, bg_mesh_draco)
+        return cls.Config("compression", kinect_config.camera_matrix, fg_mesh_draco, bg_mesh_draco)
 
     @classmethod
     def compare_renders(cls, data_folder: str, dataset_name: str, output_folder: str, results_folder: str,
@@ -626,7 +626,7 @@ class LLFFExperiment:
             cls._get_bundlefusion_config(dataset, pipeline, frame_index),
             cls._get_cc_analysis_config(dataset, pipeline, frame_index),
             cls._get_no_inpainting_config(dataset, pipeline, frame_index),
-            cls._get_draco_config(output_folder, kinect_config),
+            cls._get_compression_config(output_folder, kinect_config),
         )
 
         logging.debug(f"Gathering frame data and camera parameters...")
@@ -722,18 +722,35 @@ class LLFFExperiment:
         logging.info(f"Exporting summary to {summary_path}...")
         df.to_json(summary_path, orient='records')
 
-        df['camera_feed'] = np.where(df['camera_feed'] == 0, '00', '01-20')
-        df = df.drop(['dataset'], axis='columns').groupby(by=['config', 'camera_feed']).mean()
-        df_not_masked = df.drop(['ssim_masked', 'psnr_masked', 'lpips_masked'], axis='columns')
+        df.columns = df.columns.str.replace('_', ' ')
+        df['config'] = df['config'].str.replace('_', ' ')
+        df = df.drop(['dataset'], axis='columns')
+        df['camera feed'] = np.where(df['camera feed'] == 0, '00', '01-20')
+
+        df_not_masked = df.drop(['ssim masked', 'psnr masked', 'lpips masked'], axis='columns')
         df_masked = df.drop(['ssim', 'psnr', 'lpips'], axis='columns')
+        df_masked['camera feed'] = df_masked['camera feed'].str.replace('01-20', r'01-20$^\dagger$')
+        df_masked.columns = df_masked.columns.str.replace(' masked', '')
 
-        not_masked_latex_path = os.path.join(latex_path, 'llff.tex')
-        masked_latex_path = os.path.join(latex_path, 'llff_masked.tex')
+        df_not_masked = df_not_masked.groupby(by=['config', 'camera feed']).mean()
+        df_masked = df_masked.groupby(by=['config', 'camera feed']).mean()
+        df_masked = df_masked.drop('00', level='camera feed')
 
-        logging.info(f"Exporting latex to {not_masked_latex_path}...")
-        df_not_masked.to_latex(not_masked_latex_path, float_format="%.2f")
-        logging.info(f"Exporting latex to {masked_latex_path}...")
-        df_masked.to_latex(masked_latex_path, float_format="%.2f")
+        df_merged = pd.concat((df_not_masked, df_masked), axis='rows').sort_index(axis=0)
+        config_order = ['multicam', 'monocular', 'bundlefusion', 'compression', 'no cc analysis', 'no inpainting']
+        camera_order = ['00', '01-20', r'01-20$^\dagger$']
+        df_merged = df_merged.reindex(config_order, level='config').reindex(camera_order, level='camera feed')
+        df_merged.index = df_merged.index.rename(['Config', 'Camera Feed'])
+        df_merged.index = df_merged.index.set_levels(
+            ['Multicam', 'Monocular', 'BundleFusion', 'Compression', 'No CC Analysis', 'No Inpainting'],
+            level='Config'
+        )
+        df_merged = df_merged.rename(str.upper, axis='columns')
+
+        latex_path = os.path.join(latex_path, 'llff.tex')
+
+        logging.info(f"Exporting latex to {latex_path}...")
+        df_merged.to_latex(latex_path, float_format="%.2f")
 
 
 # TODO: Pull out each experiment type into own class.
