@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Tuple, Dict, Optional, List, Union, Callable
 
 import cv2
+import imageio.v3
 import numpy as np
 import pandas as pd
 import pyrender
@@ -46,7 +47,7 @@ from torch.utils.data.dataloader import default_collate
 from hive.custom_types import File, Size
 from hive.dataset_adaptors import VideoAdaptorBase, estimate_depth_dpt, DatasetAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
-from hive.geometric import Trajectory, pose_vec2mat, CameraMatrix
+from hive.geometric import Trajectory, pose_vec2mat, CameraMatrix, pose_mat2vec
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata, COLMAPProcessor, ImageFolderDataset
 from hive.options import BackgroundMeshOptions, PipelineOptions, StorageOptions, InpaintingMode, COLMAPOptions, \
     WebXROptions
@@ -1003,11 +1004,37 @@ class HyperNeRFCamera:
 
     @property
     def width(self) -> int:
-        return self.image_size[0]
+        return int(self.image_size[0])
 
     @property
     def height(self) -> int:
-        return self.image_size[1]
+        return int(self.image_size[1])
+
+    @property
+    def cx(self) -> int:
+        return int(self.principal_point[0])
+
+    @property
+    def cy(self) -> int:
+        return int(self.principal_point[1])
+
+    def to_camera_matrix(self) -> CameraMatrix:
+        return CameraMatrix(
+            fx=self.focal_length,
+            fy=self.focal_length,
+            cx=self.cx,
+            cy=self.cy,
+            width=self.width,
+            height=self.height
+        )
+
+    def to_pose_matrix(self) -> np.ndarray:
+        matrix = np.eye(4, dtype=float)
+
+        matrix[:3, :3] = self.orientation
+        matrix[:3, 3] = self.position
+
+        return matrix
 
     @classmethod
     def from_json(cls, path: str) -> 'HyperNeRFCamera':
@@ -1110,36 +1137,132 @@ class HyperNeRFAdaptor(DatasetAdaptor):
     rgb_sub_folder_format = "{scale:d}x"
 
     def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
-                 scale: int = 1):
+                 scale: int = 2, is_train=True):
+        """
+        :param base_path: The root directory of the HyperNeRF dataset.
+        :param output_path: Where to save the converted dataset.
+        :param num_frames: The number of frames to process. Set to -1 to process all frames.
+        :param frame_step: How many often to sample frames for COLMAP. Setting to 1 uses all frames, 30 uses 1 frame
+            every 30 frames.
+        :param colmap_options: The configuration to run COLMAP with.
+        :param scale: The integer scale of the images to use (most papers use scale=2, i.e. half-resolution).
+        :param is_train: Whether to use the training image set (`True`) or the validation image set (`False`).
+        """
         assert scale in self.scales, f"Scale must be one of {self.scales}, but got {scale}."
 
         super().__init__(base_path=base_path, output_path=output_path, num_frames=num_frames, frame_step=frame_step,
                          colmap_options=colmap_options)
 
-        self.dataset = HyperNeRFDatasetConfig.from_json(self.dataset_path)
-        self.metadata = HyperNeRFMetadata.map_from_json(self.metadata_path)
-        self.scene = HyperNeRFSceneConfig.from_json(self.scene_path)
-        self.cameras = {camera_id: HyperNeRFCamera.from_json(self.camera_path(camera_id))
+        self.dataset = HyperNeRFDatasetConfig.from_json(self._dataset_path)
+        self.metadata = HyperNeRFMetadata.map_from_json(self._metadata_path)
+        self.scene = HyperNeRFSceneConfig.from_json(self._scene_path)
+        self.cameras = {camera_id: HyperNeRFCamera.from_json(self._camera_path(camera_id))
                         for camera_id in self.dataset.ids}
 
+        self.scale = scale
+        self.is_train = is_train
+
+        if self.num_frames < 1:  # e.g., -1
+            self.num_frames = len(self.dataset.train_ids)
+        else:
+            self.num_frames = min(len(self.dataset.train_ids), self.num_frames)
+
     @property
-    def dataset_path(self) -> str:
+    def _dataset_path(self) -> str:
         return os.path.join(self.base_path, self.dataset_filename)
 
     @property
-    def metadata_path(self) -> str:
+    def _metadata_path(self) -> str:
         return os.path.join(self.base_path, self.metadata_filename)
 
     @property
-    def points_path(self) -> str:
+    def _points_path(self) -> str:
         return os.path.join(self.base_path, self.points_filename)
 
     @property
-    def scene_path(self) -> str:
+    def _scene_path(self) -> str:
         return os.path.join(self.base_path, self.scene_filename)
 
-    def camera_path(self, camera_id: str) -> str:
+    def _camera_path(self, camera_id: str) -> str:
         return os.path.join(self.base_path, self.camera_folder, self.camera_filename_format.format(camera_id=camera_id))
+
+    def get_metadata(self, estimate_pose: bool, estimate_depth: bool, scale: Optional[int] = None) -> DatasetMetadata:
+        if scale is None:
+            scale = self.scale
+
+        camera = self.cameras[self.dataset.val_ids[0]]
+        depth_mask_iterations = BackgroundMeshOptions().depth_mask_dilation_iterations
+
+        return DatasetMetadata(
+            self.num_frames, fps=30.0,  # fps is a rough estimate
+            width=camera.width // scale, height=camera.height // scale,
+            estimate_pose=estimate_pose,
+            estimate_depth=estimate_depth,
+            depth_mask_dilation_iterations=depth_mask_iterations,
+            depth_scale=HiveDataset.depth_scaling_factor,
+            frame_step=self.frame_step, colmap_options=self.colmap_options
+        )
+
+    def _validate_scale(self, scale: int):
+        assert scale in self.scales, f"Scale must be one of {self.scales}, but got {scale}."
+
+    def _get_frame_id(self, index: int, is_train: bool):
+        return self.dataset.train_ids[index] if is_train else self.dataset.val_ids[index]
+
+    def get_frame(self, index: int, scale: Optional[int] = None, is_train: Optional[bool] = None) -> np.ndarray:
+        if scale is None:
+            scale = self.scale
+
+        if is_train is None:
+            is_train = self.is_train
+
+        self._validate_scale(scale)
+
+        rgb_sub_folder = self.rgb_sub_folder_format.format(scale=scale)
+        frame_name = self._get_frame_id(index, is_train)
+        frame_path = os.path.join(self.base_path, self.rgb_folder, rgb_sub_folder, f"{frame_name}.png")
+
+        return imageio.v3.imread(frame_path)
+
+    def get_camera_matrix_wrapper(self, index=0, scale: Optional[int] = None, is_train: Optional[bool] = None):
+        if scale is None:
+            scale = self.scale
+
+        if is_train is None:
+            is_train = self.is_train
+
+        frame_id = self._get_frame_id(index, is_train)
+        camera_matrix = self.cameras[frame_id].to_camera_matrix()
+
+        target_width = camera_matrix.width // scale
+        target_height = camera_matrix.height // scale
+
+        camera_matrix = camera_matrix.scale((target_height, target_width))
+
+        return camera_matrix
+
+    def get_camera_matrix(self, index=0, scale: Optional[int] = None, is_train: Optional[bool] = None) -> np.ndarray:
+        return self.get_camera_matrix_wrapper(index=index, scale=scale, is_train=is_train).matrix
+
+    def get_pose(self, index: int, is_train: Optional[bool] = None, metric_scale=True) -> np.ndarray:
+        if is_train is None:
+            is_train = self.is_train
+
+        frame_id = self._get_frame_id(index, is_train)
+        camera_matrix = self.cameras[frame_id].to_pose_matrix()
+
+        if metric_scale:
+            camera_matrix[:3, 3] *= self.scene.scene_to_metric
+
+        return pose_mat2vec(camera_matrix)
+
+    def get_camera_trajectory(self, is_train: Optional[bool] = None, metric_scale=True) -> Trajectory:
+        if is_train is None:
+            is_train = self.is_train
+
+        trajectory = np.vstack([self.get_pose(i, is_train=is_train, metric_scale=metric_scale)
+                                for i in range(self.num_frames)])
+        return Trajectory(trajectory)
 
 
 class HyperNeRFExperiments:
@@ -1221,18 +1344,20 @@ class Experiments:
 
         self.labels = (self.gt_label, self.cm_label, self.est_label)
 
+        self.inpainting_mode = InpaintingMode.Lama_Image_CV2_Depth
+
         self.gt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                           estimate_pose=False, estimate_depth=False,
-                                          inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+                                          inpainting_mode=self.inpainting_mode, log_file=self.log_file)
         self.cm_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                           estimate_pose=True, estimate_depth=False,
-                                          inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+                                          inpainting_mode=self.inpainting_mode, log_file=self.log_file)
         self.dpt_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                            estimate_pose=False, estimate_depth=True,
-                                           inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+                                           inpainting_mode=self.inpainting_mode, log_file=self.log_file)
         self.est_options = PipelineOptions(num_frames=num_frames, frame_step=frame_step,
                                            estimate_pose=True, estimate_depth=True,
-                                           inpainting_mode=InpaintingMode.Lama_Image_CV2_Depth, log_file=self.log_file)
+                                           inpainting_mode=self.inpainting_mode, log_file=self.log_file)
 
         self.mesh_options = BackgroundMeshOptions(key_frame_threshold=0.3)
 
@@ -2328,13 +2453,34 @@ class Experiments:
     def run_hypernerf_experiments(self):
         for sequence_name in HyperNeRFExperiments.sequence_names:
             HyperNeRFExperiments.fetch_sequence(self.data_path, sequence_name)
+
             adaptor = HyperNeRFAdaptor(
                 base_path=os.path.join(self.data_path, sequence_name),
                 output_path=os.path.join(self.output_path, 'converted_dataset', sequence_name),
                 num_frames=self.num_frames,
                 frame_step=self.frame_step,
-                colmap_options=self.colmap_options
+                colmap_options=self.colmap_options,
             )
+
+            dataset = adaptor.convert(estimate_pose=False, estimate_depth=True, inpainting_mode=self.inpainting_mode,
+                                      static_camera=False, no_cache=self.overwrite_ok)
+            pipeline = Pipeline(self.cm_options, storage_options=StorageOptions(dataset.base_path,
+                                                                                output_path=dataset.base_path,
+                                                                                overwrite_ok=self.overwrite_ok,
+                                                                                no_cache=self.overwrite_ok))
+
+            fg = pipeline.process_frame(dataset, index=0)
+            bg = pipeline.create_static_mesh(dataset)
+
+            camera_matrix = adaptor.get_camera_matrix_wrapper(index=0)
+            pose = adaptor.get_pose(index=0, is_train=False)
+
+            rgb = LLFFExperiment.render_mesh(camera_matrix, pose, fg, bg)
+            val_frame = adaptor.get_frame(index=0, is_train=False)
+
+            output_side_by_side = np.hstack((rgb, val_frame))
+            Image.fromarray(output_side_by_side).save('image.jpg')
+
             break
 
 
@@ -2382,7 +2528,9 @@ def main():
         experiments.run_inpainting_experiments()
         experiments.export_inpainting_results()
 
-        DynamicScenesExperiments.fetch_dataset(experiments.data_path, DynamicScenesExperiments.sequence_names)
+        experiments.run_llff_experiments(LLFFExperiment.sequence_names)
+
+        experiments.run_hypernerf_experiments()
 
 
 if __name__ == '__main__':
