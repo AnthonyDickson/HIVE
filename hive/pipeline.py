@@ -260,10 +260,8 @@ class Pipeline:
         else:
             background_scene = self._create_empty_scene(dataset)
 
-            frame_set = dataset.select_key_frames(threshold=self.background_mesh_options.key_frame_threshold)
-
             static_mesh = self.create_static_mesh(dataset, num_frames=self.num_frames,
-                                                  options=self.background_mesh_options, frame_set=frame_set)
+                                                  options=self.background_mesh_options)
 
             # Convert colour to sRGB since that is what the renderer expects.
             # This is only needed for the TSDF Fusion meshes since they use vertex colours, for which THREE does not
@@ -875,6 +873,10 @@ class Pipeline:
         """
         if num_frames < 1:
             num_frames = dataset.num_frames
+
+        if frame_set is None:
+            frame_set = dataset.select_key_frames(threshold=options.key_frame_threshold,
+                                                  frame_step=options.key_frame_step)
 
         if frame_set is not None and len(frame_set) < 1:
             raise RuntimeError(f"`frame_set`, if not set to `None`, must be a list with at least one element.")

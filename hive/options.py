@@ -325,7 +325,7 @@ class BackgroundMeshOptions(Options):
 
     def __init__(self, reconstruction_method=MeshReconstructionMethod.TSDFFusion, depth_mask_dilation_iterations=10,
                  sdf_volume_size=5.0, sdf_voxel_size=0.005, sdf_max_voxels: Optional[int] = 320_000_000,
-                 key_frame_threshold=0.3):
+                 key_frame_threshold=0.3, key_frame_step=30):
         """
         :param reconstruction_method: The method to use for reconstructing the background mesh(es).
         :param depth_mask_dilation_iterations: The number of times to dilate the dynamic object masks for masking the
@@ -338,6 +338,8 @@ class BackgroundMeshOptions(Options):
             This option only has an effect for the reconstruction method `tsdf_fusion`.
             If specified, the `sdf_voxel_size` option will be ignored.
         :param key_frame_threshold: The maximum overlap ratio before a frame is excluded from the key frame set.
+        :param key_frame_step: The frequency to sample frames at for key frame selection.
+            If set to 1, samples all frames (i.e. no effect). Otherwise, if set to n > 1, samples every n frames.
         """
         assert reconstruction_method in BackgroundMeshOptions.supported_reconstruction_methods, \
             f"Reconstruction method must be one of the following: " \
@@ -354,12 +356,16 @@ class BackgroundMeshOptions(Options):
             raise ValueError(f"Key frame threshold must be between zero and one (inclusive), "
                              f"but got {key_frame_threshold}.")
 
+        assert isinstance(key_frame_step, int) and key_frame_step > 1, \
+            f"Key frame step must be a positive integer, but got {key_frame_step}."
+
         self.reconstruction_method = reconstruction_method
         self.depth_mask_dilation_iterations = depth_mask_dilation_iterations
         self.sdf_volume_size = sdf_volume_size
         self.sdf_voxel_size = sdf_voxel_size
         self.sdf_max_voxels = sdf_max_voxels
         self.key_frame_threshold = key_frame_threshold
+        self.key_frame_step = key_frame_step
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
@@ -383,7 +389,11 @@ class BackgroundMeshOptions(Options):
                                 "This option only has an effect for the reconstruction method `TSDF_FUSION`. "
                                 "If specified, the `--sdf_voxel_size` option will be ignored.")
         group.add_argument('--key_frame_threshold', type=float, default=0.3,
-                           help="The maximum overlap ratio before a frame is excluded from the key frame set. ")
+                           help="The maximum overlap ratio before a frame is excluded from the key frame set.")
+        group.add_argument('--key_frame_step', type=float, default=30,
+                           help="The frequency to sample frames at for key frame selection. "
+                                "If set to 1, samples all frames (i.e. no effect). "
+                                "Otherwise, if set to n > 1, samples every n frames.")
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'BackgroundMeshOptions':
@@ -393,7 +403,8 @@ class BackgroundMeshOptions(Options):
             sdf_volume_size=args.sdf_volume_size,
             sdf_voxel_size=args.sdf_voxel_size,
             sdf_max_voxels=args.sdf_max_voxels,
-            key_frame_threshold=args.key_frame_threshold
+            key_frame_threshold=args.key_frame_threshold,
+            key_frame_step=args.key_frame_step,
         )
 
 

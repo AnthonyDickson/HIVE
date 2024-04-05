@@ -686,7 +686,7 @@ class LLFFExperiment:
         camera_matrix = dataset_adaptor.camera_matrix
 
         fg_mesh = pipeline.process_frame(dataset, index=frame_index)
-        bg_mesh = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+        bg_mesh = pipeline.create_static_mesh(dataset)
 
         return cls.Config("multicam", camera_matrix, fg_mesh, bg_mesh)
 
@@ -696,7 +696,7 @@ class LLFFExperiment:
 
         with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
             fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index)
-            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+            bg_mesh_kinect = pipeline.create_static_mesh(dataset)
 
         return cls.Config("monocular", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
 
@@ -706,7 +706,7 @@ class LLFFExperiment:
 
         with temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
             fg_mesh_kinect = pipeline.process_frame(dataset, index=frame_index, enable_cc_analysis=False)
-            bg_mesh_kinect = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+            bg_mesh_kinect = pipeline.create_static_mesh(dataset)
 
         return cls.Config("no_cc_analysis", kinect_camera_matrix, fg_mesh_kinect, bg_mesh_kinect)
 
@@ -733,7 +733,7 @@ class LLFFExperiment:
 
         with disable_inpainted_data(dataset), temporary_camera_matrix(dataset, kinect_camera_matrix.matrix):
             fg_mesh_no_inpainted = pipeline.process_frame(dataset, index=frame_index)
-            bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset, frame_set=dataset.select_key_frames())
+            bg_mesh_no_inpainted = pipeline.create_static_mesh(dataset)
 
         return cls.Config("no_inpainting", kinect_camera_matrix, fg_mesh_no_inpainted, bg_mesh_no_inpainted)
 
@@ -1949,12 +1949,7 @@ class Experiments:
                                     static_mesh_options=self.mesh_options)
 
                 fg_mesh = pipeline.process_frame(dataset, index=0)
-                bg_mesh = pipeline.create_static_mesh(
-                    dataset,
-                    options=self.mesh_options,
-                    frame_set=dataset.select_key_frames(threshold=self.mesh_options.key_frame_threshold,
-                                                        frame_step=self.frame_step)
-                )
+                bg_mesh = pipeline.create_static_mesh(dataset, options=self.mesh_options)
                 os.makedirs(uncompressed_mesh_output_folder, exist_ok=True)
                 os.makedirs(compressed_mesh_output_folder, exist_ok=True)
 
