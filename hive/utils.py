@@ -370,6 +370,8 @@ def timed_block(log_msg: Optional[str], profiling: Optional[dict], key_path: lis
 
     try:
         yield timer
+    except Exception as e:
+        raise e
     finally:
         if profiling is None:
             return
