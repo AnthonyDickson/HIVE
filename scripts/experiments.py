@@ -44,7 +44,7 @@ from omegaconf import OmegaConf
 from torch.utils.data.dataloader import default_collate
 
 from hive.custom_types import File, Size
-from hive.dataset_adaptors import VideoAdaptorBase, estimate_depth_dpt
+from hive.dataset_adaptors import VideoAdaptorBase, estimate_depth_dpt, DatasetAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
 from hive.geometric import Trajectory, pose_vec2mat, CameraMatrix
 from hive.io import HiveDataset, temporary_trajectory, DatasetMetadata, COLMAPProcessor, ImageFolderDataset
@@ -990,13 +990,165 @@ class DynamicScenesExperiments:
             raise FileNotFoundError(f"Could not find dataset at {data_folder} or automatically download it.")
 
 
+@dataclass(frozen=True)
+class HyperNeRFCamera:
+    orientation: np.ndarray  # 3x3 Rotation matrix
+    position: np.ndarray  # 1x3 translation vector
+    focal_length: float
+    principal_point: np.ndarray  # cx, cy
+    skew: float
+    radial_distortion: np.ndarray
+    tangential_distortion: np.ndarray
+    image_size: np.ndarray  # width, height
+
+    @property
+    def width(self) -> int:
+        return self.image_size[0]
+
+    @property
+    def height(self) -> int:
+        return self.image_size[1]
+
+    @classmethod
+    def from_json(cls, path: str) -> 'HyperNeRFCamera':
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return HyperNeRFCamera(
+            orientation=np.asarray(json_data['orientation'], dtype=float),
+            position=np.asarray(json_data['position'], dtype=float),
+            focal_length=float(json_data['focal_length']),
+            principal_point=np.asarray(json_data['principal_point'], dtype=float),
+            skew=float(json_data['skew']),
+            radial_distortion=np.asarray(json_data['radial_distortion'], dtype=float),
+            tangential_distortion=np.asarray(json_data['tangential_distortion'], dtype=float),
+            image_size=np.asarray(json_data['image_size'], dtype=int),
+        )
+
+
+@dataclass(frozen=True)
+class HyperNeRFDatasetConfig:
+    count: int
+    num_exemplars: int
+    ids: List[str]
+    train_ids: List[str]
+    val_ids: List[str]
+
+    @classmethod
+    def from_json(cls, path: str) -> 'HyperNeRFDatasetConfig':
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return HyperNeRFDatasetConfig(
+            count=int(json_data['count']),
+            num_exemplars=int(json_data['num_exemplars']),
+            ids=list(json_data['ids']),
+            train_ids=list(json_data['train_ids']),
+            val_ids=list(json_data['val_ids'])
+        )
+
+
+@dataclass(frozen=True)
+class HyperNeRFMetadata:
+    time_id: int
+    warp_id: int
+    appearance_id: int
+    camera_id: int
+
+    @classmethod
+    def map_from_json(cls, path: str) -> Dict[str, 'HyperNeRFMetadata']:
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return {
+            image_id: HyperNeRFMetadata(
+                time_id=int(metadata['time_id']),
+                warp_id=int(metadata['warp_id']),
+                appearance_id=int(metadata['appearance_id']),
+                camera_id=int(metadata['camera_id'])
+            )
+            for image_id, metadata in json_data.items()
+        }
+
+
+@dataclass(frozen=True)
+class HyperNeRFSceneConfig:
+    scale: float
+    scene_to_metric: float
+    center: np.ndarray  # shape = (3,)
+    near: float
+    far: float
+
+    @classmethod
+    def from_json(cls, path: str) -> 'HyperNeRFSceneConfig':
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return HyperNeRFSceneConfig(
+            scale=float(json_data['scale']),
+            scene_to_metric=float(json_data['scene_to_metric']),
+            center=np.asarray(json_data['center'], dtype=float),
+            near=float(json_data['near']),
+            far=float(json_data['far'])
+        )
+
+
+class HyperNeRFAdaptor(DatasetAdaptor):
+    dataset_filename = 'dataset.json'
+    metadata_filename = 'metadata.json'
+    points_filename = 'points.npy'
+    scene_filename = 'scene.json'
+
+    required_files = [dataset_filename, metadata_filename, points_filename, scene_filename]
+
+    camera_folder = 'camera'
+    rgb_folder = 'rgb'
+
+    camera_filename_format = "{camera_id:s}.json"
+
+    scales = {1, 2, 4, 8, 16}
+    rgb_sub_folder_format = "{scale:d}x"
+
+    def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
+                 scale: int = 1):
+        assert scale in self.scales, f"Scale must be one of {self.scales}, but got {scale}."
+
+        super().__init__(base_path=base_path, output_path=output_path, num_frames=num_frames, frame_step=frame_step,
+                         colmap_options=colmap_options)
+
+        self.dataset = HyperNeRFDatasetConfig.from_json(self.dataset_path)
+        self.metadata = HyperNeRFMetadata.map_from_json(self.metadata_path)
+        self.scene = HyperNeRFSceneConfig.from_json(self.scene_path)
+        self.cameras = {camera_id: HyperNeRFCamera.from_json(self.camera_path(camera_id))
+                        for camera_id in self.dataset.ids}
+
+    @property
+    def dataset_path(self) -> str:
+        return os.path.join(self.base_path, self.dataset_filename)
+
+    @property
+    def metadata_path(self) -> str:
+        return os.path.join(self.base_path, self.metadata_filename)
+
+    @property
+    def points_path(self) -> str:
+        return os.path.join(self.base_path, self.points_filename)
+
+    @property
+    def scene_path(self) -> str:
+        return os.path.join(self.base_path, self.scene_filename)
+
+    def camera_path(self, camera_id: str) -> str:
+        return os.path.join(self.base_path, self.camera_folder, self.camera_filename_format.format(camera_id=camera_id))
+
+
 class HyperNeRFExperiments:
     """
     Uses dataset from Park, Keunhong, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman,
     Ricardo Martin-Brualla, and Steven M. Seitz. "Hypernerf: A higher-dimensional representation for topologically
     varying neural radiance fields." arXiv preprint arXiv:2106.13228 (2021).
     """
-    url_format = "https://github.com/google/hypernerf/releases/download/v0.1/{}.zip"
+    url_format = "https://github.com/google/hypernerf/releases/download/v0.1/{}"
 
     sequence_names = [
         'vrig_3dprinter',
@@ -1004,6 +1156,38 @@ class HyperNeRFExperiments:
         'vrig_chicken',
         'vrig_peel-banana',
     ]
+
+    sequence_to_folder = {sequence_name: sequence_name.replace('_', '-')
+                          for sequence_name in sequence_names}
+
+    @classmethod
+    def fetch_sequence(cls, data_folder: str, sequence_name: str):
+        dataset_path = os.path.join(data_folder, sequence_name)
+
+        if not os.path.isdir(dataset_path):
+            try:
+                logging.info(f"Downloading {sequence_name}...")
+                zip_filename = f"{sequence_name}.zip"
+                zip_path = os.path.join(data_folder, zip_filename)
+
+                if not os.path.isfile(zip_path):
+                    url = cls.url_format.format(zip_filename)
+                    urllib.request.urlretrieve(url, zip_path)
+
+                logging.debug(f"Extracting zip file...")
+
+                with zipfile.ZipFile(zip_path, 'r') as file:
+                    file.extractall(data_folder)
+
+                folder_name = cls.sequence_to_folder[sequence_name]
+                extracted_path = os.path.join(data_folder, folder_name)
+
+                if os.path.isdir(extracted_path):
+                    shutil.move(src=extracted_path, dst=os.path.join(data_folder, sequence_name))
+
+                logging.info(f"Downloaded dataset {sequence_name} and extracted to {dataset_path}.")
+            except Exception:
+                raise FileNotFoundError(f"Could not find dataset at {dataset_path} or automatically download it.")
 
 
 # TODO: Pull out each experiment type into own class.
@@ -2145,6 +2329,18 @@ class Experiments:
 
         results_records = LLFFExperiment.gather_results(output_folder=llff_folder)
         LLFFExperiment.export_latex(results_records, summary_path=self.summaries_path, latex_path=self.latex_path)
+
+    def run_hypernerf_experiments(self):
+        for sequence_name in HyperNeRFExperiments.sequence_names:
+            HyperNeRFExperiments.fetch_sequence(self.data_path, sequence_name)
+            adaptor = HyperNeRFAdaptor(
+                base_path=os.path.join(self.data_path, sequence_name),
+                output_path=os.path.join(self.output_path, 'converted_dataset', sequence_name),
+                num_frames=self.num_frames,
+                frame_step=self.frame_step,
+                colmap_options=self.colmap_options
+            )
+            break
 
 
 def main():

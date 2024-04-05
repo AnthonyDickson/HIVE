@@ -1472,8 +1472,6 @@ def get_dataset(storage_options: StorageOptions, colmap_options=COLMAPOptions(),
             dataset_converter = TUMAdaptor(**base_kwargs)
         elif UnrealAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = UnrealAdaptor(**base_kwargs)
-        elif LLFFAdaptor.is_valid_folder_structure(dataset_path):
-            dataset_converter = LLFFAdaptor(**base_kwargs, resize_to=resize_to)
         elif StrayScannerAdaptor.is_valid_folder_structure(dataset_path):
             dataset_converter = StrayScannerAdaptor(
                 **base_kwargs,
