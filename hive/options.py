@@ -155,6 +155,16 @@ class COLMAPOptions(Options):
                 self.quality == other.quality
         )
 
+    def copy(self) -> 'COLMAPOptions':
+        return COLMAPOptions(
+            is_single_camera=self.is_single_camera,
+            single_camera_per_folder=self.single_camera_per_folder,
+            dense=self.dense,
+            quality=self.quality,
+            binary_path=self.binary_path,
+            vocab_path=self.vocab_path
+        )
+
     def to_json(self) -> dict:
         """
         Convert the COLMAP configuration to a JSON friendly dictionary.

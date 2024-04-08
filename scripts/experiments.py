@@ -1209,6 +1209,19 @@ class HyperNeRFAdaptor(DatasetAdaptor):
     def _get_frame_id(self, index: int, is_train: bool):
         return self.dataset.train_ids[index] if is_train else self.dataset.val_ids[index]
 
+    def get_frame_path(self, index: int, scale: Optional[int] = None, is_train: Optional[bool] = None):
+        if scale is None:
+            scale = self.scale
+
+        if is_train is None:
+            is_train = self.is_train
+
+        rgb_sub_folder = self.rgb_sub_folder_format.format(scale=scale)
+        frame_name = self._get_frame_id(index, is_train)
+        frame_path = os.path.join(self.base_path, self.rgb_folder, rgb_sub_folder, f"{frame_name}.png")
+
+        return frame_path
+
     def get_frame(self, index: int, scale: Optional[int] = None, is_train: Optional[bool] = None) -> np.ndarray:
         if scale is None:
             scale = self.scale
@@ -1248,13 +1261,16 @@ class HyperNeRFAdaptor(DatasetAdaptor):
         if is_train is None:
             is_train = self.is_train
 
+        ref_frame_id = self._get_frame_id(index=0, is_train=True)
+        reference_pose = self.cameras[ref_frame_id].to_pose_matrix()
+
         frame_id = self._get_frame_id(index, is_train)
-        camera_matrix = self.cameras[frame_id].to_pose_matrix()
+        pose_matrix = np.linalg.inv(reference_pose) @ self.cameras[frame_id].to_pose_matrix()
 
         if metric_scale:
-            camera_matrix[:3, 3] *= self.scene.scene_to_metric
+            pose_matrix[:3, 3] *= self.scene.scene_to_metric
 
-        return pose_mat2vec(camera_matrix)
+        return pose_mat2vec(pose_matrix)
 
     def get_camera_trajectory(self, is_train: Optional[bool] = None, metric_scale=True) -> Trajectory:
         if is_train is None:
@@ -1263,6 +1279,77 @@ class HyperNeRFAdaptor(DatasetAdaptor):
         trajectory = np.vstack([self.get_pose(i, is_train=is_train, metric_scale=metric_scale)
                                 for i in range(self.num_frames)])
         return Trajectory(trajectory)
+
+    def estimate_pose(self, is_train: bool, options=COLMAPOptions(), overwrite_ok=False):
+        logging.info(f"Estimating stereo COLMAP poses for {self.base_path}...")
+        workspace_path = os.path.join(self.output_path, 'colmap')
+        rgb_path = os.path.join(workspace_path, 'rgb')
+        rgb_train_path = os.path.join(rgb_path, 'train')
+        rgb_val_path = os.path.join(rgb_path, 'val')
+
+        depth_path = os.path.join(workspace_path, 'depth')
+        depth_train_path = os.path.join(depth_path, 'train')
+
+        cm = COLMAPProcessor(image_path=rgb_path, workspace_path=workspace_path, colmap_options=options)
+
+        if not os.path.isdir(rgb_path) or overwrite_ok:
+            logging.debug(f"Copying stereo images...")
+
+            if os.path.isdir(rgb_path):
+                shutil.rmtree(rgb_path)
+
+            os.makedirs(rgb_train_path)
+            os.makedirs(rgb_val_path)
+
+            for i, frame_name in enumerate(self.dataset.train_ids):
+                src = os.path.join(self.get_frame_path(i, is_train=True))
+                dst = os.path.join(rgb_train_path, HiveDataset.index_to_filename(i, file_extension=src[-3:]))
+                shutil.copy(src, dst)
+
+            for i, frame_name in enumerate(self.dataset.val_ids):
+                src = os.path.join(self.get_frame_path(i, is_train=False))
+                dst = os.path.join(rgb_val_path, HiveDataset.index_to_filename(i, file_extension=src[-3:]))
+                shutil.copy(src, dst)
+
+        if not os.path.isdir(depth_path) or overwrite_ok:
+            logging.debug(f"Estimating depth maps...")
+
+            if os.path.isdir(depth_path):
+                shutil.rmtree(depth_path)
+
+            estimate_depth_dpt(ImageFolderDataset(rgb_train_path), output_path=depth_train_path)
+
+        if not cm.probably_has_results or overwrite_ok:
+            cm.run(use_masks=False)
+
+        train_intrinsic, train_extrinsic = cm.load_camera_params(camera_id=1)
+        val_intrinsic, val_extrinsic = cm.load_camera_params(camera_id=2)
+
+        cm_depth = cm.get_sparse_depth_maps(train_intrinsic, train_extrinsic, camera_id=1)
+
+        def depth_transform(depth_map):
+            depth_map = depth_map.astype(np.float32) * HiveDataset.depth_scaling_factor
+            depth_map[depth_map > 10.] = 0.0
+
+            return depth_map
+
+        depth_dataset = ImageFolderDataset(depth_train_path, transform=depth_transform)
+        est_depth = np.asarray(depth_dataset)
+
+        nonzero_mask = (cm_depth > 0.) & (est_depth > 0.)
+        scaling_factor = np.median(est_depth[nonzero_mask] / cm_depth[nonzero_mask])
+
+        if is_train:
+            intrinsic = train_intrinsic
+            extrinsic = train_extrinsic
+        else:
+            intrinsic = val_intrinsic
+            extrinsic = val_extrinsic
+
+        scaled_poses = extrinsic.scale_trajectory(scaling_factor)
+        scaled_poses = scaled_poses.apply(np.linalg.inv(pose_vec2mat(train_extrinsic[0])))
+
+        return intrinsic, scaled_poses
 
 
 class HyperNeRFExperiments:
@@ -2451,6 +2538,9 @@ class Experiments:
         LLFFExperiment.export_latex(results_records, summary_path=self.summaries_path, latex_path=self.latex_path)
 
     def run_hypernerf_experiments(self):
+        colmap_options = self.colmap_options.copy()
+        colmap_options.single_camera_per_folder = True
+
         for sequence_name in HyperNeRFExperiments.sequence_names:
             HyperNeRFExperiments.fetch_sequence(self.data_path, sequence_name)
 
@@ -2462,18 +2552,22 @@ class Experiments:
                 colmap_options=self.colmap_options,
             )
 
-            dataset = adaptor.convert(estimate_pose=False, estimate_depth=True, inpainting_mode=self.inpainting_mode,
+            dataset = adaptor.convert(estimate_pose=True, estimate_depth=True, inpainting_mode=self.inpainting_mode,
                                       static_camera=False, no_cache=self.overwrite_ok)
             pipeline = Pipeline(self.cm_options, storage_options=StorageOptions(dataset.base_path,
                                                                                 output_path=dataset.base_path,
                                                                                 overwrite_ok=self.overwrite_ok,
                                                                                 no_cache=self.overwrite_ok))
 
-            fg = pipeline.process_frame(dataset, index=0)
-            bg = pipeline.create_static_mesh(dataset)
+            train_intrinsic, train_extrinsic = adaptor.estimate_pose(is_train=True, options=colmap_options)
 
-            camera_matrix = adaptor.get_camera_matrix_wrapper(index=0)
-            pose = adaptor.get_pose(index=0, is_train=False)
+            with temporary_camera_matrix(dataset, train_intrinsic), temporary_trajectory(dataset, train_extrinsic):
+                fg = pipeline.process_frame(dataset, index=0)
+                bg = pipeline.create_static_mesh(dataset)
+
+            _, val_extrinsic = adaptor.estimate_pose(is_train=False)
+            camera_matrix = CameraMatrix.from_matrix(train_intrinsic, (dataset.frame_height, dataset.frame_width))
+            pose = val_extrinsic[0]
 
             rgb = LLFFExperiment.render_mesh(camera_matrix, pose, fg, bg)
             val_frame = adaptor.get_frame(index=0, is_train=False)
