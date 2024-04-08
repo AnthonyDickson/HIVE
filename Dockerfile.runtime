@@ -37,11 +37,11 @@ RUN cd / && \
 
 ## Install COLMAP from source
 RUN cd / && \
-    git clone --depth 1 --branch 3.8 https://github.com/colmap/colmap.git && \
+    git clone --depth 1 https://github.com/AnthonyDickson/colmap.git && \
     cd colmap && \
     mkdir build && \
     cd build && \
-    cmake .. -DCMAKE_CUDA_ARCHITECTURES=all && \
+    cmake .. -DCMAKE_CUDA_ARCHITECTURES=all -DGUI_ENABLED=OFF && \
     make -j 8 && \
     make install && \
     cd / && \

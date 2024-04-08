@@ -106,11 +106,12 @@ class StorageOptions(Options):
 class COLMAPOptions(Options):
     quality_choices = ('low', 'medium', 'high', 'extreme')
 
-    def __init__(self, is_single_camera=True, dense=False, quality='low', binary_path='/usr/local/bin/colmap',
-                 vocab_path='/root/.cache/colmap/vocab.bin'):
+    def __init__(self, is_single_camera=True, single_camera_per_folder=False, dense=False, quality='low',
+                 binary_path='/usr/local/bin/colmap', vocab_path='/root/.cache/colmap/vocab.bin'):
         self.binary_path = binary_path
         self.vocab_path = vocab_path
         self.is_single_camera = is_single_camera
+        self.single_camera_per_folder = single_camera_per_folder
         self.dense = dense
         self.quality = quality
 
@@ -123,6 +124,9 @@ class COLMAPOptions(Options):
         group.add_argument('--multiple_cameras', action='store_true',
                            help='Whether the video dataset was captured with multiple camera devices or '
                                 'a single camera device with different settings per-frame (e.g. focal length).')
+        group.add_argument('--single_camera_per_folder', action='store_true',
+                           help='Whether COLMAP will be given a folder where frames are organised in sub-folders '
+                                '(e.g., for stereo footage).')
         group.add_argument('--dense', action='store_true', help='Whether to run dense reconstruction.')
         group.add_argument('--quality', type=str, help='The quality of the COLMAP reconstruction.',
                            default='low', choices=COLMAPOptions.quality_choices)
@@ -134,14 +138,19 @@ class COLMAPOptions(Options):
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> 'COLMAPOptions':
-        return COLMAPOptions(is_single_camera=not args.multiple_cameras, dense=args.dense, quality=args.quality,
-                             binary_path=args.binary_path, vocab_path=args.vocab_path)
+        return COLMAPOptions(is_single_camera=not args.multiple_cameras,
+                             single_camera_per_folder=args.single_camera_per_folder,
+                             dense=args.dense,
+                             quality=args.quality,
+                             binary_path=args.binary_path,
+                             vocab_path=args.vocab_path)
 
     def __eq__(self, other) -> bool:
         return (
                 self.binary_path == other.binary_path and
                 self.vocab_path == other.vocab_path and
                 self.is_single_camera == other.is_single_camera and
+                self.single_camera_per_folder == other.single_camera_per_folder and
                 self.dense == other.dense and
                 self.quality == other.quality
         )
@@ -155,6 +164,7 @@ class COLMAPOptions(Options):
             binary_path=self.binary_path,
             vocab_path=self.vocab_path,
             is_single_camera=self.is_single_camera,
+            single_camera_per_folder=self.single_camera_per_folder,
             dense=self.dense,
             quality=self.quality
         )
@@ -171,6 +181,8 @@ class COLMAPOptions(Options):
             binary_path=str(json_dict['binary_path']),
             vocab_path=str(json_dict['vocab_path']),
             is_single_camera=bool(json_dict['is_single_camera']),
+            # Use default value for single_camera_per_folder so that old datasets do not break.
+            single_camera_per_folder=bool(json_dict.get('single_camera_per_folder', False)),
             dense=bool(json_dict['dense']),
             quality=str(json_dict['quality']),
         )

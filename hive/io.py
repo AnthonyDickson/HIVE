@@ -308,6 +308,7 @@ class COLMAPProcessor:
                    '--image_path', self.image_path,
                    '--vocab_tree_path', self.colmap_options.vocab_path,
                    '--single_camera', 1 if options.is_single_camera else 0,  # COLMAP expects 1 for True, 0 for False.
+                   '--single_camera_per_folder', 1 if options.single_camera_per_folder else 0,
                    '--dense', 1 if options.dense else 0,
                    '--quality', options.quality]
 
@@ -338,17 +339,19 @@ class COLMAPProcessor:
 
         return cameras, images, points3d
 
-    def load_camera_params(self, raw_pose: bool = True) -> Tuple[np.ndarray, Trajectory]:
+    def load_camera_params(self, raw_pose: bool = True, camera_id=1) -> Tuple[np.ndarray, Trajectory]:
         """
         Load the camera intrinsic and extrinsic parameters from a COLMAP sparse reconstruction model.
         :param raw_pose: Whether to use the raw pose data straight from COLMAP.
+        :param camera_id: The one-based index of the camera whose parameters we should load. For monocular sequences,
+            this should be 1. For stereo sequences, this should be 1 or 2.
         :return: A 2-tuple containing the camera matrix (intrinsic parameters) and camera trajectory (extrinsic
             parameters). Each row in the camera trajectory consists of the rotation as a quaternion and the
             translation vector, in that order.
         """
         cameras, images, points3d = self._load_model()
 
-        f, cx, cy, _ = cameras[1].params  # cameras is a dict, COLMAP indices start from one.
+        f, cx, cy, _ = cameras[camera_id].params  # cameras is a dict, COLMAP indices start from one.
 
         intrinsic = np.eye(3)
         intrinsic[0, 0] = f
@@ -361,6 +364,9 @@ class COLMAPProcessor:
 
         if raw_pose:
             for image in images.values():
+                if image.camera_id != camera_id:
+                    continue
+
                 # COLMAP quaternions seem to be stored in scalar first format.
                 # However, rather than assuming the format we can just rely on the provided function to convert to a
                 # rotation matrix, and use SciPy to convert that to a quaternion in scalar last format.
@@ -377,6 +383,9 @@ class COLMAPProcessor:
             colmap_to_normal = np.diag([1, -1, 1])  # I think TUM + TSDFFusion work in X right, Y up and Z forward
 
             for image in images.values():
+                if image.camera_id != camera_id:
+                    continue
+
                 R = image.qvec2rotmat()
                 t = image.tvec.reshape(-1, 1)
 
@@ -407,24 +416,32 @@ class COLMAPProcessor:
     def _get_frame_count(self) -> int:
         files = sorted(os.listdir(self.image_path))
 
+        # files will be the names of folders if we are dealing with multi-cam footage.
+        if os.path.isdir(os.path.join(self.image_path, files[0])):
+            # We assume that each camera feed has the same number of frames, so we just count the frames in the first
+            # camera feed's image folder.
+            files = sorted(os.listdir(os.path.join(self.image_path, files[0])))
+
         indices = [self._get_index_from_filename(filename) for filename in files]
 
         return max(indices) + 1
 
     def _get_index_from_filename(self, filename: str) -> int:
-        filename_without_extension = filename.split('.')[0]
+        filename_without_extension = Path(filename).stem
 
         return int(filename_without_extension)
 
     def _get_index_from_image(self, image: COLMAPImage) -> int:
         return self._get_index_from_filename(filename=image.name)
 
-    def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: Trajectory) -> np.ndarray:
+    def get_sparse_depth_maps(self, camera_matrix: np.ndarray, camera_poses: Trajectory, camera_id=1) -> np.ndarray:
         """
         Recover sparse depth maps from the COLMAP reconstruction.
 
         :param camera_matrix: 3x3 camera intrinsics matrix.
         :param camera_poses: Nx7 camera poses matrix (quaterion, position vector).
+        :param camera_id: The one-based index of the camera that `camera_matrix` and `camera_poses` are from. For
+            monocular sequences, this should be 1. For stereo sequences, this should be 1 or 2.
         :return: The NxHxW tensor containing the HxW depth maps.
         """
         cameras, images, points3d = self._load_model()
@@ -438,6 +455,9 @@ class COLMAPProcessor:
         depth_maps = np.zeros((len(camera_poses), *source_image_shape), dtype=np.float32)
 
         for image_data in tqdm(images.values()):
+            if image_data.camera_id != camera_id:
+                continue
+
             points = [points3d[point3d_id].xyz for point3d_id in image_data.point3D_ids if point3d_id != -1]
             points = np.asarray(points)
 
