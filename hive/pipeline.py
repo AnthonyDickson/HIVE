@@ -43,7 +43,7 @@ from scipy.spatial import Delaunay
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from hive.dataset_adaptors import get_dataset
+from hive.dataset_adaptors import get_dataset, DatasetAdaptor
 from hive.fusion import tsdf_fusion, bundle_fusion
 from hive.geometric import point_cloud_from_depth, world2image, get_pose_components
 from hive.image_processing import dilate_mask
@@ -169,19 +169,28 @@ class Pipeline:
         with timed_block(log_msg=log_msg, profiling=self.profiling, key_path=key_path) as timer:
             yield timer
 
-    def run(self, dataset: Optional[HiveDataset] = None, compress=True):
+    def run(self, dataset: Optional[HiveDataset] = None, adaptor: Optional[DatasetAdaptor] = None, compress=True):
         """
         Run the pipeline to convert a video or RGB-D dataset into a 3D video.
 
         :param dataset: By default, the pipeline will load the dataset specified in the command line options.
             You can specify a dataset here to use instead.
+        :param adaptor: By default, the pipeline will create the dataset adaptor automatically.
+            You can specify a dataset adaptor here to use instead.
         :param compress: Whether to compress the output mesh files. Defaults to `True`.
         """
         start_time = time.time()
         self._reset_cuda_stats()
 
         with self.timed_block("Loading dataset...", ['timing', 'load_dataset', 'total']):
-            if dataset is None:
+            if adaptor is not None:
+                dataset = adaptor.convert(estimate_pose=self.estimate_pose,
+                                          estimate_depth=self.estimate_depth,
+                                          inpainting_mode=self.options.inpainting_mode,
+                                          static_camera=self.options.static_camera,
+                                          no_cache=self.storage_options.no_cache,
+                                          profiling=self.profiling)
+            elif dataset is None:
                 resize_to = None if self.options.disable_scaling else 640
                 dataset = get_dataset(self.storage_options, self.colmap_options, self.options, resize_to=resize_to,
                                       profiling=self.profiling)

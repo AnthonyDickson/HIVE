@@ -507,6 +507,16 @@ class WebXROptions(Options):
             webxr_run_server=args.webxr_run_server
         )
 
+    def copy(self) -> 'WebXROptions':
+        return WebXROptions(
+            webxr_source_path=self.webxr_source_path,
+            webxr_path=self.webxr_path,
+            webxr_url=self.webxr_url,
+            webxr_add_ground_plane=self.webxr_add_ground_plane,
+            webxr_add_sky_box=self.webxr_add_sky_box,
+            webxr_run_server=self.webxr_run_server
+        )
+
 
 class InpaintingMode(enum.Flag):
     Off = 0

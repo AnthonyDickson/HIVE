@@ -34,6 +34,7 @@ from typing import Tuple, Dict, Optional, List, Union, Callable
 import cv2
 import imageio.v3
 import numpy as np
+import numpy.lib.recfunctions as rfn
 import pandas as pd
 import pyrender
 import torch
@@ -896,8 +897,6 @@ class LLFFExperiment:
 
             results_list += [cls.RenderResult(**json_row).to_structured_np_array() for json_row in json_data]
 
-        import numpy.lib.recfunctions as rfn
-
         return rfn.stack_arrays(results_list)
 
     @classmethod
@@ -1357,6 +1356,7 @@ class HyperNeRFAdaptor(DatasetAdaptor):
 class HyperNeRFExperimentConfig:
     data_path: str
     output_path: str
+    latex_path: str
     results_folder: str
     converted_dataset_folder: str
     metrics_filename: str
@@ -1364,8 +1364,81 @@ class HyperNeRFExperimentConfig:
     frame_step: int
     pipeline_options: PipelineOptions
     colmap_options: COLMAPOptions
+    webxr_options: WebXROptions
     inpainting_mode: InpaintingMode
     overwrite_ok: bool
+
+    def get_sequence_path(self, sequence_name: str) -> str:
+        return os.path.join(self.data_path, sequence_name)
+
+    def get_converted_dataset_path(self, sequence_name: str) -> str:
+        return os.path.join(self.output_path, self.converted_dataset_folder, sequence_name)
+
+    def get_results_path(self, sequence_name: str) -> str:
+        return os.path.join(self.output_path, self.results_folder, sequence_name)
+
+    def get_profiling_path(self, sequence_name: str) -> str:
+        return os.path.join(self.get_results_path(sequence_name), f"profiling.json")
+
+    def get_metrics_file_path(self, sequence_name: str) -> str:
+        return os.path.join(self.get_results_path(sequence_name), self.metrics_filename)
+
+
+@dataclass(frozen=True)
+class HyperNeRFRenderResult:
+    sequence_name: str
+    ssim: float
+    psnr: float
+    lpips: float
+    ssim_masked: float
+    psnr_masked: float
+    lpips_masked: float
+
+    def to_json(self) -> dict:
+        return self.__dict__
+
+    def save(self, path: str):
+        with open(path, 'w') as f:
+            json.dump(self.to_json(), f)
+
+    @classmethod
+    def from_json(cls, json_dict: dict) -> 'HyperNeRFRenderResult':
+        return HyperNeRFRenderResult(**json_dict)
+
+    @classmethod
+    def load(cls, path: str) -> 'HyperNeRFRenderResult':
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return HyperNeRFRenderResult.from_json(json_data)
+
+    @classmethod
+    def save_many(cls, results: List['HyperNeRFRenderResult'], path: str):
+        payload = [result.to_json() for result in results]
+
+        with open(path, 'w') as f:
+            json.dump(payload, f)
+
+    @classmethod
+    def load_many(cls, path: str) -> List['HyperNeRFRenderResult']:
+        with open(path, 'r') as f:
+            json_data = json.load(f)
+
+        return [HyperNeRFRenderResult.from_json(item) for item in json_data]
+
+
+class MeanSummary:
+    def __init__(self):
+        self._sum: Union[float, int] = 0
+        self._count: Union[float, int] = 0
+
+    def update(self, value: Union[float, int]):
+        self._sum += value
+        self._count += 1
+
+    @property
+    def mean(self) -> Union[float, int]:
+        return self._sum / self._count
 
 
 class HyperNeRFExperiments:
@@ -1387,14 +1460,14 @@ class HyperNeRFExperiments:
                           for sequence_name in sequence_names}
 
     @classmethod
-    def fetch_sequence(cls, data_folder: str, sequence_name: str):
-        dataset_path = os.path.join(data_folder, sequence_name)
+    def fetch_sequence(cls, sequence_name: str, config: HyperNeRFExperimentConfig):
+        raw_dataset_path = config.get_sequence_path(sequence_name)
 
-        if not os.path.isdir(dataset_path):
+        if not os.path.isdir(raw_dataset_path):
             try:
                 logging.info(f"Downloading {sequence_name}...")
                 zip_filename = f"{sequence_name}.zip"
-                zip_path = os.path.join(data_folder, zip_filename)
+                zip_path = os.path.join(config.data_path, zip_filename)
 
                 if not os.path.isfile(zip_path):
                     url = cls.url_format.format(zip_filename)
@@ -1403,22 +1476,59 @@ class HyperNeRFExperiments:
                 logging.debug(f"Extracting zip file...")
 
                 with zipfile.ZipFile(zip_path, 'r') as file:
-                    file.extractall(data_folder)
+                    file.extractall(config.data_path)
 
                 folder_name = cls.sequence_to_folder[sequence_name]
-                extracted_path = os.path.join(data_folder, folder_name)
+                extracted_path = os.path.join(config.data_path, folder_name)
 
                 if os.path.isdir(extracted_path):
-                    shutil.move(src=extracted_path, dst=os.path.join(data_folder, sequence_name))
+                    shutil.move(src=extracted_path, dst=raw_dataset_path)
 
-                logging.info(f"Downloaded dataset {sequence_name} and extracted to {dataset_path}.")
+                logging.info(f"Downloaded dataset {sequence_name} and extracted to {raw_dataset_path}.")
             except Exception:
-                raise FileNotFoundError(f"Could not find dataset at {dataset_path} or automatically download it.")
+                raise FileNotFoundError(f"Could not find dataset at {raw_dataset_path} or automatically download it.")
+
+    @classmethod
+    def create_dataset(cls, sequence_name: str, config: HyperNeRFExperimentConfig):
+        output_dataset_path = config.get_converted_dataset_path(sequence_name)
+        profiling_path = config.get_profiling_path(sequence_name)
+
+        has_results = (os.path.isdir(output_dataset_path) and HiveDataset.is_valid_folder_structure(output_dataset_path)
+                       and os.path.isfile(profiling_path))
+
+        if has_results and not config.overwrite_ok:
+            logging.info(f"Found cached dataset at {output_dataset_path}, skipping.")
+            return
+
+        if not HiveDataset.is_valid_folder_structure(output_dataset_path) or config.overwrite_ok:
+            logging.info(f"Converting dataset and running pipeline for {sequence_name}...")
+            adaptor = HyperNeRFAdaptor(
+                base_path=config.get_sequence_path(sequence_name),
+                output_path=output_dataset_path,
+                num_frames=config.num_frames,
+                frame_step=config.frame_step,
+                colmap_options=config.colmap_options,
+            )
+
+            pipeline = Pipeline(config.pipeline_options,
+                                storage_options=StorageOptions(config.get_sequence_path(sequence_name),
+                                                               output_path=output_dataset_path,
+                                                               overwrite_ok=True,
+                                                               no_cache=config.overwrite_ok),
+                                webxr_options=config.webxr_options)
+            pipeline.run(adaptor=adaptor)
+
+        os.makedirs(config.get_results_path(sequence_name), exist_ok=True)
+
+        shutil.copy(
+            src=os.path.join(output_dataset_path, 'profiling.json'),
+            dst=profiling_path
+        )
 
     @classmethod
     def compare_renders(cls, sequence_name: str, config: HyperNeRFExperimentConfig, lpips_fn: LPIPS):
-        results_path = os.path.join(config.output_path, config.results_folder, sequence_name)
-        metrics_path = os.path.join(results_path, config.metrics_filename)
+        results_path = config.get_results_path(sequence_name)
+        metrics_path = config.get_metrics_file_path(sequence_name)
         has_results = os.path.isdir(results_path) and os.path.isfile(metrics_path)
 
         if has_results and not config.overwrite_ok:
@@ -1427,15 +1537,14 @@ class HyperNeRFExperiments:
 
         logging.info(f"Creating dataset for {sequence_name}...")
         adaptor = HyperNeRFAdaptor(
-            base_path=os.path.join(config.data_path, sequence_name),
-            output_path=os.path.join(config.output_path, 'converted_dataset', sequence_name),
+            base_path=config.get_sequence_path(sequence_name),
+            output_path=config.get_converted_dataset_path(sequence_name),
             num_frames=config.num_frames,
             frame_step=config.frame_step,
             colmap_options=config.colmap_options,
         )
 
-        dataset = adaptor.convert(estimate_pose=True, estimate_depth=True, inpainting_mode=config.inpainting_mode,
-                                  static_camera=False, no_cache=config.overwrite_ok)
+        dataset = HiveDataset(adaptor.output_path)
         pipeline = Pipeline(config.pipeline_options, storage_options=StorageOptions(dataset.base_path,
                                                                                     output_path=dataset.base_path,
                                                                                     overwrite_ok=config.overwrite_ok,
@@ -1476,14 +1585,150 @@ class HyperNeRFExperiments:
                 psnr_masked = float('nan')
                 lpips_masked = float('nan')
 
-            metrics.append({'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
-                            'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
+            metrics.append(HyperNeRFRenderResult(
+                sequence_name=sequence_name,
+                ssim=ssim, psnr=psnr, lpips=lpips,
+                ssim_masked=ssim_masked, psnr_masked=psnr_masked, lpips_masked=lpips_masked)
+            )
 
             Image.fromarray(val_frame).save(os.path.join(results_path, f"{i:06d}.jpg"))
             est_frame.save(os.path.join(results_path, f"{i:06d}_render.jpg"))
 
-        with open(metrics_path, 'w') as f:
-            json.dump(metrics, f)
+        HyperNeRFRenderResult.save_many(metrics, metrics_path)
+
+    @classmethod
+    def _gather_profiling_results(cls, config: HyperNeRFExperimentConfig):
+        data_rows = dict()
+
+        for sequence_name in cls.sequence_names:
+            profiling_path = config.get_profiling_path(sequence_name=sequence_name)
+
+            with open(profiling_path, mode='r') as f:
+                json_data = json.load(f)
+
+            data_row = {
+                'sequence_name': sequence_name,
+                'total_seconds': json_data['elapsed_time']['total'],
+                'frames_per_minute': 60.0 / json_data['elapsed_time']['per_frame'],
+                'file_size_mb': json_data['file_size']['total'] / 1e6,
+                'vram_gb': json_data['peak_vram_usage']['allocated'] / 1e9
+            }
+
+            data_rows[sequence_name] = data_row
+
+        return data_rows
+
+    @classmethod
+    def _gather_render_results(cls, config: HyperNeRFExperimentConfig):
+        data_rows = dict()
+
+        for sequence_name in cls.sequence_names:
+            metrics_path = config.get_metrics_file_path(sequence_name=sequence_name)
+
+            results = HyperNeRFRenderResult.load_many(metrics_path)
+            summaries = {
+                'ssim': MeanSummary(),
+                'psnr': MeanSummary(),
+                'lpips': MeanSummary(),
+                'ssim_masked': MeanSummary(),
+                'psnr_masked': MeanSummary(),
+                'lpips_masked': MeanSummary(),
+            }
+
+            for i, result in enumerate(results):
+                assert result.sequence_name == sequence_name, \
+                    f"Loaded wrong result dict for sequence {sequence_name} (got {result.sequence_name})."
+
+                if np.isnan(result.ssim_masked) or np.isnan(result.psnr_masked) or np.isnan(result.lpips_masked):
+                    logging.debug(f"Skipping frame {i:,d} of {sequence_name} due to NaNs...")
+                    continue
+
+                summaries['ssim'].update(result.ssim)
+                summaries['psnr'].update(result.psnr)
+                summaries['lpips'].update(result.lpips)
+                summaries['ssim_masked'].update(result.ssim_masked)
+                summaries['psnr_masked'].update(result.psnr_masked)
+                summaries['lpips_masked'].update(result.lpips_masked)
+
+            data_rows[sequence_name] = HyperNeRFRenderResult(
+                sequence_name=sequence_name,
+                ssim=summaries['ssim'].mean,
+                psnr=summaries['psnr'].mean,
+                lpips=summaries['lpips'].mean,
+                ssim_masked=summaries['ssim_masked'].mean,
+                psnr_masked=summaries['psnr_masked'].mean,
+                lpips_masked=summaries['lpips_masked'].mean,
+            )
+
+        return data_rows
+
+    @classmethod
+    def _merge_results(cls, profiling_results: Dict[str, Dict[str, float]],
+                       rendering_results: Dict[str, HyperNeRFRenderResult]) -> np.ndarray:
+        rows = []
+
+        for sequence_name in cls.sequence_names:
+            profiling_result = profiling_results[sequence_name]
+            rendering_result = rendering_results[sequence_name]
+
+            row = np.array(
+                [(
+                    sequence_name,
+                    profiling_result['total_seconds'],
+                    profiling_result['frames_per_minute'],
+                    profiling_result['file_size_mb'],
+                    profiling_result['vram_gb'],
+                    rendering_result.ssim,
+                    rendering_result.psnr,
+                    rendering_result.lpips,
+                    rendering_result.ssim_masked,
+                    rendering_result.psnr_masked,
+                    rendering_result.lpips_masked,
+                )],
+                dtype=[
+                    ('sequence_name', 'U16'),
+                    ('total_seconds', float),
+                    ('frames_per_minute', float),
+                    ('file_size_mb', float),
+                    ('vram_gb', float),
+                    ('ssim', float),
+                    ('psnr', float),
+                    ('lpips', float),
+                    ('ssim_masked', float),
+                    ('psnr_masked', float),
+                    ('lpips_masked', float),
+                ]
+            )
+
+            rows.append(row)
+
+            break
+
+        return rfn.stack_arrays(rows)
+
+    @classmethod
+    def export_results(cls, config: HyperNeRFExperimentConfig):
+        profiling_results = cls._gather_profiling_results(config)
+        rendering_results = cls._gather_render_results(config)
+
+        merged_results = cls._merge_results(profiling_results, rendering_results)
+        results = pd.DataFrame.from_records(merged_results)
+
+        def format_seconds(total_seconds: float) -> str:
+            minutes, seconds = divmod(total_seconds, 60)
+            hours, minutes = divmod(minutes, 60)
+
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        formatters = {
+            'total_seconds': format_seconds,
+        }
+        # TODO: Average all rows to give results for our method (this is to prepare for comparison against other
+        #  methods).
+        # TODO: Add column 'Method' and put in the name of our method.
+        # TODO: Replace column names with Latex friendly names (remove underscores, put units in brackets, replace
+        #  '_masked' with superscript dagger to refer to in caption, round to appropriate SF, replace with names to use
+        #  in paper).
 
 
 # TODO: Pull out each experiment type into own class.
@@ -2629,6 +2874,7 @@ class Experiments:
         config = HyperNeRFExperimentConfig(
             data_path=self.data_path,
             output_path=self.output_path,
+            latex_path=self.latex_path,
             results_folder='hypernerf',
             converted_dataset_folder='converted_dataset',
             metrics_filename='metrics.json',
@@ -2636,16 +2882,16 @@ class Experiments:
             frame_step=self.frame_step,
             pipeline_options=self.est_options.copy(),
             colmap_options=self.colmap_options.copy(),
+            webxr_options=self.webxr_options.copy(),
             inpainting_mode=self.inpainting_mode,
             overwrite_ok=self.overwrite_ok
         )
 
         for sequence_name in HyperNeRFExperiments.sequence_names:
-            HyperNeRFExperiments.fetch_sequence(self.data_path, sequence_name)
-            # TODO: Separate dataset conversion and record performance stats (runtime, VRAM usage).
+            HyperNeRFExperiments.fetch_sequence(sequence_name=sequence_name, config=config)
+            HyperNeRFExperiments.create_dataset(sequence_name=sequence_name, config=config)
             HyperNeRFExperiments.compare_renders(sequence_name=sequence_name, config=config, lpips_fn=self.lpips_fn)
-            # TODO: Export HyperNeRF results summary and latex tables (ignore nan rows).
-            break
+            HyperNeRFExperiments.export_results(config=config)
 
 
 def main():
