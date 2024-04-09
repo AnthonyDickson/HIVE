@@ -2891,7 +2891,8 @@ class Experiments:
             HyperNeRFExperiments.fetch_sequence(sequence_name=sequence_name, config=config)
             HyperNeRFExperiments.create_dataset(sequence_name=sequence_name, config=config)
             HyperNeRFExperiments.compare_renders(sequence_name=sequence_name, config=config, lpips_fn=self.lpips_fn)
-            HyperNeRFExperiments.export_results(config=config)
+
+        HyperNeRFExperiments.export_results(config=config)
 
 
 def main():
