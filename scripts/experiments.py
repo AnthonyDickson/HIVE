@@ -1459,7 +1459,7 @@ class HyperNeRFExperiments:
     sequence_to_archive_name = {
         'vrig_3dprinter': 'vrig-3dprinter',
         'vrig_broom': 'broom2',
-        'vrig_chicken': 'vrig_chicken',
+        'vrig_chicken': 'vrig-chicken',
         'vrig_peel-banana': 'vrig-peel-banana',
     }
 
