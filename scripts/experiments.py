@@ -1456,8 +1456,12 @@ class HyperNeRFExperiments:
         'vrig_peel-banana',
     ]
 
-    sequence_to_folder = {sequence_name: sequence_name.replace('_', '-')
-                          for sequence_name in sequence_names}
+    sequence_to_archive_name = {
+        'vrig_3dprinter': 'vrig-3dprinter',
+        'vrig_broom': 'broom2',
+        'vrig_chicken': 'vrig_chicken',
+        'vrig_peel-banana': 'vrig-peel-banana',
+    }
 
     @classmethod
     def fetch_sequence(cls, sequence_name: str, config: HyperNeRFExperimentConfig):
@@ -1478,7 +1482,7 @@ class HyperNeRFExperiments:
                 with zipfile.ZipFile(zip_path, 'r') as file:
                     file.extractall(config.data_path)
 
-                folder_name = cls.sequence_to_folder[sequence_name]
+                folder_name = cls.sequence_to_archive_name[sequence_name]
                 extracted_path = os.path.join(config.data_path, folder_name)
 
                 if os.path.isdir(extracted_path):
