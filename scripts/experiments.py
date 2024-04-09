@@ -43,6 +43,7 @@ from PIL import Image
 from lpips import LPIPS
 from omegaconf import OmegaConf
 from torch.utils.data.dataloader import default_collate
+from tqdm import tqdm
 
 from hive.custom_types import File, Size
 from hive.dataset_adaptors import VideoAdaptorBase, estimate_depth_dpt, DatasetAdaptor
@@ -1352,6 +1353,21 @@ class HyperNeRFAdaptor(DatasetAdaptor):
         return intrinsic, scaled_poses
 
 
+@dataclass(frozen=True)
+class HyperNeRFExperimentConfig:
+    data_path: str
+    output_path: str
+    results_folder: str
+    converted_dataset_folder: str
+    metrics_filename: str
+    num_frames: int
+    frame_step: int
+    pipeline_options: PipelineOptions
+    colmap_options: COLMAPOptions
+    inpainting_mode: InpaintingMode
+    overwrite_ok: bool
+
+
 class HyperNeRFExperiments:
     """
     Uses dataset from Park, Keunhong, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman,
@@ -1398,6 +1414,76 @@ class HyperNeRFExperiments:
                 logging.info(f"Downloaded dataset {sequence_name} and extracted to {dataset_path}.")
             except Exception:
                 raise FileNotFoundError(f"Could not find dataset at {dataset_path} or automatically download it.")
+
+    @classmethod
+    def compare_renders(cls, sequence_name: str, config: HyperNeRFExperimentConfig, lpips_fn: LPIPS):
+        results_path = os.path.join(config.output_path, config.results_folder, sequence_name)
+        metrics_path = os.path.join(results_path, config.metrics_filename)
+        has_results = os.path.isdir(results_path) and os.path.isfile(metrics_path)
+
+        if has_results and not config.overwrite_ok:
+            logging.info(f"Found cached results at {results_path}, skipping.")
+            return
+
+        logging.info(f"Creating dataset for {sequence_name}...")
+        adaptor = HyperNeRFAdaptor(
+            base_path=os.path.join(config.data_path, sequence_name),
+            output_path=os.path.join(config.output_path, 'converted_dataset', sequence_name),
+            num_frames=config.num_frames,
+            frame_step=config.frame_step,
+            colmap_options=config.colmap_options,
+        )
+
+        dataset = adaptor.convert(estimate_pose=True, estimate_depth=True, inpainting_mode=config.inpainting_mode,
+                                  static_camera=False, no_cache=config.overwrite_ok)
+        pipeline = Pipeline(config.pipeline_options, storage_options=StorageOptions(dataset.base_path,
+                                                                                    output_path=dataset.base_path,
+                                                                                    overwrite_ok=config.overwrite_ok,
+                                                                                    no_cache=config.overwrite_ok))
+
+        multicam_colmap_options = config.colmap_options.copy()
+        multicam_colmap_options.single_camera_per_folder = True
+        train_intrinsic, train_extrinsic = adaptor.estimate_pose(is_train=True, options=multicam_colmap_options)
+
+        with temporary_camera_matrix(dataset, train_intrinsic), temporary_trajectory(dataset, train_extrinsic):
+            bg = pipeline.create_static_mesh(dataset)
+
+        _, val_extrinsic = adaptor.estimate_pose(is_train=False)
+        camera_matrix = CameraMatrix.from_matrix(train_intrinsic, (dataset.frame_height, dataset.frame_width))
+
+        logging.info(f"Rendering and comparing frames for {sequence_name}...")
+        metrics = []
+        results_path = results_path
+        os.makedirs(results_path, exist_ok=True)
+
+        for i in tqdm(range(adaptor.num_frames)):
+            with temporary_camera_matrix(dataset, train_intrinsic), temporary_trajectory(dataset, train_extrinsic):
+                fg = pipeline.process_frame(dataset, index=i)
+
+            pose = val_extrinsic[i]
+            est_frame = LLFFExperiment.render_mesh(camera_matrix, pose, fg, bg)
+            val_frame = adaptor.get_frame(index=i, is_train=False)
+
+            est_image_np = np.asarray(est_frame)
+            ssim, psnr, lpips = compare_images(val_frame, est_image_np, lpips_fn=lpips_fn)
+
+            val_frame_masked = val_frame.copy()
+            val_frame_masked[est_image_np == [255, 255, 255]] = 255
+            ssim_masked, psnr_masked, lpips_masked = compare_images(val_frame_masked, est_image_np, lpips_fn=lpips_fn)
+
+            if np.isinf(psnr_masked) or ssim_masked == 1.0 or lpips_masked == 0.0:
+                ssim_masked = float('nan')
+                psnr_masked = float('nan')
+                lpips_masked = float('nan')
+
+            metrics.append({'ssim': ssim, 'psnr': psnr, 'lpips': lpips,
+                            'ssim_masked': ssim_masked, 'psnr_masked': psnr_masked, 'lpips_masked': lpips_masked})
+
+            Image.fromarray(val_frame).save(os.path.join(results_path, f"{i:06d}.jpg"))
+            est_frame.save(os.path.join(results_path, f"{i:06d}_render.jpg"))
+
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f)
 
 
 # TODO: Pull out each experiment type into own class.
@@ -1457,16 +1543,19 @@ class Experiments:
 
         self.dataset_paths = self.generate_dataset_paths(output_path, dataset_names, self.pipeline_configurations)
 
-        self.summaries_path = pjoin(self.output_path, 'summaries')
-        self.latex_path = pjoin(self.output_path, 'latex')
-        self.trajectory_outputs_path = pjoin(self.output_path, 'trajectory')
-        self.compression_outputs_path = pjoin(self.output_path, 'compression')
-        self.inpainting_outputs_path = pjoin(self.output_path, 'inpainting')
-        self.tmp_path = pjoin(self.output_path, 'tmp')
+        def create_folder(*path_parts: str, exist_ok=True) -> str:
+            full_path = os.path.join(*path_parts)
+            os.makedirs(full_path, exist_ok=exist_ok)
 
-        for path in (self.summaries_path, self.latex_path, self.tmp_path, self.compression_outputs_path,
-                     self.trajectory_outputs_path, self.inpainting_outputs_path):
-            os.makedirs(path, exist_ok=True)
+            return str(full_path)
+
+        self.summaries_path = create_folder(self.output_path, 'summaries')
+        self.latex_path = create_folder(self.output_path, 'latex')
+        self.trajectory_outputs_path = create_folder(self.output_path, 'trajectory')
+        self.compression_outputs_path = create_folder(self.output_path, 'compression')
+        self.inpainting_outputs_path = create_folder(self.output_path, 'inpainting')
+        self.converted_datasets_path = create_folder(self.output_path, 'converted_dataset')
+        self.tmp_path = create_folder(self.output_path, 'tmp')
 
         self.pipeline_results_path = pjoin(self.summaries_path, 'pipeline.json')
         self.trajectory_results_path = pjoin(self.summaries_path, 'trajectory.json')
@@ -1477,6 +1566,8 @@ class Experiments:
 
         self.colmap_options = COLMAPOptions(quality='medium')
         self.webxr_options = WebXROptions(webxr_path=self.tmp_path)
+
+        self.lpips_fn = LPIPS(net='alex')
 
     @staticmethod
     def generate_dataset_paths(output_path: str,
@@ -2199,7 +2290,6 @@ class Experiments:
 
             return trimesh.Trimesh(**mesh_data)
 
-        lpips_fn = LPIPS(net='alex')
         results: Dict[str, Dict[str, Dict[str, float]]] = dict()
         compression_configs = ((config.uncompressed_mesh_folder, config.uncompressed_mesh_extension, trimesh.load),
                                (config.compressed_mesh_folder, config.compressed_mesh_extension, load_draco))
@@ -2249,7 +2339,7 @@ class Experiments:
                     image_pair.append(cv2.imread(screen_capture_path))
 
                 logging.info(f"Calculating image similarity for {dataset_name_and_label}...")
-                ssim, psnr, lpips = compare_images(image_pair[0], image_pair[1], lpips_fn=lpips_fn)
+                ssim, psnr, lpips = compare_images(image_pair[0], image_pair[1], lpips_fn=self.lpips_fn)
                 results[dataset_name][label] = {
                     'ssim': ssim,
                     'psnr': psnr,
@@ -2328,7 +2418,6 @@ class Experiments:
 
         logging.debug(f"Loading inpainting model...")
         model = InpaintingExperiment.load_inpainting_model()
-        lpips_fn = LPIPS(net='alex')
         results = dict()
 
         for dataset_name in self.dataset_names:
@@ -2375,7 +2464,7 @@ class Experiments:
                         os.path.join(output_path, f"depth_inpainted_{filename_suffix}"))
 
                     ssim, psnr, lpips = InpaintingExperiment.compare_rgb(rgb_raw, rgb_inpainted, crop_mask,
-                                                                         lpips_fn=lpips_fn)
+                                                                         lpips_fn=self.lpips_fn)
                     depth_metrics = InpaintingExperiment.compare_depth(depth_raw, depth_inpainted, crop_mask)
 
                     crop_results = {
@@ -2515,7 +2604,6 @@ class Experiments:
 
     def run_llff_experiments(self, sequence_names: List[str]):
         llff_folder = os.path.join(self.output_path, 'llff')
-        lpips_fn = LPIPS(net='alex')
 
         for sequence_name in sequence_names:
             results_path = os.path.join(llff_folder, sequence_name)
@@ -2531,50 +2619,32 @@ class Experiments:
                                            output_folder=os.path.join(self.output_path, 'converted_dataset'),
                                            results_folder=results_path,
                                            frame_index=0,
-                                           lpips_fn=lpips_fn,
+                                           lpips_fn=self.lpips_fn,
                                            no_cache=self.overwrite_ok)
 
         results_records = LLFFExperiment.gather_results(output_folder=llff_folder)
         LLFFExperiment.export_latex(results_records, summary_path=self.summaries_path, latex_path=self.latex_path)
 
     def run_hypernerf_experiments(self):
-        colmap_options = self.colmap_options.copy()
-        colmap_options.single_camera_per_folder = True
+        config = HyperNeRFExperimentConfig(
+            data_path=self.data_path,
+            output_path=self.output_path,
+            results_folder='hypernerf',
+            converted_dataset_folder='converted_dataset',
+            metrics_filename='metrics.json',
+            num_frames=self.num_frames,
+            frame_step=self.frame_step,
+            pipeline_options=self.est_options.copy(),
+            colmap_options=self.colmap_options.copy(),
+            inpainting_mode=self.inpainting_mode,
+            overwrite_ok=self.overwrite_ok
+        )
 
         for sequence_name in HyperNeRFExperiments.sequence_names:
             HyperNeRFExperiments.fetch_sequence(self.data_path, sequence_name)
-
-            adaptor = HyperNeRFAdaptor(
-                base_path=os.path.join(self.data_path, sequence_name),
-                output_path=os.path.join(self.output_path, 'converted_dataset', sequence_name),
-                num_frames=self.num_frames,
-                frame_step=self.frame_step,
-                colmap_options=self.colmap_options,
-            )
-
-            dataset = adaptor.convert(estimate_pose=True, estimate_depth=True, inpainting_mode=self.inpainting_mode,
-                                      static_camera=False, no_cache=self.overwrite_ok)
-            pipeline = Pipeline(self.cm_options, storage_options=StorageOptions(dataset.base_path,
-                                                                                output_path=dataset.base_path,
-                                                                                overwrite_ok=self.overwrite_ok,
-                                                                                no_cache=self.overwrite_ok))
-
-            train_intrinsic, train_extrinsic = adaptor.estimate_pose(is_train=True, options=colmap_options)
-
-            with temporary_camera_matrix(dataset, train_intrinsic), temporary_trajectory(dataset, train_extrinsic):
-                fg = pipeline.process_frame(dataset, index=0)
-                bg = pipeline.create_static_mesh(dataset)
-
-            _, val_extrinsic = adaptor.estimate_pose(is_train=False)
-            camera_matrix = CameraMatrix.from_matrix(train_intrinsic, (dataset.frame_height, dataset.frame_width))
-            pose = val_extrinsic[0]
-
-            rgb = LLFFExperiment.render_mesh(camera_matrix, pose, fg, bg)
-            val_frame = adaptor.get_frame(index=0, is_train=False)
-
-            output_side_by_side = np.hstack((rgb, val_frame))
-            Image.fromarray(output_side_by_side).save('image.jpg')
-
+            # TODO: Separate dataset conversion and record performance stats (runtime, VRAM usage).
+            HyperNeRFExperiments.compare_renders(sequence_name=sequence_name, config=config, lpips_fn=self.lpips_fn)
+            # TODO: Export HyperNeRF results summary and latex tables (ignore nan rows).
             break
 
 
