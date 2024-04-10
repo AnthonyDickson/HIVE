@@ -1359,6 +1359,7 @@ def estimate_depth_dpt(rgb_dataset, output_path: str, weights_filename='dpt_hybr
 
     # load network
     # TODO: Make input resolution a parameter.
+    #  OR base it off of the image resolution: net_h, net_w, _ = rgb_dataset[0].shape
     net_w = 640
     net_h = 480
 

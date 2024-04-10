@@ -935,7 +935,11 @@ class LLFFExperiment:
         latex_path = os.path.join(latex_path, 'llff.tex')
 
         logging.info(f"Exporting latex to {latex_path}...")
-        df_merged.to_latex(latex_path, float_format="%.2f")
+        df_merged.to_latex(latex_path, float_format="%.2f", formatters={
+            'SSIM': "{:.3f}".format,
+            'PSNR': "{:.1f}".format,
+            'LPIPS': "{:.3f}".format,
+        })
 
 
 class DynamicScenesExperiments:
@@ -1130,11 +1134,12 @@ class HyperNeRFAdaptor(DatasetAdaptor):
 
     camera_folder = 'camera'
     rgb_folder = 'rgb'
+    required_folders = [camera_folder, rgb_folder]
 
+    colmap_mask_folder = 'mask-colmap'
     camera_filename_format = "{camera_id:s}.json"
-
     scales = {1, 2, 4, 8, 16}
-    rgb_sub_folder_format = "{scale:d}x"
+    scale_format = "{scale:d}x"
 
     def __init__(self, base_path: File, output_path: File, num_frames=-1, frame_step=1, colmap_options=COLMAPOptions(),
                  scale: int = 2, is_train=True):
@@ -1216,7 +1221,7 @@ class HyperNeRFAdaptor(DatasetAdaptor):
         if is_train is None:
             is_train = self.is_train
 
-        rgb_sub_folder = self.rgb_sub_folder_format.format(scale=scale)
+        rgb_sub_folder = self.scale_format.format(scale=scale)
         frame_name = self._get_frame_id(index, is_train)
         frame_path = os.path.join(self.base_path, self.rgb_folder, rgb_sub_folder, f"{frame_name}.png")
 
@@ -1231,7 +1236,7 @@ class HyperNeRFAdaptor(DatasetAdaptor):
 
         self._validate_scale(scale)
 
-        rgb_sub_folder = self.rgb_sub_folder_format.format(scale=scale)
+        rgb_sub_folder = self.scale_format.format(scale=scale)
         frame_name = self._get_frame_id(index, is_train)
         frame_path = os.path.join(self.base_path, self.rgb_folder, rgb_sub_folder, f"{frame_name}.png")
 
@@ -1280,6 +1285,22 @@ class HyperNeRFAdaptor(DatasetAdaptor):
                                 for i in range(self.num_frames)])
         return Trajectory(trajectory)
 
+    @property
+    def has_colmap_masks(self) -> bool:
+        return os.path.isdir(os.path.join(self.base_path, self.colmap_mask_folder))
+
+    def get_colmap_mask_path(self, index=0, scale: Optional[int] = None, is_train: Optional[bool] = None) -> str:
+        if scale is None:
+            scale = self.scale
+
+        if is_train is None:
+            is_train = self.is_train
+
+        frame_filename = f"{self._get_frame_id(index, is_train=is_train)}.png.png"
+
+        return os.path.join(self.base_path, self.colmap_mask_folder, self.scale_format.format(scale=scale),
+                            frame_filename)
+
     def estimate_pose(self, is_train: bool, options=COLMAPOptions(), overwrite_ok=False):
         logging.info(f"Estimating stereo COLMAP poses for {self.base_path}...")
         workspace_path = os.path.join(self.output_path, 'colmap')
@@ -1291,6 +1312,10 @@ class HyperNeRFAdaptor(DatasetAdaptor):
         depth_train_path = os.path.join(depth_path, 'train')
 
         cm = COLMAPProcessor(image_path=rgb_path, workspace_path=workspace_path, colmap_options=options)
+
+        mask_path = cm.mask_path
+        mask_train_path = os.path.join(mask_path, 'train')
+        mask_val_path = os.path.join(mask_path, 'val')
 
         if not os.path.isdir(rgb_path) or overwrite_ok:
             logging.debug(f"Copying stereo images...")
@@ -1311,6 +1336,27 @@ class HyperNeRFAdaptor(DatasetAdaptor):
                 dst = os.path.join(rgb_val_path, HiveDataset.index_to_filename(i, file_extension=src[-3:]))
                 shutil.copy(src, dst)
 
+        if self.has_colmap_masks and (not os.path.isdir(mask_path) or overwrite_ok):
+            logging.debug(f"Copying colmap masks...")
+
+            if os.path.isdir(mask_path):
+                shutil.rmtree(mask_path)
+
+            os.makedirs(mask_train_path)
+            os.makedirs(mask_val_path)
+
+            for i, frame_name in enumerate(self.dataset.train_ids):
+                src = os.path.join(self.get_colmap_mask_path(i, is_train=True))
+                filename = HiveDataset.index_to_filename(i, file_extension=src[-3:])
+                dst = os.path.join(mask_train_path, f"{filename}.png")
+                shutil.copy(src, dst)
+
+            for i, frame_name in enumerate(self.dataset.val_ids):
+                src = os.path.join(self.get_colmap_mask_path(i, is_train=False))
+                filename = HiveDataset.index_to_filename(i, file_extension=src[-3:])
+                dst = os.path.join(mask_val_path, f"{filename}.png")
+                shutil.copy(src, dst)
+
         if not os.path.isdir(depth_path) or overwrite_ok:
             logging.debug(f"Estimating depth maps...")
 
@@ -1320,7 +1366,7 @@ class HyperNeRFAdaptor(DatasetAdaptor):
             estimate_depth_dpt(ImageFolderDataset(rgb_train_path), output_path=depth_train_path)
 
         if not cm.probably_has_results or overwrite_ok:
-            cm.run(use_masks=False)
+            cm.run(use_masks=self.has_colmap_masks)
 
         train_intrinsic, train_extrinsic = cm.load_camera_params(camera_id=1)
         val_intrinsic, val_extrinsic = cm.load_camera_params(camera_id=2)
@@ -1556,6 +1602,7 @@ class HyperNeRFExperiments:
 
         multicam_colmap_options = config.colmap_options.copy()
         multicam_colmap_options.single_camera_per_folder = True
+        multicam_colmap_options.quality = 'low'
         train_intrinsic, train_extrinsic = adaptor.estimate_pose(is_train=True, options=multicam_colmap_options)
 
         with temporary_camera_matrix(dataset, train_intrinsic), temporary_trajectory(dataset, train_extrinsic):
@@ -1610,10 +1657,14 @@ class HyperNeRFExperiments:
             with open(profiling_path, mode='r') as f:
                 json_data = json.load(f)
 
+            dataset_path = config.get_converted_dataset_path(sequence_name)
+            dataset = HiveDataset(dataset_path)
+            frame_count = dataset.num_frames
+
             data_row = {
                 'sequence_name': sequence_name,
                 'total_seconds': json_data['elapsed_time']['total'],
-                'frames_per_minute': 60.0 / json_data['elapsed_time']['per_frame'],
+                'frames_per_minute': frame_count / (json_data['elapsed_time']['total'] / 60.0),
                 'file_size_mb': json_data['file_size']['total'] / 1e6,
                 'vram_gb': json_data['peak_vram_usage']['allocated'] / 1e9
             }
@@ -1706,33 +1757,66 @@ class HyperNeRFExperiments:
 
             rows.append(row)
 
-            break
-
         return rfn.stack_arrays(rows)
 
     @classmethod
     def export_results(cls, config: HyperNeRFExperimentConfig):
+        latex_path = os.path.join(config.latex_path, 'hypernerf.tex')
+        logging.info(f"Exporting latex to {latex_path}...")
+
         profiling_results = cls._gather_profiling_results(config)
         rendering_results = cls._gather_render_results(config)
 
         merged_results = cls._merge_results(profiling_results, rendering_results)
         results = pd.DataFrame.from_records(merged_results)
+        results = results.set_index('sequence_name')
+        results.loc['Mean'] = results.mean()
+
+        sequence_names_map = {
+            'vrig_3dprinter': '3D Printer',
+            'vrig_broom': 'Broom',
+            'vrig_chicken': 'Chicken',
+            'vrig_peel-banana': 'Peel Banana'
+        }
+
+        results = results.rename(sequence_names_map, axis='index')
+
+        column_name_map = {
+            'total_seconds': 'Time',
+            'frames_per_minute': 'Frames Per Minute',
+            'file_size_mb': 'Storage (MB)',
+            'vram_gb': 'VRAM (GB)',
+            'ssim': 'SSIM',
+            'psnr': 'PSNR',
+            'lpips': 'LPIPS',
+            'ssim_masked': r'SSIM$^\dagger$',
+            'psnr_masked': r'PSNR$^\dagger$',
+            'lpips_masked': r'LPIPS$^\dagger$',
+        }
+
+        results = results.rename(column_name_map, axis='columns')
+
+        results.index = results.index.rename('Sequence')
 
         def format_seconds(total_seconds: float) -> str:
             minutes, seconds = divmod(total_seconds, 60)
             hours, minutes = divmod(minutes, 60)
 
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            return f"{int(minutes):02d}m{int(seconds):02d}s"
 
         formatters = {
-            'total_seconds': format_seconds,
+            'Time': format_seconds,
+            'Frames Per Minute': "{:.0f}".format,
+            'Storage (MB)': "{:.0f}".format,
+            'VRAM (GB)': "{:.1f}".format,
+            'SSIM': "{:.3f}".format,
+            'PSNR': "{:.1f}".format,
+            'LPIPS': "{:.3f}".format,
+            'SSIM$^\dagger$': "{:.3f}".format,
+            'PSNR$^\dagger$': "{:.1f}".format,
+            'LPIPS$^\dagger$': "{:.3f}".format,
         }
-        # TODO: Average all rows to give results for our method (this is to prepare for comparison against other
-        #  methods).
-        # TODO: Add column 'Method' and put in the name of our method.
-        # TODO: Replace column names with Latex friendly names (remove underscores, put units in brackets, replace
-        #  '_masked' with superscript dagger to refer to in caption, round to appropriate SF, replace with names to use
-        #  in paper).
+        results.to_latex(latex_path, formatters=formatters)
 
 
 # TODO: Pull out each experiment type into own class.

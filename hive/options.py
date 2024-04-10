@@ -15,9 +15,10 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
-import cv2
 import enum
 from typing import Optional, List, Dict
+
+import cv2
 
 from hive.custom_types import File
 
@@ -115,7 +116,15 @@ class COLMAPOptions(Options):
         self.dense = dense
         self.quality = quality
 
-        assert quality in COLMAPOptions.quality_choices, f"Quality must be one of: {COLMAPOptions.quality_choices}, got {quality}."
+    @property
+    def quality(self) -> str:
+        return self._quality
+
+    @quality.setter
+    def quality(self, quality: str):
+        assert quality in COLMAPOptions.quality_choices, \
+            f"Quality must be one of: {COLMAPOptions.quality_choices}, got {quality}."
+        self._quality = quality
 
     @staticmethod
     def add_args(parser: argparse.ArgumentParser):
