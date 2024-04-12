@@ -43,6 +43,7 @@ import yaml
 from PIL import Image
 from lpips import LPIPS
 from omegaconf import OmegaConf
+from pytorch_msssim import ms_ssim
 from torch.utils.data.dataloader import default_collate
 from tqdm import tqdm
 
@@ -1431,17 +1432,35 @@ class HyperNeRFExperimentConfig:
 
 
 @dataclass(frozen=True)
-class HyperNeRFRenderResult:
-    sequence_name: str
-    ssim: float
+class HyperNeRFImageComparison:
+    ms_ssim: float
     psnr: float
     lpips: float
-    ssim_masked: float
-    psnr_masked: float
-    lpips_masked: float
 
-    def to_json(self) -> dict:
-        return self.__dict__
+    def to_json(self) -> Dict[str, float]:
+        return {
+            'ms_ssim': self.ms_ssim,
+            'psnr': self.psnr,
+            'lpips': self.lpips
+        }
+
+    @classmethod
+    def from_json(cls, json_dict: Dict[str, float]) -> 'HyperNeRFImageComparison':
+        return cls(**json_dict)
+
+
+@dataclass(frozen=True)
+class HyperNeRFRenderResult:
+    sequence_name: str
+    metrics: HyperNeRFImageComparison
+    metrics_masked: HyperNeRFImageComparison
+
+    def to_json(self) -> Dict[str, Union[str, float]]:
+        return {
+            'sequence_name': self.sequence_name,
+            **self.metrics.to_json(),
+            **{f"{metric_name}_masked": metric for metric_name, metric in self.metrics_masked.to_json().items()}
+        }
 
     def save(self, path: str):
         with open(path, 'w') as f:
@@ -1449,7 +1468,17 @@ class HyperNeRFRenderResult:
 
     @classmethod
     def from_json(cls, json_dict: dict) -> 'HyperNeRFRenderResult':
-        return HyperNeRFRenderResult(**json_dict)
+        return HyperNeRFRenderResult(json_dict['sequence_name'],
+                                     HyperNeRFImageComparison(
+                                         ms_ssim=json_dict['ms_ssim'],
+                                         psnr=json_dict['psnr'],
+                                         lpips=json_dict['lpips'],
+                                     ),
+                                     HyperNeRFImageComparison(
+                                         ms_ssim=json_dict['ms_ssim_masked'],
+                                         psnr=json_dict['psnr_masked'],
+                                         lpips=json_dict['lpips_masked'],
+                                     ))
 
     @classmethod
     def load(cls, path: str) -> 'HyperNeRFRenderResult':
@@ -1625,27 +1654,41 @@ class HyperNeRFExperiments:
             val_frame = adaptor.get_frame(index=i, is_train=False)
 
             est_image_np = np.asarray(est_frame)
-            ssim, psnr, lpips = compare_images(val_frame, est_image_np, lpips_fn=lpips_fn)
+            results = cls.compare_images(val_frame, est_image_np, lpips_fn=lpips_fn)
 
             val_frame_masked = val_frame.copy()
             val_frame_masked[est_image_np == [255, 255, 255]] = 255
-            ssim_masked, psnr_masked, lpips_masked = compare_images(val_frame_masked, est_image_np, lpips_fn=lpips_fn)
+            masked_results = cls.compare_images(val_frame_masked, est_image_np, lpips_fn=lpips_fn)
 
-            if np.isinf(psnr_masked) or ssim_masked == 1.0 or lpips_masked == 0.0:
-                ssim_masked = float('nan')
-                psnr_masked = float('nan')
-                lpips_masked = float('nan')
+            if np.isinf(masked_results.psnr) or masked_results.ms_ssim == 1.0 or masked_results.lpips == 0.0:
+                masked_results = HyperNeRFImageComparison(ms_ssim=float('nan'), psnr=float('nan'), lpips=float('nan'))
 
-            metrics.append(HyperNeRFRenderResult(
-                sequence_name=sequence_name,
-                ssim=ssim, psnr=psnr, lpips=lpips,
-                ssim_masked=ssim_masked, psnr_masked=psnr_masked, lpips_masked=lpips_masked)
+            metrics.append(
+                HyperNeRFRenderResult(sequence_name=sequence_name, metrics=results, metrics_masked=masked_results)
             )
 
             Image.fromarray(val_frame).save(os.path.join(results_path, f"{i:06d}.jpg"))
             est_frame.save(os.path.join(results_path, f"{i:06d}_render.jpg"))
 
         HyperNeRFRenderResult.save_many(metrics, metrics_path)
+
+    @classmethod
+    def compare_images(cls, ref_image: np.ndarray, est_image: np.ndarray, lpips_fn: LPIPS) \
+            -> HyperNeRFImageComparison:
+        _, pnsr_score, lpips_score = compare_images(ref_image, est_image, lpips_fn=lpips_fn)
+
+        # MS_SSIM expects images in NCHW format.
+        ref_image_nchw = (ref_image / 255.).transpose((2, 0, 1)).reshape((1, 3, *ref_image.shape[:2]))
+        est_image_nchw = (est_image / 255.).transpose((2, 0, 1)).reshape((1, 3, *est_image.shape[:2]))
+
+        ms_ssim_score = ms_ssim(
+            torch.from_numpy(ref_image_nchw),
+            torch.from_numpy(est_image_nchw),
+            data_range=1.0,
+            size_average=True
+        ).item()
+
+        return HyperNeRFImageComparison(ms_ssim=ms_ssim_score, psnr=pnsr_score, lpips=lpips_score)
 
     @classmethod
     def _gather_profiling_results(cls, config: HyperNeRFExperimentConfig):
@@ -1682,10 +1725,10 @@ class HyperNeRFExperiments:
 
             results = HyperNeRFRenderResult.load_many(metrics_path)
             summaries = {
-                'ssim': MeanSummary(),
+                'ms_ssim': MeanSummary(),
                 'psnr': MeanSummary(),
                 'lpips': MeanSummary(),
-                'ssim_masked': MeanSummary(),
+                'ms_ssim_masked': MeanSummary(),
                 'psnr_masked': MeanSummary(),
                 'lpips_masked': MeanSummary(),
             }
@@ -1694,25 +1737,30 @@ class HyperNeRFExperiments:
                 assert result.sequence_name == sequence_name, \
                     f"Loaded wrong result dict for sequence {sequence_name} (got {result.sequence_name})."
 
-                if np.isnan(result.ssim_masked) or np.isnan(result.psnr_masked) or np.isnan(result.lpips_masked):
+                if (np.isnan(result.metrics_masked.ms_ssim) or np.isnan(result.metrics_masked.psnr) or
+                        np.isnan(result.metrics_masked.lpips)):
                     logging.debug(f"Skipping frame {i:,d} of {sequence_name} due to NaNs...")
                     continue
 
-                summaries['ssim'].update(result.ssim)
-                summaries['psnr'].update(result.psnr)
-                summaries['lpips'].update(result.lpips)
-                summaries['ssim_masked'].update(result.ssim_masked)
-                summaries['psnr_masked'].update(result.psnr_masked)
-                summaries['lpips_masked'].update(result.lpips_masked)
+                summaries['ms_ssim'].update(result.metrics.ms_ssim)
+                summaries['psnr'].update(result.metrics.psnr)
+                summaries['lpips'].update(result.metrics.lpips)
+                summaries['ms_ssim_masked'].update(result.metrics_masked.ms_ssim)
+                summaries['psnr_masked'].update(result.metrics_masked.psnr)
+                summaries['lpips_masked'].update(result.metrics_masked.lpips)
 
             data_rows[sequence_name] = HyperNeRFRenderResult(
                 sequence_name=sequence_name,
-                ssim=summaries['ssim'].mean,
-                psnr=summaries['psnr'].mean,
-                lpips=summaries['lpips'].mean,
-                ssim_masked=summaries['ssim_masked'].mean,
-                psnr_masked=summaries['psnr_masked'].mean,
-                lpips_masked=summaries['lpips_masked'].mean,
+                metrics=HyperNeRFImageComparison(
+                    ms_ssim=summaries['ms_ssim'].mean,
+                    psnr=summaries['psnr'].mean,
+                    lpips=summaries['lpips'].mean
+                ),
+                metrics_masked=HyperNeRFImageComparison(
+                    ms_ssim=summaries['ms_ssim_masked'].mean,
+                    psnr=summaries['psnr_masked'].mean,
+                    lpips=summaries['lpips_masked'].mean
+                )
             )
 
         return data_rows
@@ -1733,12 +1781,12 @@ class HyperNeRFExperiments:
                     profiling_result['frames_per_minute'],
                     profiling_result['file_size_mb'],
                     profiling_result['vram_gb'],
-                    rendering_result.ssim,
-                    rendering_result.psnr,
-                    rendering_result.lpips,
-                    rendering_result.ssim_masked,
-                    rendering_result.psnr_masked,
-                    rendering_result.lpips_masked,
+                    rendering_result.metrics.ms_ssim,
+                    rendering_result.metrics.psnr,
+                    rendering_result.metrics.lpips,
+                    rendering_result.metrics_masked.ms_ssim,
+                    rendering_result.metrics_masked.psnr,
+                    rendering_result.metrics_masked.lpips,
                 )],
                 dtype=[
                     ('sequence_name', 'U16'),
@@ -1746,10 +1794,10 @@ class HyperNeRFExperiments:
                     ('frames_per_minute', float),
                     ('file_size_mb', float),
                     ('vram_gb', float),
-                    ('ssim', float),
+                    ('ms_ssim', float),
                     ('psnr', float),
                     ('lpips', float),
-                    ('ssim_masked', float),
+                    ('ms_ssim_masked', float),
                     ('psnr_masked', float),
                     ('lpips_masked', float),
                 ]
@@ -1786,10 +1834,10 @@ class HyperNeRFExperiments:
             'frames_per_minute': 'Frames Per Minute',
             'file_size_mb': 'Storage (MB)',
             'vram_gb': 'VRAM (GB)',
-            'ssim': 'SSIM',
+            'ms_ssim': 'MS-SSIM',
             'psnr': 'PSNR',
             'lpips': 'LPIPS',
-            'ssim_masked': r'SSIM$^\dagger$',
+            'ms_ssim_masked': r'MS-SSIM$^\dagger$',
             'psnr_masked': r'PSNR$^\dagger$',
             'lpips_masked': r'LPIPS$^\dagger$',
         }
@@ -1809,12 +1857,12 @@ class HyperNeRFExperiments:
             'Frames Per Minute': "{:.0f}".format,
             'Storage (MB)': "{:.0f}".format,
             'VRAM (GB)': "{:.1f}".format,
-            'SSIM': "{:.3f}".format,
+            'MS-SSIM': "{:.3f}".format,
             'PSNR': "{:.1f}".format,
             'LPIPS': "{:.3f}".format,
-            'SSIM$^\dagger$': "{:.3f}".format,
-            'PSNR$^\dagger$': "{:.1f}".format,
-            'LPIPS$^\dagger$': "{:.3f}".format,
+            r'MS-SSIM$^\dagger$': "{:.3f}".format,
+            r'PSNR$^\dagger$': "{:.1f}".format,
+            r'LPIPS$^\dagger$': "{:.3f}".format,
         }
         results.to_latex(latex_path, formatters=formatters)
 

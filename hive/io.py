@@ -334,7 +334,7 @@ class COLMAPProcessor:
                 f"Another potential fix is to try increase the quality setting, e.g. add `--quality medium` to your command in the terminal. "
                 f"Otherwise, it is likely due to the video not having the camera movement that COLMAP needs.")
 
-        logging.info(f"Reading COLMAP model from {sparse_recon_path}...")
+        logging.debug(f"Reading COLMAP model from {sparse_recon_path}...")
         cameras, images, points3d = read_model(sparse_recon_path, ext=".bin")
 
         return cameras, images, points3d
@@ -358,7 +358,7 @@ class COLMAPProcessor:
         intrinsic[1, 1] = f
         intrinsic[0, 2] = cx
         intrinsic[1, 2] = cy
-        logging.info("Read intrinsic parameters.")
+        logging.debug("Read intrinsic parameters.")
 
         extrinsic = dict()
 
@@ -409,7 +409,7 @@ class COLMAPProcessor:
             extrinsic = np.asarray([extrinsic[index] for index in sorted(extrinsic.keys())])
             extrinsic = Trajectory(extrinsic)
 
-        logging.info(f"Read extrinsic parameters for {len(extrinsic)} frames.")
+        logging.debug(f"Read extrinsic parameters for {len(extrinsic)} frames.")
 
         return intrinsic, extrinsic
 
