@@ -3,6 +3,7 @@ HIVE is a program for creating 3D free-viewpoint video from RGB video.
 
 ![demo of 3D video](images/demo.gif)
 
+A live demo can be viewed at [anthonydickson.github.io/HIVE_Renderer](https://anthonydickson.github.io/HIVE_Renderer).
 # Getting Started
 The following instructions assume you are using Docker to run HIVE.
 
