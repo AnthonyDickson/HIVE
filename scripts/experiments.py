@@ -532,7 +532,7 @@ class LLFFAdaptor(VideoAdaptorBase):
         if overwrite_ok or len(os.listdir(per_camera_frames_path)) != len(self.video_filenames):
             for camera_feed in self.video_indices:
                 frame = self.get_frame(index=0, camera_feed=camera_feed)
-                frame_filename = HiveDataset.index_to_filename(camera_feed, '.jpg')
+                frame_filename = HiveDataset.index_to_filename(camera_feed, 'jpg')
                 Image.fromarray(frame).save(os.path.join(per_camera_frames_path, frame_filename))
 
         cm = COLMAPProcessor(per_camera_frames_path,
