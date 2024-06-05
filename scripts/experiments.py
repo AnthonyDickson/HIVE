@@ -2149,7 +2149,6 @@ class Experiments:
                         timing['load_dataset']['total'],
                         timing['background_reconstruction']['total'],
                         timing['foreground_reconstruction']['total'],
-                        timing['foreground_reconstruction']['total'],
                         timing['scene_centering'],
                         timing['mesh_export'],
                         timing['mesh_compression']['total'],
